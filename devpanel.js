@@ -60,22 +60,33 @@ function stopBackend() {
   if (processes.backend.proc) {
     processes.backend.proc.kill('SIGTERM');
     processes.backend.proc = null;
+    // Also kill any remaining processes on the port (e.g., uvicorn --reload children)
+    setTimeout(() => {
+      getAllPortPids(8001).forEach(pid => {
+        try { execSync('kill -9 ' + pid, { timeout: 1000 }); } catch(e) {}
+      });
+      broadcastStatus();
+    }, 600);
     log('backend', '⏹ 已停止');
     broadcastStatus();
     return { ok: true };
   }
-  const pid = getPortPid(8001);
-  if (!pid) return { ok: false, msg: '未运行' };
-  try { execSync('kill ' + pid, { timeout: 2000 }); } catch(e) { /* ignore */ }
+  const pids = getAllPortPids(8001);
+  if (pids.length === 0) return { ok: false, msg: '未运行' };
+  pids.forEach(pid => {
+    try { execSync('kill -9 ' + pid, { timeout: 2000 }); } catch(e) { /* ignore */ }
+  });
   log('backend', '⏹ 已停止外部进程，等待端口释放…');
   // Poll until port is actually released, then broadcast final stopped state
   let attempts = 0;
   const timer = setInterval(() => {
     attempts++;
-    if (!isPortListening(8001) || attempts >= 10) {
+    if (!isPortListening(8001) || attempts >= 20) {
       clearInterval(timer);
       if (!isPortListening(8001)) {
         log('backend', '✅ 端口 8001 已释放');
+      } else {
+        log('backend', '⚠ 端口释放超时，请手动检查');
       }
       broadcastStatus();
     }
@@ -106,6 +117,14 @@ function getPortPid(port) {
     const out = execSync('lsof -i :' + port + ' -sTCP:LISTEN -t 2>/dev/null', { encoding: 'utf8', timeout: 2000 }).trim();
     return out.split('\n')[0] || null;
   } catch(e) { return null; }
+}
+
+// Returns ALL pids listening on a port (handles uvicorn --reload parent+child)
+function getAllPortPids(port) {
+  try {
+    const out = execSync('lsof -i :' + port + ' -sTCP:LISTEN -t 2>/dev/null', { encoding: 'utf8', timeout: 2000 }).trim();
+    return out.split('\n').filter(Boolean);
+  } catch(e) { return []; }
 }
 
 function getStatus() {

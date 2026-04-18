@@ -125,6 +125,20 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         all_participant_names += [get_thinker(tid).get("name", tid) for tid in thinker_ids]
         all_participant_names += human_names
 
+        # ── 确保参与者名字唯一（避免 AutoGen uniqueness 错误）──
+        def _dedup_names(names: list[str]) -> list[str]:
+            seen: dict[str, int] = {}
+            result = []
+            for n in names:
+                if n not in seen:
+                    seen[n] = 0
+                    result.append(n)
+                else:
+                    seen[n] += 1
+                    result.append(f"{n}{seen[n]}")
+            return result
+        all_participant_names = _dedup_names(all_participant_names)
+
         moderator = create_moderator(
             model_client=moderator_client,
             topic=topic.title + " - " + topic.description,
@@ -142,13 +156,25 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             for tid in thinker_ids
         ]
 
-        humans = [create_human_proxy(name) for name in human_names]
+        humans = [create_human_proxy(name) for name in dict.fromkeys(human_names)]
+
+        # ── 去重：确保没有同名 Agent（AutoGen 要求名字唯一）──
+        seen_names: set[str] = set()
+        unique_agents = []
+        for agent in [moderator] + characters + thinker_agents + humans:
+            if agent.name not in seen_names:
+                seen_names.add(agent.name)
+                unique_agents.append(agent)
+
+        moderator_agent = unique_agents[0]
+        ai_agents = [a for a in unique_agents if a in ([moderator] + characters + thinker_agents)]
+        human_agents = [a for a in unique_agents if a in humans]
 
         # 创建讨论团队
         team = create_discussion_team(
-            moderator=moderator,
-            characters=characters + thinker_agents,
-            humans=humans,
+            moderator=moderator_agent,
+            characters=[a for a in ai_agents if a is not moderator_agent],
+            humans=human_agents,
             selector_client=moderator_client,
         )
 
@@ -158,8 +184,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         # 创建 Floor Manager
         floor_manager = FloorManager(
             team=team,
-            ai_agents=[moderator] + characters + thinker_agents,
-            human_agents=humans,
+            ai_agents=ai_agents,
+            human_agents=human_agents,
             safety_filter=safety_filter,
         )
 
