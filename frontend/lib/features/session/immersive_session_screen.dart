@@ -34,7 +34,8 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<ImmersiveSessionScreen> createState() => _ImmersiveSessionScreenState();
+  ConsumerState<ImmersiveSessionScreen> createState() =>
+      _ImmersiveSessionScreenState();
 }
 
 class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
@@ -45,7 +46,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   final FocusNode _keyboardFocusNode = FocusNode();
 
   // 讨论状态
-  List<ChatMessage> _messages = [];
+  final List<ChatMessage> _messages = [];
   String _currentSpeaker = '';
   bool _isMyTurn = false;
   String _statusText = '连接中...';
@@ -68,7 +69,37 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   // 动画
   late AnimationController _candleController;
   late AnimationController _glowController;
+  late AnimationController _micController;
   List<CandleParticle>? _particles;
+
+  // 角色显示名 → Edge TTS 音色映射
+  static const _nameToVoice = <String, String>{
+    '李老师': 'zh-CN-XiaoxiaoNeural',   // 温暖女声·教师
+    '小探': 'zh-CN-YunxiNeural',        // 少年男声·探索
+    '小疑': 'zh-CN-YunzeNeural',        // 深沉男声·质疑
+    '小和': 'zh-CN-XiaoyiNeural',       // 柔和女声·和平
+    '小说': 'zh-CN-XiaohanNeural',      // 活泼女声·讲故事
+    '小明': 'zh-CN-YunjieNeural',       // 阳光男声·乐观
+    '小思': 'zh-CN-YunxiaNeural',       // 明亮男声·提问
+    '小理': 'zh-CN-YunyangNeural',      // 正式男声·理性
+    '小爱': 'zh-CN-XiaohanNeural',      // 温柔女声·共情
+    '小想': 'zh-CN-YunfengNeural',      // 稳健男声·创新
+    '小行': 'zh-CN-YunjianNeural',      // 强劲男声·务实
+  };
+
+  // 每次会话分配的参与者音色表（用于思想家的哈希分配）
+  final Map<String, String> _voiceMap = {};
+
+  // Edge TTS 男声列表（供思想家轮转使用）
+  static const _maleThinkerVoices = <String>[
+    'zh-CN-YunyangNeural',
+    'zh-CN-YunxiNeural',
+    'zh-CN-YunzeNeural',
+    'zh-CN-YunjieNeural',
+    'zh-CN-YunfengNeural',
+    'zh-CN-YunjianNeural',
+    'zh-CN-YunxiaNeural',
+  ];
 
   @override
   void initState() {
@@ -80,6 +111,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _glowController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
+    );
+    _micController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
     );
     _initVoiceServices();
     _startDiscussion();
@@ -170,28 +205,45 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
     // 旧角色模板的头像映射
     const templateAvatarMap = {
-      'moderator': '👩‍🏫', '李老师': '👩‍🏫',
-      'explorer': '🔍', '小探': '🔍',
-      'skeptic': '🤔', '小疑': '🤔',
-      'peacemaker': '🕊️', '小和': '🕊️',
-      'storyteller': '📖', '小说': '📖',
-      'optimist': '☀️', '小明': '☀️',
-      'questioner': '🤨', '小思': '🤨',
-      'rationalist': '🧮', '小理': '🧮',
-      'empath': '💗', '小爱': '💗',
-      'innovator': '💡', '小想': '💡',
-      'pragmatist': '🔧', '小行': '🔧',
+      'moderator': '👩‍🏫',
+      '李老师': '👩‍🏫',
+      'explorer': '🔍',
+      '小探': '🔍',
+      'skeptic': '🤔',
+      '小疑': '🤔',
+      'peacemaker': '🕊️',
+      '小和': '🕊️',
+      'storyteller': '📖',
+      '小说': '📖',
+      'optimist': '☀️',
+      '小明': '☀️',
+      'questioner': '🤨',
+      '小思': '🤨',
+      'rationalist': '🧮',
+      '小理': '🧮',
+      'empath': '💗',
+      '小爱': '💗',
+      'innovator': '💡',
+      '小想': '💡',
+      'pragmatist': '🔧',
+      '小行': '🔧',
     };
 
-    // 为所有参与者分配头像
+    // 为所有参与者分配头像并建立音色映射
+    int thinkerVoiceIndex = 0;
     for (final name in names) {
       if (name == widget.humanName) {
         avatars[name] = '🙋';
+        // 人类不需要 TTS 音色
       } else if (templateAvatarMap.containsKey(name)) {
         avatars[name] = templateAvatarMap[name]!;
+        _voiceMap.putIfAbsent(name, () => _nameToVoice[name] ?? 'zh-CN-XiaoxiaoNeural');
       } else {
-        // 思想家或动态参与者 - 使用通用思想家头像
+        // 思想家或动态参与者 - 轮转分配男声
         avatars[name] = '🧠';
+        _voiceMap.putIfAbsent(name,
+            () => _maleThinkerVoices[thinkerVoiceIndex % _maleThinkerVoices.length]);
+        thinkerVoiceIndex++;
       }
     }
 
@@ -224,14 +276,16 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           final msgType = data['msg_type'] ?? 'text';
 
           setState(() {
-            _messages.add(ChatMessage(source: source, content: content, type: msgType));
+            _messages.add(
+                ChatMessage(source: source, content: content, type: msgType));
             _centerMessage = content;
             _centerSpeaker = source;
           });
 
           // 如果是 AI 角色/主持人消息，自动 TTS 朗读
           if (msgType != 'system' && source != widget.humanName) {
-            _ttsService.speak(content);
+            final voice = _voiceMap[source];
+            _ttsService.speak(content, voice: voice);
           }
 
           _buildParticipants();
@@ -246,8 +300,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             _isMyTurn = isHuman && speaker == widget.humanName;
             _hasRaisedHand = false;
             if (_isMyTurn) {
-              _statusText = '轮到你发言了！';
+              _statusText = '轮到你！按空格键发言 或 输入文字';
               _glowController.repeat(reverse: true);
+              _keyboardFocusNode.requestFocus();
             } else if (isHuman) {
               _statusText = '$speaker 正在发言...';
               _glowController.stop();
@@ -290,9 +345,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case WsEventType.humanInputRequested:
         setState(() {
           _isMyTurn = true;
-          _statusText = '轮到你发言了！';
+          _statusText = '轮到你！按空格键发言 或 输入文字';
           _glowController.repeat(reverse: true);
         });
+        _keyboardFocusNode.requestFocus();
       case WsEventType.error:
         final data = event.data;
         final errMsg = data?['message'] ?? data?['original_error'] ?? '未知错误';
@@ -307,9 +363,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case WsEventType.ended:
         final endedWithError = _lastErrorMessage != null;
         setState(() {
-          _statusText = endedWithError
-              ? '会话已中断: ${_lastErrorMessage!}'
-              : '讨论已结束';
+          _statusText =
+              endedWithError ? '会话已中断: ${_lastErrorMessage!}' : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
         });
@@ -352,14 +407,32 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   void _onPttStart() {
     setState(() => _isRecording = true);
+    _micController.repeat(reverse: true);
     _wsClient.sendPushToTalkStart(speaker: widget.humanName);
     _asrService.startListening();
   }
 
   void _onPttEnd() {
     setState(() => _isRecording = false);
+    _micController.stop();
+    _micController.reset();
     _wsClient.sendPushToTalkEnd(speaker: widget.humanName);
     _asrService.stopListening();
+  }
+
+  // ── 跳过本轮发言 ────────────────────────────────────────────────────────────
+
+  void _onSkipTurn() {
+    _wsClient.sendHumanInput(speaker: widget.humanName, content: '（跳过）');
+    setState(() {
+      _messages.add(ChatMessage(
+        source: widget.humanName,
+        content: '（跳过）',
+        type: 'text',
+      ));
+      _isMyTurn = false;
+      _statusText = '等待其他人发言...';
+    });
   }
 
   // ── 打断 ────────────────────────────────────────────────────────────────────
@@ -382,7 +455,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       if (_isMyTurn && !_isRecording) {
         _onPttStart();
       }
-    } else if (event is KeyUpEvent && event.logicalKey == LogicalKeyboardKey.space) {
+    } else if (event is KeyUpEvent &&
+        event.logicalKey == LogicalKeyboardKey.space) {
       if (_isRecording) {
         _onPttEnd();
       }
@@ -399,6 +473,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _keyboardFocusNode.dispose();
     _candleController.dispose();
     _glowController.dispose();
+    _micController.dispose();
     super.dispose();
   }
 
@@ -412,7 +487,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         title: const Row(children: [
           Icon(Icons.error_outline, color: Colors.red, size: 22),
           SizedBox(width: 8),
-          Text('无法开始讨论', style: TextStyle(color: Color(0xFFF5DEB3), fontSize: 16)),
+          Text('无法开始讨论',
+              style: TextStyle(color: Color(0xFFF5DEB3), fontSize: 16)),
         ]),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -443,7 +519,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               Navigator.of(ctx).pop();
               Navigator.of(context).pushReplacementNamed('/settings');
             },
-            child: const Text('前往设置', style: TextStyle(color: Color(0xFFD4A017))),
+            child:
+                const Text('前往设置', style: TextStyle(color: Color(0xFFD4A017))),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
@@ -454,7 +531,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
   }
 
-  void _showChatHistory() {    showModalBottomSheet(
+  void _showChatHistory() {
+    showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.studyWall.withValues(alpha: 0.95),
@@ -486,7 +564,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       count: 20,
     );
 
-    final canInterrupt = !_isMyTurn && _currentSpeaker.isNotEmpty && !_hasRaisedHand;
+    final canInterrupt =
+        !_isMyTurn && _currentSpeaker.isNotEmpty && !_hasRaisedHand;
 
     return KeyboardListener(
       focusNode: _keyboardFocusNode,
@@ -532,16 +611,23 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               ),
             ),
 
-            // ── 中心发言气泡 ──
+            // ── 底部字幕条 ──
             if (_centerSpeaker.isNotEmpty && _centerMessage.isNotEmpty)
-              Center(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(horizontal: tableRadius * 0.3),
-                  child: SpeakingBubble(
-                    speaker: _centerSpeaker,
-                    content: _centerMessage,
-                    speakerColor: AppColors.getParticipantColor(_centerSpeaker),
-                    isVisible: true,
+              Positioned(
+                bottom: 100,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.52,
+                    ),
+                    child: SpeakingBubble(
+                      speaker: _centerSpeaker,
+                      content: _centerMessage,
+                      speakerColor: AppColors.getParticipantColor(_centerSpeaker),
+                      isVisible: true,
+                    ),
                   ),
                 ),
               ),
@@ -560,7 +646,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
-                            color: AppColors.amberGold.withValues(alpha: glowAlpha),
+                            color: AppColors.amberGold
+                                .withValues(alpha: glowAlpha),
                             blurRadius: 40,
                             spreadRadius: 10,
                           ),
@@ -580,7 +667,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               right: 0,
               child: SafeArea(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
@@ -594,7 +682,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   child: Row(
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.arrow_back, color: AppColors.warmWhite),
+                        icon: const Icon(Icons.arrow_back,
+                            color: AppColors.warmWhite),
                         onPressed: () => Navigator.of(context).pop(),
                       ),
                       Expanded(
@@ -603,14 +692,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                           children: [
                             Text(
                               widget.topic.title,
-                              style: AppTheme.calligraphyStyleDark(fontSize: 16),
+                              style:
+                                  AppTheme.calligraphyStyleDark(fontSize: 16),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
                             Text(
                               _statusText,
                               style: TextStyle(
-                                color: _isMyTurn ? AppColors.amberGold : AppColors.warmGray,
+                                color: _isMyTurn
+                                    ? AppColors.amberGold
+                                    : AppColors.warmGray,
                                 fontSize: 12,
                               ),
                             ),
@@ -618,7 +710,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         ),
                       ),
                       IconButton(
-                        icon: const Icon(Icons.history, color: AppColors.warmGray),
+                        icon: const Icon(Icons.history,
+                            color: AppColors.warmGray),
                         onPressed: _showChatHistory,
                       ),
                     ],
@@ -626,6 +719,54 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 ),
               ),
             ),
+
+            // ── 录音霓虹麦克风指示 ──
+            if (_isRecording)
+              Positioned(
+                bottom: 130,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: AnimatedBuilder(
+                    animation: _micController,
+                    builder: (context, child) {
+                      final pulse = 0.6 + _micController.value * 0.4;
+                      return Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: const Color(0xFF0D1B2A),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF00FFCC)
+                                  .withValues(alpha: 0.5 * pulse),
+                              blurRadius: 24 * pulse,
+                              spreadRadius: 6 * pulse,
+                            ),
+                            BoxShadow(
+                              color: const Color(0xFF00BFFF)
+                                  .withValues(alpha: 0.3 * pulse),
+                              blurRadius: 40 * pulse,
+                              spreadRadius: 10 * pulse,
+                            ),
+                          ],
+                          border: Border.all(
+                            color: const Color(0xFF00FFCC)
+                                .withValues(alpha: 0.8 * pulse),
+                            width: 2,
+                          ),
+                        ),
+                        child: const Icon(
+                          Icons.mic,
+                          color: Color(0xFF00FFCC),
+                          size: 32,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
 
             // ── 底部控制栏 ──
             Positioned(
@@ -643,6 +784,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 canInterrupt: canInterrupt,
                 hasRaisedHand: _hasRaisedHand,
                 onInterrupt: _onInterrupt,
+                onSkipTurn: _isMyTurn ? _onSkipTurn : null,
               ),
             ),
           ],

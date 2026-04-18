@@ -1,6 +1,7 @@
 /// 语音服务抽象接口和工厂
 ///
 /// 定义 TTS 和 ASR 的接口契约，以及基于配置创建具体实现的工厂方法。
+library;
 
 import 'browser_speech.dart';
 import 'server_speech.dart';
@@ -42,7 +43,8 @@ abstract class AsrService {
 }
 
 /// 语音服务工厂：根据配置创建 TTS/ASR 实例
-TtsService createTtsService(String providerId, {String serverUrl = 'http://localhost:8001'}) {
+TtsService createTtsService(String providerId,
+    {String serverUrl = 'http://localhost:8001'}) {
   switch (providerId) {
     case 'browser':
       return BrowserTtsService();
@@ -55,7 +57,8 @@ TtsService createTtsService(String providerId, {String serverUrl = 'http://local
   }
 }
 
-AsrService createAsrService(String providerId, {String serverUrl = 'http://localhost:8001'}) {
+AsrService createAsrService(String providerId,
+    {String serverUrl = 'http://localhost:8001'}) {
   switch (providerId) {
     case 'browser':
       return BrowserAsrService();

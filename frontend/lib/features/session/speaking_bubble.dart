@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../theme/app_colors.dart';
-
-/// 发言气泡 - 从发言者位置弹出
+/// 底部字幕条 - 悬浮在屏幕下方，半透明，不遮挡角色头像
 class SpeakingBubble extends StatelessWidget {
   final String speaker;
   final String content;
@@ -21,74 +19,77 @@ class SpeakingBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedOpacity(
       opacity: isVisible ? 1.0 : 0.0,
-      duration: const Duration(milliseconds: 500),
-      child: AnimatedScale(
-        scale: isVisible ? 1.0 : 0.8,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic,
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 280, maxHeight: 120),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          decoration: BoxDecoration(
-            color: AppColors.parchment.withValues(alpha: 0.95),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: speakerColor.withValues(alpha: 0.6),
-              width: 2,
+      duration: const Duration(milliseconds: 400),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 发言者名称标签 (左对齐浮标)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+            decoration: BoxDecoration(
+              color: speakerColor.withValues(alpha: 0.85),
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(8),
+                topRight: Radius.circular(8),
+              ),
             ),
-            boxShadow: [
-              BoxShadow(
-                color: speakerColor.withValues(alpha: 0.15),
-                blurRadius: 12,
-                spreadRadius: 2,
-              ),
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.2),
-                blurRadius: 8,
-                offset: const Offset(0, 3),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: speakerColor,
-                      shape: BoxShape.circle,
-                    ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
                   ),
-                  const SizedBox(width: 6),
-                  Text(
-                    speaker,
-                    style: TextStyle(
-                      color: speakerColor,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  speaker,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // 字幕文本区
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: const BorderRadius.only(
+                bottomLeft: Radius.circular(10),
+                bottomRight: Radius.circular(10),
+                topRight: Radius.circular(10),
+              ),
+            ),
+            child: Text(
+              content,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                height: 1.5,
+                shadows: [
+                  Shadow(
+                    color: Colors.black,
+                    blurRadius: 4,
+                    offset: Offset(0, 1),
                   ),
                 ],
               ),
-              const SizedBox(height: 6),
-              Text(
-                content,
-                style: TextStyle(
-                  color: AppColors.scrollTitle,
-                  fontSize: 14,
-                  height: 1.4,
-                ),
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
+              textAlign: TextAlign.center,
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-        ),
+        ],
       ),
     );
   }

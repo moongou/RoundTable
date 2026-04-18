@@ -1,6 +1,7 @@
 /// RoundTable 扩展色板
 ///
 /// 提供语义化颜色常量，用于沉浸式 UI 的发光、玻璃拟态、强调等效果。
+library;
 
 import 'package:flutter/material.dart';
 

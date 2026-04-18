@@ -4,6 +4,7 @@
 ///
 /// 注意：此文件使用 dart:html（仅限 Flutter Web）。
 /// 在非 Web 平台，此文件将无法编译，需要条件导入替代实现。
+library;
 
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
@@ -63,7 +64,8 @@ class ServerTtsService implements TtsService {
       _audioElement!.onError.listen((_) {
         _isSpeaking = false;
         html.Url.revokeObjectUrl(url);
-        if (!completer.isCompleted) completer.completeError('TTS playback error');
+        if (!completer.isCompleted)
+          completer.completeError('TTS playback error');
       });
 
       await _audioElement!.play();
@@ -92,7 +94,8 @@ class ServerAsrService implements AsrService {
   final String serverUrl;
   final Dio _dio;
   bool _isListening = false;
-  final StreamController<String> _controller = StreamController<String>.broadcast();
+  final StreamController<String> _controller =
+      StreamController<String>.broadcast();
   html.MediaRecorder? _mediaRecorder;
   final List<html.Blob> _chunks = [];
 

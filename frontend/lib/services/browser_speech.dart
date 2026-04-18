@@ -4,6 +4,7 @@
 /// 通过 dart:js 和 dart:html 在 Flutter Web 中调用。
 ///
 /// 注意：SpeechRecognition 仅 Chrome/Edge 完全支持。
+library;
 
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
@@ -71,7 +72,8 @@ class BrowserTtsService implements TtsService {
 class BrowserAsrService implements AsrService {
   bool _isListening = false;
   bool _isAvailable = false;
-  final StreamController<String> _controller = StreamController<String>.broadcast();
+  final StreamController<String> _controller =
+      StreamController<String>.broadcast();
   js.JsObject? _recognition;
 
   BrowserAsrService() {
@@ -81,8 +83,8 @@ class BrowserAsrService implements AsrService {
   void _checkAvailability() {
     try {
       final context = js.context;
-      _isAvailable =
-          context.hasProperty('webkitSpeechRecognition') || context.hasProperty('SpeechRecognition');
+      _isAvailable = context.hasProperty('webkitSpeechRecognition') ||
+          context.hasProperty('SpeechRecognition');
     } catch (_) {
       _isAvailable = false;
     }

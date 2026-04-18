@@ -60,8 +60,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       vsync: this,
       duration: const Duration(seconds: 3),
     )..repeat(reverse: true);
-    _pulseAnim = Tween<double>(begin: 0.85, end: 1.0).animate(
-        CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
+    _pulseAnim = Tween<double>(begin: 0.85, end: 1.0)
+        .animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
     _orbCtrl = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 12),
@@ -95,7 +95,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       } catch (_) {}
       setState(() {
         _topics = topicsData.map((t) => Topic.fromJson(t)).toList();
-        _characters = charsData.map((c) => CharacterTemplate.fromJson(c)).toList();
+        _characters =
+            charsData.map((c) => CharacterTemplate.fromJson(c)).toList();
         _thinkers = thinkersData;
         _categories = categoriesData;
         _loading = false;
@@ -134,8 +135,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           topic: _selectedTopic!,
           characterIds: _selectedCharacterIds.toList(),
           thinkerIds: _selectedThinkerIds.toList(),
-          humanName:
-              _nameController.text.isEmpty ? '同学' : _nameController.text,
+          humanName: _nameController.text.isEmpty ? '同学' : _nameController.text,
         ),
         transitionsBuilder: (_, a1, a2, child) => FadeTransition(
           opacity: CurvedAnimation(parent: a1, curve: Curves.easeIn),
@@ -221,16 +221,18 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                       setState(() => _selectedCategory = v),
                   onTopicSelected: (t) => setState(() => _selectedTopic = t),
                   onCharacterToggled: (id) => setState(() {
-                    if (_selectedCharacterIds.contains(id))
+                    if (_selectedCharacterIds.contains(id)) {
                       _selectedCharacterIds.remove(id);
-                    else
+                    } else {
                       _selectedCharacterIds.add(id);
+                    }
                   }),
                   onThinkerToggled: (id) => setState(() {
-                    if (_selectedThinkerIds.contains(id))
+                    if (_selectedThinkerIds.contains(id)) {
                       _selectedThinkerIds.remove(id);
-                    else
+                    } else {
                       _selectedThinkerIds.add(id);
+                    }
                   }),
                   onStart: _startDiscussion,
                 )
@@ -249,16 +251,18 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                       setState(() => _selectedCategory = v),
                   onTopicSelected: (t) => setState(() => _selectedTopic = t),
                   onCharacterToggled: (id) => setState(() {
-                    if (_selectedCharacterIds.contains(id))
+                    if (_selectedCharacterIds.contains(id)) {
                       _selectedCharacterIds.remove(id);
-                    else
+                    } else {
                       _selectedCharacterIds.add(id);
+                    }
                   }),
                   onThinkerToggled: (id) => setState(() {
-                    if (_selectedThinkerIds.contains(id))
+                    if (_selectedThinkerIds.contains(id)) {
                       _selectedThinkerIds.remove(id);
-                    else
+                    } else {
                       _selectedThinkerIds.add(id);
+                    }
                   }),
                   onStart: _startDiscussion,
                 ),
@@ -323,9 +327,7 @@ class _TopBar extends StatelessWidget {
               tooltip: '后台服务',
               onTap: onDevPanel),
           _IconBtn(
-              icon: Icons.settings_outlined,
-              tooltip: '设置',
-              onTap: onSettings),
+              icon: Icons.settings_outlined, tooltip: '设置', onTap: onSettings),
         ],
       ),
     );
@@ -435,7 +437,8 @@ class _WideLayout extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final moderator = characters.where((c) => c.id == 'moderator').firstOrNull;
-    final selectableChars = characters.where((c) => c.id != 'moderator').toList();
+    final selectableChars =
+        characters.where((c) => c.id != 'moderator').toList();
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -787,8 +790,7 @@ class _TopicsContent extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Text('+${topics.length - 28} 个话题',
-                style: const TextStyle(
-                    color: _kTextSecondary, fontSize: 11)),
+                style: const TextStyle(color: _kTextSecondary, fontSize: 11)),
           ),
       ],
     );
@@ -816,9 +818,7 @@ class _CatChip extends StatelessWidget {
             color: selected ? _kNeonCyan.withValues(alpha: 0.15) : _kCard,
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
-              color: selected
-                  ? _kNeonCyan.withValues(alpha: 0.8)
-                  : _kBorder,
+              color: selected ? _kNeonCyan.withValues(alpha: 0.8) : _kBorder,
               width: selected ? 1.5 : 1,
             ),
           ),
@@ -883,20 +883,17 @@ class _TopicRowState extends State<_TopicRow> {
                 child: Text(
                   widget.topic.title,
                   style: TextStyle(
-                    color:
-                        widget.isSelected ? _kNeonCyan : _kTextPrimary,
+                    color: widget.isSelected ? _kNeonCyan : _kTextPrimary,
                     fontSize: 13,
-                    fontWeight: widget.isSelected
-                        ? FontWeight.w600
-                        : FontWeight.normal,
+                    fontWeight:
+                        widget.isSelected ? FontWeight.w600 : FontWeight.normal,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               if (widget.isSelected)
-                const Icon(Icons.check_circle,
-                    color: _kNeonCyan, size: 14),
+                const Icon(Icons.check_circle, color: _kNeonCyan, size: 14),
             ],
           ),
         ),
@@ -995,9 +992,8 @@ class _CharChipState extends State<_CharChip> {
                 style: TextStyle(
                   color: widget.isSelected ? _kNeonViolet : _kTextPrimary,
                   fontSize: 12,
-                  fontWeight: widget.isSelected
-                      ? FontWeight.w600
-                      : FontWeight.normal,
+                  fontWeight:
+                      widget.isSelected ? FontWeight.w600 : FontWeight.normal,
                 ),
               ),
               if (widget.isSelected) ...[
@@ -1109,9 +1105,8 @@ class _ThinkerChipState extends State<_ThinkerChip> {
                 style: TextStyle(
                   color: widget.isSelected ? _kNeonGold : _kTextPrimary,
                   fontSize: 11,
-                  fontWeight: widget.isSelected
-                      ? FontWeight.w600
-                      : FontWeight.normal,
+                  fontWeight:
+                      widget.isSelected ? FontWeight.w600 : FontWeight.normal,
                 ),
               ),
             ],
@@ -1172,8 +1167,8 @@ class _CenterTable extends StatelessWidget {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: (canStart ? _kNeonCyan : _kBorder)
-                      .withValues(alpha: 0.1),
+                  color:
+                      (canStart ? _kNeonCyan : _kBorder).withValues(alpha: 0.1),
                   width: 1,
                 ),
               ),
@@ -1255,13 +1250,11 @@ class _StartButtonState extends State<_StartButton> {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: ready
-                      ? _kNeonCyan.withValues(
-                          alpha: _hovered ? 0.22 : 0.10)
+                      ? _kNeonCyan.withValues(alpha: _hovered ? 0.22 : 0.10)
                       : _kCard.withValues(alpha: 0.5),
                   border: Border.all(
                     color: ready
-                        ? _kNeonCyan.withValues(
-                            alpha: _hovered ? 1.0 : 0.65)
+                        ? _kNeonCyan.withValues(alpha: _hovered ? 1.0 : 0.65)
                         : _kBorder,
                     width: ready ? 2 : 1,
                   ),
@@ -1279,9 +1272,7 @@ class _StartButtonState extends State<_StartButton> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Icon(
-                      ready
-                          ? Icons.event_seat_rounded
-                          : Icons.chair_outlined,
+                      ready ? Icons.event_seat_rounded : Icons.chair_outlined,
                       color: ready ? _kNeonCyan : _kTextSecondary,
                       size: 26,
                     ),
@@ -1330,7 +1321,8 @@ class _ModeratorBadge extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
       decoration: BoxDecoration(
         color: _kNeonGold.withValues(alpha: 0.12),
-        border: Border.all(color: _kNeonGold.withValues(alpha: 0.65), width: 1.5),
+        border:
+            Border.all(color: _kNeonGold.withValues(alpha: 0.65), width: 1.5),
         borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(color: _kNeonGold.withValues(alpha: 0.20), blurRadius: 18),
@@ -1414,8 +1406,8 @@ class _LoadingView extends StatelessWidget {
         const SizedBox(height: 16),
         const Text(
           '加载中...',
-          style: TextStyle(
-              color: _kTextSecondary, fontSize: 14, letterSpacing: 2),
+          style:
+              TextStyle(color: _kTextSecondary, fontSize: 14, letterSpacing: 2),
         ),
       ],
     );
@@ -1437,8 +1429,8 @@ class _AmbientOrbPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(
           center: Offset(cx * size.width, cy * size.height),
           radius: r * size.width));
-      canvas.drawCircle(Offset(cx * size.width, cy * size.height),
-          r * size.width, paint);
+      canvas.drawCircle(
+          Offset(cx * size.width, cy * size.height), r * size.width, paint);
     }
 
     orb(

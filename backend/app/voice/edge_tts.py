@@ -23,11 +23,20 @@ class EdgeTTSProvider(TTSProvider):
         self.api_key = api_key
 
     async def synthesize(self, text: str, voice: str = "alloy") -> bytes:
-        # Edge TTS 使用 Azure 语音名称，如果传入的是 OpenAI 格式（如 alloy），
-        # 自动转换为默认中文语音
-        tts_voice = voice
-        if voice in ("alloy", "echo", "fable", "onyx", "nova", "shimmer"):
-            tts_voice = "zh-CN-XiaoxiaoNeural"  # 默认中文女声
+        # 如果已经是 Azure 神经语音名称（含 Neural 或以 zh- 开头），直接使用；
+        # 否则从 OpenAI 格式映射到默认中文语音。
+        _openai_to_azure = {
+            "alloy":   "zh-CN-XiaoxiaoNeural",
+            "echo":    "zh-CN-YunyangNeural",
+            "fable":   "zh-CN-YunxiNeural",
+            "onyx":    "zh-CN-YunzeNeural",
+            "nova":    "zh-CN-XiaoyiNeural",
+            "shimmer": "zh-CN-XiaohanNeural",
+        }
+        if "Neural" in voice or voice.startswith("zh-") or voice.startswith("en-"):
+            tts_voice = voice
+        else:
+            tts_voice = _openai_to_azure.get(voice, "zh-CN-XiaoxiaoNeural")
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:

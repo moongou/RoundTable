@@ -68,8 +68,13 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
   void dispose() {
     _serverUrlCtrl.dispose();
     _tavilyKeyCtrl.dispose();
-    for (final c in [..._apiKeyCtrl.values, ..._baseUrlCtrl.values, ..._modelCtrl.values,
-        ..._voiceUrlCtrl.values, ..._voiceKeyCtrl.values]) {
+    for (final c in [
+      ..._apiKeyCtrl.values,
+      ..._baseUrlCtrl.values,
+      ..._modelCtrl.values,
+      ..._voiceUrlCtrl.values,
+      ..._voiceKeyCtrl.values
+    ]) {
       c.dispose();
     }
     super.dispose();
@@ -77,8 +82,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
 
   TextEditingController _pk(ProviderInfo p) =>
       _apiKeyCtrl.putIfAbsent(p.id, () => TextEditingController());
-  TextEditingController _bu(ProviderInfo p) =>
-      _baseUrlCtrl.putIfAbsent(p.id, () => TextEditingController(text: p.baseUrl));
+  TextEditingController _bu(ProviderInfo p) => _baseUrlCtrl.putIfAbsent(
+      p.id, () => TextEditingController(text: p.baseUrl));
   TextEditingController _mc(ProviderInfo p) =>
       _modelCtrl.putIfAbsent(p.id, () => TextEditingController(text: p.model));
   TextEditingController _vu(SpeechProviderInfo p) =>
@@ -170,7 +175,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
       final r = await ref.read(configValidationProvider.future);
       if (!mounted) return;
       final currentConfig = ref.read(currentConfigProvider).valueOrNull;
-      final s = ref.read(localSettingsProvider).valueOrNull ?? const LocalSettings();
+      final s =
+          ref.read(localSettingsProvider).valueOrNull ?? const LocalSettings();
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -195,21 +201,31 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(r?.message ?? '未知错误',
-                        style: const TextStyle(color: Colors.red, fontSize: 12)),
+                        style:
+                            const TextStyle(color: Colors.red, fontSize: 12)),
                   ),
                   const SizedBox(height: 12),
                 ],
-                const Text('当前配置', style: TextStyle(color: AppColors.amberGold, fontSize: 13, fontWeight: FontWeight.bold)),
+                const Text('当前配置',
+                    style: TextStyle(
+                        color: AppColors.amberGold,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 if (currentConfig != null) ...[
-                  _DialogRow('AI 模型', '${currentConfig.llmProviderName}'),
+                  _DialogRow('AI 模型', currentConfig.llmProviderName),
                   _DialogRow('当前模型', currentConfig.model),
-                  _DialogRow('API Key', currentConfig.apiKeyMasked.isNotEmpty ? currentConfig.apiKeyMasked : '未配置'),
+                  _DialogRow(
+                      'API Key',
+                      currentConfig.apiKeyMasked.isNotEmpty
+                          ? currentConfig.apiKeyMasked
+                          : '未配置'),
                 ],
                 _DialogRow('语音识别', s.asrProvider.toUpperCase()),
                 _DialogRow('语音合成', s.ttsProvider.toUpperCase()),
                 if (currentConfig != null)
-                  _DialogRow('网络搜索', currentConfig.webSearchEnabled ? 'Tavily 已启用' : '未启用'),
+                  _DialogRow('网络搜索',
+                      currentConfig.webSearchEnabled ? 'Tavily 已启用' : '未启用'),
                 _DialogRow('交互方式', s.pushToTalk ? '按住说话' : '自由对话'),
                 _DialogRow('服务器', s.serverUrl),
               ],
@@ -218,7 +234,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: const Text('关闭', style: TextStyle(color: AppColors.amberGold)),
+              child: const Text('关闭',
+                  style: TextStyle(color: AppColors.amberGold)),
             ),
           ],
         ),
@@ -238,8 +255,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
           );
       setState(() => _voiceTestResult[p.id] = result);
     } catch (e) {
-      setState(() => _voiceTestResult[p.id] =
-          VoiceServiceTestResult(success: false, voices: [], url: '', error: e.toString()));
+      setState(() => _voiceTestResult[p.id] = VoiceServiceTestResult(
+          success: false, voices: [], url: '', error: e.toString()));
     } finally {
       setState(() => _testingVoice[p.id] = false);
     }
@@ -261,12 +278,17 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
       'openai_whisper': 'openai_whisper_api_key',
       'openai_tts': 'openai_api_key',
     };
-    if (url.isNotEmpty && urlMap.containsKey(p.id)) updates[urlMap[p.id]!] = url;
-    if (key.isNotEmpty && keyMap.containsKey(p.id)) updates[keyMap[p.id]!] = key;
+    if (url.isNotEmpty && urlMap.containsKey(p.id))
+      updates[urlMap[p.id]!] = url;
+    if (key.isNotEmpty && keyMap.containsKey(p.id))
+      updates[keyMap[p.id]!] = key;
     if (voice != null && voice.isNotEmpty) {
       updates[p.id == 'cosyvoice' ? 'cosyvoice_voice' : 'tts_voice'] = voice;
     }
-    if (updates.isEmpty) { _snack('无内容更改'); return; }
+    if (updates.isEmpty) {
+      _snack('无内容更改');
+      return;
+    }
     try {
       final client = ref.read(apiClientProvider);
       if (persist) {
@@ -286,11 +308,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
     setState(() => _testingTavily = true);
     try {
       final result = await ref.read(apiClientProvider).testWebSearch(
-        apiKey: _tavilyKeyCtrl.text.trim(),
-      );
+            apiKey: _tavilyKeyCtrl.text.trim(),
+          );
       setState(() => _tavilyTestResult = result);
     } catch (e) {
-      setState(() => _tavilyTestResult = {'success': false, 'error': e.toString()});
+      setState(
+          () => _tavilyTestResult = {'success': false, 'error': e.toString()});
     } finally {
       setState(() => _testingTavily = false);
     }
@@ -298,7 +321,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
 
   Future<void> _saveTavily({bool persist = false}) async {
     final key = _tavilyKeyCtrl.text.trim();
-    if (key.isEmpty) { _snack('请输入 Tavily API Key'); return; }
+    if (key.isEmpty) {
+      _snack('请输入 Tavily API Key');
+      return;
+    }
     try {
       final updates = <String, dynamic>{
         'tavily_api_key': key,
@@ -326,8 +352,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
 
   void _snackErr(String m) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(m), backgroundColor: Colors.red, duration: const Duration(seconds: 3)));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(m),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 3)));
   }
 
   // ── build ─────────────────────────────────────────────────────────────────
@@ -344,8 +372,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
     if (localAsync.isLoading) {
       return Scaffold(
         backgroundColor: AppColors.studyWall,
-        appBar: AppBar(title: Text('设置', style: AppTheme.calligraphyStyleDark(fontSize: 20)), backgroundColor: AppColors.studyWall),
-        body: const Center(child: CircularProgressIndicator(color: AppColors.amberGold)),
+        appBar: AppBar(
+            title:
+                Text('设置', style: AppTheme.calligraphyStyleDark(fontSize: 20)),
+            backgroundColor: AppColors.studyWall),
+        body: const Center(
+            child: CircularProgressIndicator(color: AppColors.amberGold)),
       );
     }
 
@@ -357,8 +389,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         actions: [
           TextButton.icon(
             onPressed: _validateConfig,
-            icon: const Icon(Icons.check_circle_outline, size: 16, color: AppColors.amberGold),
-            label: const Text('验证', style: TextStyle(color: AppColors.amberGold, fontSize: 13)),
+            icon: const Icon(Icons.check_circle_outline,
+                size: 16, color: AppColors.amberGold),
+            label: const Text('验证',
+                style: TextStyle(color: AppColors.amberGold, fontSize: 13)),
           ),
         ],
       ),
@@ -366,9 +400,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         builder: (context, constraints) {
           final wide = constraints.maxWidth > 900;
           if (wide) {
-            return _buildWideLayout(s, providersAsync, speechAsync, healthAsync, currentAsync);
+            return _buildWideLayout(
+                s, providersAsync, speechAsync, healthAsync, currentAsync);
           }
-          return _buildNarrowLayout(s, providersAsync, speechAsync, healthAsync, currentAsync);
+          return _buildNarrowLayout(
+              s, providersAsync, speechAsync, healthAsync, currentAsync);
         },
       ),
     );
@@ -453,164 +489,224 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
   // ─────────────────────────────────────────────────────────────────────────
 
   Widget _buildServerSection(AsyncValue currentAsync) => _Section(
-    title: '服务器地址', icon: Icons.dns_outlined, children: [
-      Row(children: [
-        Expanded(child: _Field(ctrl: _serverUrlCtrl, hint: 'http://localhost:8001', onDone: (_) => _saveServerUrl())),
-        const SizedBox(width: 8),
-        _GoldBtn('保存', onTap: _saveServerUrl),
-      ]),
-      const SizedBox(height: 8),
-      currentAsync.when(
-        data: (c) => Text('当前：${c.llmProviderName} › ${c.model}',
-            style: const TextStyle(color: AppColors.warmGray, fontSize: 11)),
-        loading: () => const SizedBox.shrink(),
-        error: (_, __) => const Text('⚠ 无法连接服务器，请检查地址',
-            style: TextStyle(color: Colors.orange, fontSize: 11)),
-      ),
-    ],
-  );
+        title: '服务器地址',
+        icon: Icons.dns_outlined,
+        children: [
+          Row(children: [
+            Expanded(
+                child: _Field(
+                    ctrl: _serverUrlCtrl,
+                    hint: 'http://localhost:8001',
+                    onDone: (_) => _saveServerUrl())),
+            const SizedBox(width: 8),
+            _GoldBtn('保存', onTap: _saveServerUrl),
+          ]),
+          const SizedBox(height: 8),
+          currentAsync.when(
+            data: (c) => Text('当前：${c.llmProviderName} › ${c.model}',
+                style:
+                    const TextStyle(color: AppColors.warmGray, fontSize: 11)),
+            loading: () => const SizedBox.shrink(),
+            error: (_, __) => const Text('⚠ 无法连接服务器，请检查地址',
+                style: TextStyle(color: Colors.orange, fontSize: 11)),
+          ),
+        ],
+      );
 
-  Widget _buildLlmSection(AsyncValue providersAsync, LocalSettings s) => _Section(
-    title: 'AI 模型提供商', icon: Icons.smart_toy_outlined, children: [
-      providersAsync.when(
-        data: (list) => Column(children: list.map((p) => _providerTile(p, s)).toList()),
-        loading: () => const _Spin(),
-        error: (e, _) => _ErrorBox('模型提供商加载失败: $e'),
-      ),
-    ],
-  );
+  Widget _buildLlmSection(AsyncValue providersAsync, LocalSettings s) =>
+      _Section(
+        title: 'AI 模型提供商',
+        icon: Icons.smart_toy_outlined,
+        children: [
+          providersAsync.when(
+            data: (list) =>
+                Column(children: list.map((p) => _providerTile(p, s)).toList()),
+            loading: () => const _Spin(),
+            error: (e, _) => _ErrorBox('模型提供商加载失败: $e'),
+          ),
+        ],
+      );
 
   Widget _buildAsrSection(AsyncValue speechAsync, LocalSettings s) => _Section(
-    title: '语音识别（ASR）', icon: Icons.mic_outlined, children: [
-      speechAsync.when(
-        data: (sp) => Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: sp.asrProviders.map((p) => _speechTile(p, s.asrProvider, isAsr: true)).toList(),
-        ),
-        loading: () => const _Spin(),
-        error: (e, _) => _ErrorBox('语音识别配置加载失败: $e'),
-      ),
-    ],
-  );
+        title: '语音识别（ASR）',
+        icon: Icons.mic_outlined,
+        children: [
+          speechAsync.when(
+            data: (sp) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: sp.asrProviders
+                  .map((p) => _speechTile(p, s.asrProvider, isAsr: true))
+                  .toList(),
+            ),
+            loading: () => const _Spin(),
+            error: (e, _) => _ErrorBox('语音识别配置加载失败: $e'),
+          ),
+        ],
+      );
 
   Widget _buildTtsSection(AsyncValue speechAsync, LocalSettings s) => _Section(
-    title: '语音合成（TTS）', icon: Icons.volume_up_outlined, children: [
-      speechAsync.when(
-        data: (sp) => Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: sp.ttsProviders.map((p) => _speechTile(p, s.ttsProvider, isAsr: false)).toList(),
-        ),
-        loading: () => const _Spin(),
-        error: (e, _) => _ErrorBox('语音合成配置加载失败: $e'),
-      ),
-    ],
-  );
+        title: '语音合成（TTS）',
+        icon: Icons.volume_up_outlined,
+        children: [
+          speechAsync.when(
+            data: (sp) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: sp.ttsProviders
+                  .map((p) => _speechTile(p, s.ttsProvider, isAsr: false))
+                  .toList(),
+            ),
+            loading: () => const _Spin(),
+            error: (e, _) => _ErrorBox('语音合成配置加载失败: $e'),
+          ),
+        ],
+      );
 
   Widget _buildInteractionSection(LocalSettings s) => _Section(
-    title: '交互方式', icon: Icons.touch_app_outlined, children: [
-      SwitchListTile(
-        title: const Text('按住说话（Push-to-Talk）', style: TextStyle(color: AppColors.warmWhite)),
-        subtitle: const Text('空格键：按住录音，松开发送  ·  Esc：取消',
-            style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
-        value: s.pushToTalk,
-        onChanged: (v) async {
-          ref.read(localSettingsProvider.notifier).setPushToTalk(v);
-          await ref.read(apiClientProvider).updateConfig({'push_to_talk': v});
-        },
-        contentPadding: EdgeInsets.zero,
-        activeColor: AppColors.amberGold,
-        dense: true,
-      ),
-    ],
-  );
+        title: '交互方式',
+        icon: Icons.touch_app_outlined,
+        children: [
+          SwitchListTile(
+            title: const Text('按住说话（Push-to-Talk）',
+                style: TextStyle(color: AppColors.warmWhite)),
+            subtitle: const Text('空格键：按住录音，松开发送  ·  Esc：取消',
+                style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
+            value: s.pushToTalk,
+            onChanged: (v) async {
+              ref.read(localSettingsProvider.notifier).setPushToTalk(v);
+              await ref
+                  .read(apiClientProvider)
+                  .updateConfig({'push_to_talk': v});
+            },
+            contentPadding: EdgeInsets.zero,
+            activeThumbColor: AppColors.amberGold,
+            dense: true,
+          ),
+        ],
+      );
 
   Widget _buildTavilySection(AsyncValue currentAsync) => _Section(
-    title: '网络搜索（Tavily）', icon: Icons.travel_explore_outlined, children: [
-      currentAsync.when(
-        data: (c) => Row(children: [
-          Icon(c.webSearchEnabled ? Icons.check_circle : Icons.cancel,
-              size: 14, color: c.webSearchEnabled ? Colors.green : Colors.red),
-          const SizedBox(width: 6),
-          Text(c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用',
-              style: TextStyle(
-                  color: c.webSearchEnabled ? Colors.green : Colors.orange, fontSize: 12)),
-        ]),
-        loading: () => const SizedBox.shrink(),
-        error: (_, __) => const SizedBox.shrink(),
-      ),
-      const SizedBox(height: 8),
-      const Text('为圆桌讨论启用实时网络搜索能力',
-          style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
-      const SizedBox(height: 8),
-      const _Label('Tavily API Key'),
-      _Field(ctrl: _tavilyKeyCtrl, hint: '输入 Tavily API Key（tvly-...）', obscure: true),
-      const SizedBox(height: 8),
-      Row(children: [
-        _OutBtn(_testingTavily ? '测试中…' : '🔌 测试连接',
-            onTap: _testingTavily ? null : _testTavily, loading: _testingTavily),
-        if (_tavilyTestResult != null) ...[
-          const SizedBox(width: 8),
-          Icon(_tavilyTestResult!['success'] == true ? Icons.check_circle : Icons.cancel,
-              color: _tavilyTestResult!['success'] == true ? Colors.green : Colors.red, size: 14),
-          const SizedBox(width: 4),
-          Flexible(child: Text(
-            _tavilyTestResult!['success'] == true ? '✓ 搜索可用' : _tavilyTestResult!['error']?.toString() ?? '失败',
-            style: TextStyle(fontSize: 10,
-                color: _tavilyTestResult!['success'] == true ? Colors.green : Colors.red),
-            overflow: TextOverflow.ellipsis,
-          )),
+        title: '网络搜索（Tavily）',
+        icon: Icons.travel_explore_outlined,
+        children: [
+          currentAsync.when(
+            data: (c) => Row(children: [
+              Icon(c.webSearchEnabled ? Icons.check_circle : Icons.cancel,
+                  size: 14,
+                  color: c.webSearchEnabled ? Colors.green : Colors.red),
+              const SizedBox(width: 6),
+              Text(c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用',
+                  style: TextStyle(
+                      color: c.webSearchEnabled ? Colors.green : Colors.orange,
+                      fontSize: 12)),
+            ]),
+            loading: () => const SizedBox.shrink(),
+            error: (_, __) => const SizedBox.shrink(),
+          ),
+          const SizedBox(height: 8),
+          const Text('为圆桌讨论启用实时网络搜索能力',
+              style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
+          const SizedBox(height: 8),
+          const _Label('Tavily API Key'),
+          _Field(
+              ctrl: _tavilyKeyCtrl,
+              hint: '输入 Tavily API Key（tvly-...）',
+              obscure: true),
+          const SizedBox(height: 8),
+          Row(children: [
+            _OutBtn(_testingTavily ? '测试中…' : '🔌 测试连接',
+                onTap: _testingTavily ? null : _testTavily,
+                loading: _testingTavily),
+            if (_tavilyTestResult != null) ...[
+              const SizedBox(width: 8),
+              Icon(
+                  _tavilyTestResult!['success'] == true
+                      ? Icons.check_circle
+                      : Icons.cancel,
+                  color: _tavilyTestResult!['success'] == true
+                      ? Colors.green
+                      : Colors.red,
+                  size: 14),
+              const SizedBox(width: 4),
+              Flexible(
+                  child: Text(
+                _tavilyTestResult!['success'] == true
+                    ? '✓ 搜索可用'
+                    : _tavilyTestResult!['error']?.toString() ?? '失败',
+                style: TextStyle(
+                    fontSize: 10,
+                    color: _tavilyTestResult!['success'] == true
+                        ? Colors.green
+                        : Colors.red),
+                overflow: TextOverflow.ellipsis,
+              )),
+            ],
+          ]),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(child: _OutBtn('应用（本次有效）', onTap: () => _saveTavily())),
+            const SizedBox(width: 8),
+            Expanded(
+                child: _GoldBtn('💾 写入 .env',
+                    onTap: () => _saveTavily(persist: true))),
+          ]),
         ],
-      ]),
-      const SizedBox(height: 10),
-      Row(children: [
-        Expanded(child: _OutBtn('应用（本次有效）', onTap: () => _saveTavily())),
-        const SizedBox(width: 8),
-        Expanded(child: _GoldBtn('💾 写入 .env', onTap: () => _saveTavily(persist: true))),
-      ]),
-    ],
-  );
+      );
 
-  Widget _buildSummarySection(LocalSettings s, AsyncValue currentAsync) => _Section(
-    title: '配置总览', icon: Icons.dashboard_outlined, children: [
-      currentAsync.when(
-        data: (c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _SummaryRow('AI 模型', '${c.llmProviderName}  ›  ${c.model}'),
-          _SummaryRow('API Key', c.apiKeyMasked.isNotEmpty ? c.apiKeyMasked : '未配置'),
-          _SummaryRow('语音识别', s.asrProvider.toUpperCase()),
-          _SummaryRow('语音合成', s.ttsProvider.toUpperCase()),
-          _SummaryRow('网络搜索', c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用'),
-          _SummaryRow('交互方式', s.pushToTalk ? '按住说话' : '自由对话'),
-        ]),
-        loading: () => const _Spin(),
-        error: (e, _) => _ErrorBox('无法加载配置: $e'),
-      ),
-    ],
-  );
+  Widget _buildSummarySection(LocalSettings s, AsyncValue currentAsync) =>
+      _Section(
+        title: '配置总览',
+        icon: Icons.dashboard_outlined,
+        children: [
+          currentAsync.when(
+            data: (c) =>
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              _SummaryRow('AI 模型', '${c.llmProviderName}  ›  ${c.model}'),
+              _SummaryRow('API Key',
+                  c.apiKeyMasked.isNotEmpty ? c.apiKeyMasked : '未配置'),
+              _SummaryRow('语音识别', s.asrProvider.toUpperCase()),
+              _SummaryRow('语音合成', s.ttsProvider.toUpperCase()),
+              _SummaryRow(
+                  '网络搜索', c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用'),
+              _SummaryRow('交互方式', s.pushToTalk ? '按住说话' : '自由对话'),
+            ]),
+            loading: () => const _Spin(),
+            error: (e, _) => _ErrorBox('无法加载配置: $e'),
+          ),
+        ],
+      );
 
   Widget _buildHealthSection(AsyncValue healthAsync) => _Section(
-    title: '本地服务状态',
-    icon: Icons.monitor_heart_outlined,
-    action: IconButton(
-      icon: _healthRefreshing
-          ? const SizedBox(width: 14, height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.amberGold))
-          : const Icon(Icons.refresh, size: 16, color: AppColors.amberGold),
-      onPressed: _healthRefreshing ? null : () async {
-        setState(() => _healthRefreshing = true);
-        ref.invalidate(healthStatusProvider);
-        await Future.delayed(const Duration(seconds: 2));
-        setState(() => _healthRefreshing = false);
-      },
-      tooltip: '刷新',
-    ),
-    children: [
-      healthAsync.when(
-        data: (map) => Column(children: map.entries.map((e) => _HealthTile(health: e.value)).toList()),
-        loading: () => const _Spin(),
-        error: (e, _) => _ErrorBox('本地服务状态检查失败: $e'),
-      ),
-    ],
-  );
+        title: '本地服务状态',
+        icon: Icons.monitor_heart_outlined,
+        action: IconButton(
+          icon: _healthRefreshing
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: AppColors.amberGold))
+              : const Icon(Icons.refresh, size: 16, color: AppColors.amberGold),
+          onPressed: _healthRefreshing
+              ? null
+              : () async {
+                  setState(() => _healthRefreshing = true);
+                  ref.invalidate(healthStatusProvider);
+                  await Future.delayed(const Duration(seconds: 2));
+                  setState(() => _healthRefreshing = false);
+                },
+          tooltip: '刷新',
+        ),
+        children: [
+          healthAsync.when(
+            data: (map) => Column(
+                children: map.entries
+                    .map((e) => _HealthTile(health: e.value))
+                    .toList()),
+            loading: () => const _Spin(),
+            error: (e, _) => _ErrorBox('本地服务状态检查失败: $e'),
+          ),
+        ],
+      );
 
   // ─────────────────────────────────────────────────────────────────────────
   //  Provider tile
@@ -630,14 +726,17 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: active ? AppColors.amberGold : AppColors.warmGray.withValues(alpha: 0.2),
+            color: active
+                ? AppColors.amberGold
+                : AppColors.warmGray.withValues(alpha: 0.2),
             width: active ? 2 : 1,
           ),
           color: active ? AppColors.amberGold.withValues(alpha: 0.07) : null,
         ),
         child: Column(children: [
           ListTile(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
             dense: true,
             leading: Text(_icon(p.id), style: const TextStyle(fontSize: 22)),
             title: Row(children: [
@@ -646,10 +745,15 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
                       color: AppColors.warmWhite,
                       fontWeight: active ? FontWeight.bold : FontWeight.normal,
                       fontSize: 13)),
-              if (active) ...[const SizedBox(width: 6), _Chip('使用中', AppColors.amberGold)],
+              if (active) ...[
+                const SizedBox(width: 6),
+                _Chip('使用中', AppColors.amberGold)
+              ],
             ]),
             subtitle: Text(
-              _modelCtrl[p.id]?.text.isNotEmpty == true ? _modelCtrl[p.id]!.text : p.model,
+              _modelCtrl[p.id]?.text.isNotEmpty == true
+                  ? _modelCtrl[p.id]!.text
+                  : p.model,
               style: const TextStyle(color: AppColors.warmGray, fontSize: 10),
             ),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -657,7 +761,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
               Icon(expanded ? Icons.expand_less : Icons.expand_more,
                   color: AppColors.warmGray, size: 18),
             ]),
-            onTap: () => setState(() => _expandedProvider = expanded ? null : p.id),
+            onTap: () =>
+                setState(() => _expandedProvider = expanded ? null : p.id),
           ),
           if (expanded)
             Padding(
@@ -669,28 +774,39 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
     );
   }
 
-  Widget _providerForm(ProviderInfo p, ProviderTestResult? result, bool testing, bool saving) {
-    final active = p.id == ref.read(localSettingsProvider).valueOrNull?.llmProvider;
+  Widget _providerForm(
+      ProviderInfo p, ProviderTestResult? result, bool testing, bool saving) {
+    final active =
+        p.id == ref.read(localSettingsProvider).valueOrNull?.llmProvider;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Divider(color: AppColors.warmGray, height: 18),
       if (p.needsApiKey) ...[
         const _Label('API Key'),
-        _Field(ctrl: _pk(p), hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key', obscure: true),
+        _Field(
+            ctrl: _pk(p),
+            hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
+            obscure: true),
         const SizedBox(height: 8),
       ],
       const _Label('请求地址（Base URL）'),
       _Field(ctrl: _bu(p), hint: p.baseUrl),
       const SizedBox(height: 8),
       Row(children: [
-        _OutBtn(testing ? '测试中…' : '🔌 测试连接', onTap: testing ? null : () => _testProvider(p), loading: testing),
+        _OutBtn(testing ? '测试中…' : '🔌 测试连接',
+            onTap: testing ? null : () => _testProvider(p), loading: testing),
         if (result != null) ...[
           const SizedBox(width: 8),
           Icon(result.success ? Icons.check_circle : Icons.cancel,
               color: result.success ? Colors.green : Colors.red, size: 14),
           const SizedBox(width: 4),
-          Flexible(child: Text(
-            result.success ? '✓ ${result.models.length} 个模型可用' : result.error ?? '失败',
-            style: TextStyle(fontSize: 10, color: result.success ? Colors.green : Colors.red),
+          Flexible(
+              child: Text(
+            result.success
+                ? '✓ ${result.models.length} 个模型可用'
+                : result.error ?? '失败',
+            style: TextStyle(
+                fontSize: 10,
+                color: result.success ? Colors.green : Colors.red),
             overflow: TextOverflow.ellipsis,
           )),
         ],
@@ -703,9 +819,13 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         _Field(ctrl: _mc(p), hint: p.model),
       const SizedBox(height: 10),
       Row(children: [
-        Expanded(child: _OutBtn('应用（本次有效）', onTap: saving ? null : () => _saveProvider(p))),
+        Expanded(
+            child: _OutBtn('应用（本次有效）',
+                onTap: saving ? null : () => _saveProvider(p))),
         const SizedBox(width: 8),
-        Expanded(child: _GoldBtn('💾 写入 .env', onTap: saving ? null : () => _saveProvider(p, persist: true))),
+        Expanded(
+            child: _GoldBtn('💾 写入 .env',
+                onTap: saving ? null : () => _saveProvider(p, persist: true))),
       ]),
       if (!active) ...[
         const SizedBox(height: 8),
@@ -731,7 +851,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
   //  Speech provider tile
   // ─────────────────────────────────────────────────────────────────────────
 
-  Widget _speechTile(SpeechProviderInfo p, String activeId, {required bool isAsr}) {
+  Widget _speechTile(SpeechProviderInfo p, String activeId,
+      {required bool isAsr}) {
     final active = p.id == activeId;
     final expanded = _expandedVoiceService == p.id;
     final needsCfg = p.id != 'browser' && p.id != 'disabled';
@@ -749,26 +870,40 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
             if (v == null) return;
             if (isAsr) {
               ref.read(localSettingsProvider.notifier).setAsrProvider(v);
-              await ref.read(apiClientProvider).updateConfig({'asr_provider': v});
+              await ref
+                  .read(apiClientProvider)
+                  .updateConfig({'asr_provider': v});
             } else {
               ref.read(localSettingsProvider.notifier).setTtsProvider(v);
-              await ref.read(apiClientProvider).updateConfig({'tts_provider': v});
+              await ref
+                  .read(apiClientProvider)
+                  .updateConfig({'tts_provider': v});
             }
           },
         ),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Text(p.name, style: const TextStyle(color: AppColors.warmWhite, fontSize: 13)),
-            if (active) ...[const SizedBox(width: 6), _Chip('使用中', AppColors.amberGold)],
+            Text(p.name,
+                style:
+                    const TextStyle(color: AppColors.warmWhite, fontSize: 13)),
+            if (active) ...[
+              const SizedBox(width: 6),
+              _Chip('使用中', AppColors.amberGold)
+            ],
           ]),
           if (needsCfg && p.url.isNotEmpty)
-            Text(p.url, style: const TextStyle(color: AppColors.warmGray, fontSize: 10)),
+            Text(p.url,
+                style:
+                    const TextStyle(color: AppColors.warmGray, fontSize: 10)),
         ])),
         if (needsCfg)
           IconButton(
             icon: Icon(expanded ? Icons.expand_less : Icons.settings,
                 color: AppColors.warmGray, size: 15),
-            onPressed: () => setState(() => _expandedVoiceService = expanded ? null : p.id),
+            onPressed: () =>
+                setState(() => _expandedVoiceService = expanded ? null : p.id),
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
             tooltip: '配置',
@@ -776,7 +911,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         if (p.id == 'disabled')
           const Padding(
             padding: EdgeInsets.only(right: 8),
-            child: Text('纯文本', style: TextStyle(color: AppColors.warmGray, fontSize: 10)),
+            child: Text('纯文本',
+                style: TextStyle(color: AppColors.warmGray, fontSize: 10)),
           ),
       ]),
       if (expanded && needsCfg)
@@ -787,30 +923,41 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
     ]);
   }
 
-  Widget _voiceForm(SpeechProviderInfo p, VoiceServiceTestResult? result, bool testing) {
+  Widget _voiceForm(
+      SpeechProviderInfo p, VoiceServiceTestResult? result, bool testing) {
     final voices = result?.voices ?? [];
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const SizedBox(height: 4),
       if (p.needsApiKey) ...[
         const _Label('API Key'),
-        _Field(ctrl: _vk(p), hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key', obscure: true),
+        _Field(
+            ctrl: _vk(p),
+            hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
+            obscure: true),
         const SizedBox(height: 6),
       ],
       const _Label('服务地址'),
-      _Field(ctrl: _vu(p), hint: p.defaultUrl.isNotEmpty ? p.defaultUrl : 'http://localhost:???'),
+      _Field(
+          ctrl: _vu(p),
+          hint:
+              p.defaultUrl.isNotEmpty ? p.defaultUrl : 'http://localhost:???'),
       const SizedBox(height: 8),
       Row(children: [
-        _OutBtn(testing ? '测试中…' : '🔌 测试连接', onTap: testing ? null : () => _testVoice(p), loading: testing),
+        _OutBtn(testing ? '测试中…' : '🔌 测试连接',
+            onTap: testing ? null : () => _testVoice(p), loading: testing),
         if (result != null) ...[
           const SizedBox(width: 8),
           Icon(result.success ? Icons.check_circle : Icons.cancel,
               color: result.success ? Colors.green : Colors.red, size: 13),
           const SizedBox(width: 3),
-          Flexible(child: Text(
+          Flexible(
+              child: Text(
             result.success
                 ? (voices.isNotEmpty ? '✓ ${voices.length} 个音色' : '✓ 连接成功')
                 : result.error ?? '失败',
-            style: TextStyle(fontSize: 10, color: result.success ? Colors.green : Colors.red),
+            style: TextStyle(
+                fontSize: 10,
+                color: result.success ? Colors.green : Colors.red),
             overflow: TextOverflow.ellipsis,
           )),
         ],
@@ -828,7 +975,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
       Row(children: [
         Expanded(child: _OutBtn('应用', onTap: () => _saveVoice(p))),
         const SizedBox(width: 8),
-        Expanded(child: _GoldBtn('💾 .env', onTap: () => _saveVoice(p, persist: true))),
+        Expanded(
+            child:
+                _GoldBtn('💾 .env', onTap: () => _saveVoice(p, persist: true))),
       ]),
       const SizedBox(height: 4),
     ]);
@@ -836,9 +985,17 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
 
   String _icon(String id) {
     const m = {
-      'openai': '🌐', 'qwen': '🔮', 'deepseek': '🔍', 'ollama': '🦙',
-      'ollama_cloud': '☁️', 'doubao': '🫘', 'volcengine': '🌋',
-      'bailian': '🔥', 'zhipu': '🧠', 'anthropic': '🤖', 'gemini': '💎',
+      'openai': '🌐',
+      'qwen': '🔮',
+      'deepseek': '🔍',
+      'ollama': '🦙',
+      'ollama_cloud': '☁️',
+      'doubao': '🫘',
+      'volcengine': '🌋',
+      'bailian': '🔥',
+      'zhipu': '🧠',
+      'anthropic': '🤖',
+      'gemini': '💎',
     };
     return m[id] ?? '🤖';
   }
@@ -853,7 +1010,11 @@ class _Section extends StatelessWidget {
   final IconData icon;
   final Widget? action;
   final List<Widget> children;
-  const _Section({required this.title, required this.icon, this.action, required this.children});
+  const _Section(
+      {required this.title,
+      required this.icon,
+      this.action,
+      required this.children});
 
   @override
   Widget build(BuildContext context) => Container(
@@ -867,7 +1028,9 @@ class _Section extends StatelessWidget {
           Row(children: [
             Icon(icon, size: 18, color: AppColors.amberGold),
             const SizedBox(width: 7),
-            Expanded(child: Text(title, style: AppTheme.calligraphyStyleDark(fontSize: 15))),
+            Expanded(
+                child: Text(title,
+                    style: AppTheme.calligraphyStyleDark(fontSize: 15))),
             if (action != null) action!,
           ]),
           const SizedBox(height: 10),
@@ -881,7 +1044,11 @@ class _Field extends StatelessWidget {
   final String hint;
   final bool obscure;
   final void Function(String)? onDone;
-  const _Field({required this.ctrl, required this.hint, this.obscure = false, this.onDone});
+  const _Field(
+      {required this.ctrl,
+      required this.hint,
+      this.obscure = false,
+      this.onDone});
 
   @override
   Widget build(BuildContext context) => TextField(
@@ -892,15 +1059,21 @@ class _Field extends StatelessWidget {
         decoration: InputDecoration(
           hintText: hint,
           hintStyle: const TextStyle(color: AppColors.warmGray, fontSize: 12),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
-              borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
-              borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(9),
+              borderSide:
+                  BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(9),
+              borderSide:
+                  BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(9),
               borderSide: const BorderSide(color: AppColors.amberGold)),
           filled: true,
           fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           isDense: true,
         ),
       );
@@ -912,7 +1085,8 @@ class _Label extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.only(bottom: 3),
-        child: Text(text, style: const TextStyle(color: AppColors.warmGray, fontSize: 11)),
+        child: Text(text,
+            style: const TextStyle(color: AppColors.warmGray, fontSize: 11)),
       );
 }
 
@@ -950,8 +1124,11 @@ class _OutBtn extends StatelessWidget {
           minimumSize: Size.zero,
         ),
         child: loading
-            ? const SizedBox(width: 12, height: 12,
-                child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.warmGray))
+            ? const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: AppColors.warmGray))
             : Text(label),
       );
 }
@@ -963,8 +1140,13 @@ class _Chip extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(6)),
-        child: Text(label, style: const TextStyle(color: AppColors.scrollTitle, fontSize: 10, fontWeight: FontWeight.w500)),
+        decoration:
+            BoxDecoration(color: color, borderRadius: BorderRadius.circular(6)),
+        child: Text(label,
+            style: const TextStyle(
+                color: AppColors.scrollTitle,
+                fontSize: 10,
+                fontWeight: FontWeight.w500)),
       );
 }
 
@@ -987,7 +1169,9 @@ class _KeyBadge extends StatelessWidget {
           size: 14, color: ok ? Colors.green : Colors.orange),
       const SizedBox(width: 3),
       Text(ok ? 'Key ✓' : '未配置',
-          style: TextStyle(color: ok ? Colors.green : Colors.orange, fontSize: 11,
+          style: TextStyle(
+              color: ok ? Colors.green : Colors.orange,
+              fontSize: 11,
               fontWeight: FontWeight.w500)),
       const SizedBox(width: 4),
     ]);
@@ -1015,24 +1199,33 @@ class _DropFieldState extends State<_DropField> {
 
   @override
   Widget build(BuildContext context) => DropdownButtonFormField<String>(
-        value: _val,
+        initialValue: _val,
         dropdownColor: AppColors.studyWallLight,
         style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
-        icon: const Icon(Icons.arrow_drop_down, color: AppColors.amberGold, size: 18),
+        icon: const Icon(Icons.arrow_drop_down,
+            color: AppColors.amberGold, size: 18),
         decoration: InputDecoration(
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
-              borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
-              borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(9),
+              borderSide:
+                  BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(9),
+              borderSide:
+                  BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(9),
               borderSide: const BorderSide(color: AppColors.amberGold)),
           filled: true,
           fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           isDense: true,
         ),
-        items: widget.items.map((m) => DropdownMenuItem(
-            value: m, child: Text(m, style: const TextStyle(fontSize: 12)))).toList(),
+        items: widget.items
+            .map((m) => DropdownMenuItem(
+                value: m, child: Text(m, style: const TextStyle(fontSize: 12))))
+            .toList(),
         onChanged: (v) {
           setState(() => _val = v);
           if (v != null) widget.ctrl.text = v;
@@ -1044,26 +1237,32 @@ class _VoiceDrop extends StatelessWidget {
   final List<String> voices;
   final String? value;
   final void Function(String?) onChanged;
-  const _VoiceDrop({required this.voices, required this.value, required this.onChanged});
+  const _VoiceDrop(
+      {required this.voices, required this.value, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
     final cur = voices.contains(value) ? value : voices.first;
     return DropdownButtonFormField<String>(
-      value: cur,
+      initialValue: cur,
       dropdownColor: AppColors.studyWallLight,
       style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
-      icon: const Icon(Icons.arrow_drop_down, color: AppColors.amberGold, size: 18),
+      icon: const Icon(Icons.arrow_drop_down,
+          color: AppColors.amberGold, size: 18),
       decoration: InputDecoration(
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
-            borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
+        border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(9),
+            borderSide:
+                BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
         filled: true,
         fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         isDense: true,
       ),
-      items: voices.map((v) => DropdownMenuItem(
-          value: v, child: Text(v, style: const TextStyle(fontSize: 12)))).toList(),
+      items: voices
+          .map((v) => DropdownMenuItem(
+              value: v, child: Text(v, style: const TextStyle(fontSize: 12))))
+          .toList(),
       onChanged: onChanged,
     );
   }
@@ -1076,8 +1275,10 @@ class _HealthTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final ok = health.reachable;
     const nameMap = {
-      'edge_tts': 'Edge TTS (本地)', 'cosyvoice': 'CosyVoice (本地)',
-      'funasr': 'FunASR (本地)', 'ollama': 'Ollama',
+      'edge_tts': 'Edge TTS (本地)',
+      'cosyvoice': 'CosyVoice (本地)',
+      'funasr': 'FunASR (本地)',
+      'ollama': 'Ollama',
     };
     return ListTile(
       dense: true,
@@ -1089,8 +1290,10 @@ class _HealthTile extends StatelessWidget {
       subtitle: Text(health.url,
           style: const TextStyle(color: AppColors.warmGray, fontSize: 10)),
       trailing: Text(ok ? '在线' : '离线',
-          style: TextStyle(color: ok ? Colors.green : Colors.red,
-              fontWeight: FontWeight.bold, fontSize: 11)),
+          style: TextStyle(
+              color: ok ? Colors.green : Colors.red,
+              fontWeight: FontWeight.bold,
+              fontSize: 11)),
     );
   }
 }
@@ -1106,11 +1309,13 @@ class _SummaryRow extends StatelessWidget {
           SizedBox(
             width: 72,
             child: Text(label,
-                style: const TextStyle(color: AppColors.warmGray, fontSize: 11)),
+                style:
+                    const TextStyle(color: AppColors.warmGray, fontSize: 11)),
           ),
           Expanded(
             child: Text(value,
-                style: const TextStyle(color: AppColors.warmWhite, fontSize: 12)),
+                style:
+                    const TextStyle(color: AppColors.warmWhite, fontSize: 12)),
           ),
         ]),
       );
@@ -1120,7 +1325,8 @@ class _Spin extends StatelessWidget {
   const _Spin();
   @override
   Widget build(BuildContext context) => const Center(
-        child: Padding(padding: EdgeInsets.all(14),
+        child: Padding(
+            padding: EdgeInsets.all(14),
             child: CircularProgressIndicator(color: AppColors.amberGold)),
       );
 }
@@ -1139,7 +1345,9 @@ class _ErrorBox extends StatelessWidget {
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Icon(Icons.error_outline, color: Colors.red, size: 14),
           const SizedBox(width: 6),
-          Expanded(child: Text(msg, style: const TextStyle(color: Colors.red, fontSize: 11))),
+          Expanded(
+              child: Text(msg,
+                  style: const TextStyle(color: Colors.red, fontSize: 11))),
         ]),
       );
 }
@@ -1155,11 +1363,13 @@ class _DialogRow extends StatelessWidget {
           SizedBox(
             width: 80,
             child: Text(label,
-                style: const TextStyle(color: AppColors.warmGray, fontSize: 12)),
+                style:
+                    const TextStyle(color: AppColors.warmGray, fontSize: 12)),
           ),
           Expanded(
             child: Text(value,
-                style: const TextStyle(color: AppColors.warmWhite, fontSize: 12)),
+                style:
+                    const TextStyle(color: AppColors.warmWhite, fontSize: 12)),
           ),
         ]),
       );

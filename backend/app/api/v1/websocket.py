@@ -310,3 +310,6 @@ async def _run_discussion(websocket: WebSocket, floor_manager: FloorManager, top
         elif event["event_type"] == "stream":
             # 流式文本推送
             await websocket.send_json(event)
+        elif event["event_type"] == "human_input_requested":
+            # 请求人类输入 - 直接推送给前端
+            await websocket.send_json(event)

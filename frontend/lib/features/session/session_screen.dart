@@ -33,7 +33,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   final FocusNode _keyboardFocusNode = FocusNode();
 
   // 讨论状态
-  List<ChatMessage> _messages = [];
+  final List<ChatMessage> _messages = [];
   String _currentSpeaker = '';
   bool _isMyTurn = false;
   String _statusText = '连接中...';
@@ -118,7 +118,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           final msgType = data['msg_type'] ?? 'text';
 
           setState(() {
-            _messages.add(ChatMessage(source: source, content: content, type: msgType));
+            _messages.add(
+                ChatMessage(source: source, content: content, type: msgType));
           });
 
           // 如果是 AI 角色/主持人消息，自动 TTS 朗读
@@ -282,7 +283,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(widget.topic.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              Text(widget.topic.title,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
               Text(_statusText, style: Theme.of(context).textTheme.bodySmall),
             ],
           ),
@@ -319,7 +321,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               onSendMessage: _sendMessage,
               onPttStart: _onPttStart,
               onPttEnd: _onPttEnd,
-              canInterrupt: !_isMyTurn && _currentSpeaker.isNotEmpty && !_hasRaisedHand,
+              canInterrupt:
+                  !_isMyTurn && _currentSpeaker.isNotEmpty && !_hasRaisedHand,
               hasRaisedHand: _hasRaisedHand,
               onInterrupt: _onInterrupt,
             ),
@@ -337,7 +340,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       if (_isMyTurn && !_isRecording) {
         _onPttStart();
       }
-    } else if (event is KeyUpEvent && event.logicalKey == LogicalKeyboardKey.space) {
+    } else if (event is KeyUpEvent &&
+        event.logicalKey == LogicalKeyboardKey.space) {
       if (_isRecording) {
         _onPttEnd();
       }
@@ -373,7 +377,9 @@ class _ParticipantBar extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               decoration: BoxDecoration(
-                color: isRecording ? Colors.red : Theme.of(context).colorScheme.primary,
+                color: isRecording
+                    ? Colors.red
+                    : Theme.of(context).colorScheme.primary,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Row(
@@ -564,7 +570,10 @@ class _MessageBubble extends StatelessWidget {
           ),
           child: Text(
             message.content,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[700]),
+            style: Theme.of(context)
+                .textTheme
+                .bodySmall
+                ?.copyWith(color: Colors.grey[700]),
             textAlign: TextAlign.center,
           ),
         ),
@@ -615,7 +624,9 @@ class _MessageBubble extends StatelessWidget {
                 Text(
                   message.source,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: isMe ? Theme.of(context).colorScheme.onPrimary : null,
+                        color: isMe
+                            ? Theme.of(context).colorScheme.onPrimary
+                            : null,
                         fontWeight: FontWeight.bold,
                       ),
                 ),

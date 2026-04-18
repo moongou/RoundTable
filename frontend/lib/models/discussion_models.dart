@@ -1,4 +1,5 @@
 /// 讨论会话数据模型
+library;
 
 class Topic {
   final String id;
@@ -71,7 +72,8 @@ class SessionResponse {
     this.status = DiscussionStatus.waiting,
   });
 
-  factory SessionResponse.fromJson(Map<String, dynamic> json) => SessionResponse(
+  factory SessionResponse.fromJson(Map<String, dynamic> json) =>
+      SessionResponse(
         sessionId: json['session_id'],
         topic: Topic.fromJson(json['topic']),
         participants: (json['participants'] as List)
