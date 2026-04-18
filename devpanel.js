@@ -67,7 +67,19 @@ function stopBackend() {
   const pid = getPortPid(8001);
   if (!pid) return { ok: false, msg: '未运行' };
   try { execSync('kill ' + pid, { timeout: 2000 }); } catch(e) { /* ignore */ }
-  log('backend', '⏹ 已停止外部进程');
+  log('backend', '⏹ 已停止外部进程，等待端口释放…');
+  // Poll until port is actually released, then broadcast final stopped state
+  let attempts = 0;
+  const timer = setInterval(() => {
+    attempts++;
+    if (!isPortListening(8001) || attempts >= 10) {
+      clearInterval(timer);
+      if (!isPortListening(8001)) {
+        log('backend', '✅ 端口 8001 已释放');
+      }
+      broadcastStatus();
+    }
+  }, 500);
   broadcastStatus();
   return { ok: true };
 }
@@ -407,6 +419,9 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('   面板地址: http://localhost:' + PORT);
   console.log('   按 Ctrl+C 退出\n');
 });
+
+// 每 5 秒广播一次状态，确保客户端按钮始终与实际端口状态同步
+setInterval(broadcastStatus, 5000);
 
 process.on('SIGINT', () => {
   console.log('\n正在停止所有服务...');

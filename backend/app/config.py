@@ -282,6 +282,18 @@ class Settings(BaseSettings):
         if base_url:
             config["base_url"] = base_url
 
+        # AutoGen 对非 OpenAI 模型名要求显式提供 model_info
+        # （OpenAI 原生模型 gpt-*/o1-*/o3-* 由 autogen 自动识别，无需传入）
+        _openai_prefixes = ("gpt-", "o1-", "o3-", "o4-", "chatgpt-", "text-embedding-", "ft:")
+        if provider != "openai" or not any(model.startswith(p) for p in _openai_prefixes):
+            config["model_info"] = {
+                "vision": False,
+                "function_calling": True,
+                "json_output": True,
+                "family": "unknown",
+                "structured_output": False,
+            }
+
         return config
 
     def validate_llm_config(self) -> tuple[bool, str]:
