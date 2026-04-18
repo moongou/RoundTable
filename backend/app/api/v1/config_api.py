@@ -159,9 +159,10 @@ async def get_current_config():
     }
 
 
+@router.get("/validate")
 @router.post("/validate")
 async def validate_current_config():
-    """验证当前 LLM 配置是否有效。"""
+    """验证当前 LLM 配置是否有效（GET/POST 均支持）。"""
     is_valid, error_msg = settings.validate_llm_config()
     return {"valid": is_valid, "message": error_msg if not is_valid else "配置有效"}
 

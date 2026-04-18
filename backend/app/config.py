@@ -303,17 +303,20 @@ class Settings(BaseSettings):
             (is_valid, error_message) 元组。is_valid=True 表示配置有效。
         """
         provider = self.llm_provider
-        if provider not in PROVIDER_DEFAULTS:
-            return False, f"不支持的 LLM 提供商: {provider}"
-
-        api_key = getattr(self, f"{provider}_api_key", "")
 
         # Ollama 本地不需要 API key
         if provider == "ollama":
             return True, ""
 
+        # 尝试从已知字段或通用字段读取 api_key
+        api_key = getattr(self, f"{provider}_api_key", None)
+        if api_key is None:
+            # 自定义提供商：只要 provider 字段非空且非占位符就认为有效
+            api_key = ""
+
         # 检查 API key 是否为空或占位符
-        if not api_key or api_key == "sk-xxx" or api_key.startswith("sk-xxx"):
+        _placeholder = ("sk-xxx", "your-api-key", "api-key", "placeholder")
+        if not api_key or api_key.lower() in _placeholder or api_key.startswith("sk-xxx"):
             provider_name = PROVIDER_NAMES.get(provider, provider)
             return False, f"{provider_name} 的 API Key 未配置，请在设置中填写有效的 API Key"
 
