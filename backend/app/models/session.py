@@ -40,10 +40,29 @@ class Topic(BaseModel):
     id: str
     title: str
     description: str
-    category: str  # 科学/伦理/社会/文学等
+    category: str  # science/ethics/society/literature/health/education/tech/life
     age_range: str = "8-12"  # 适合年龄
     guide_questions: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    story: str = ""  # 话题背景故事（3-4分钟可讲完）
+    story_source: str = ""  # 故事来源
+    suggested_thinkers: list[str] = Field(default_factory=list)  # 推荐思想家ID
+
+
+class Thinker(BaseModel):
+    """思想家模板"""
+
+    id: str
+    name: str  # 中文名，如"苏格拉底"
+    display_name: str  # 显示名，如"哲学家苏格拉底"
+    era: str = ""  # 时代，如"古希腊"
+    avatar: str = ""  # emoji 头像
+    color: str = ""  # UI 主题色
+    domain: list[str] = Field(default_factory=list)  # 所属领域
+    description: str = ""  # 简短描述
+    system_message: str = ""  # 系统提示词
+    voice: str = ""  # TTS 声音
+    suggested_questions: list[str] = Field(default_factory=list)  # 推荐讨论问题
 
 
 class CharacterTemplate(BaseModel):
@@ -64,6 +83,7 @@ class CreateSessionRequest(BaseModel):
 
     topic_id: str
     character_ids: list[str] = Field(default_factory=lambda: ["explorer", "skeptic"])
+    thinker_ids: list[str] = Field(default_factory=list)  # 额外的思想家角色
     human_names: list[str] = Field(default_factory=lambda: ["同学"])
     max_turns: int = 30
 

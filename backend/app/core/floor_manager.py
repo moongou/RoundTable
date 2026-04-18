@@ -39,6 +39,7 @@ class FloorState(str, Enum):
     AI_SPEAKING = "ai_speaking"
     HUMAN_TURN_WAITING = "human_turn_waiting"
     HUMAN_SPEAKING = "human_speaking"
+    INTERRUPTED = "interrupted"  # 有人请求打断
     CLOSING = "closing"
     ENDED = "ended"
 
@@ -81,6 +82,10 @@ class FloorManager:
         self._on_turn_change: Optional[Callable] = None
         self._on_state_change: Optional[Callable] = None
         self._on_error: Optional[Callable] = None
+        self._on_interrupt: Optional[Callable] = None
+
+        # 打断请求队列
+        self._interrupt_queue: list[str] = []
 
         # 流式文本缓冲
         self._streaming_buffer: dict[str, list[str]] = {}
@@ -104,6 +109,11 @@ class FloorManager:
     def on_error(self, callback: Callable) -> "FloorManager":
         """注册错误回调。callback(error_msg)"""
         self._on_error = callback
+        return self
+
+    def on_interrupt(self, callback: Callable) -> "FloorManager":
+        """注册打断回调。callback(interrupter, current_speaker)"""
+        self._on_interrupt = callback
         return self
 
     async def _emit_message(self, source: str, content: str, msg_type: str = "text") -> None:
@@ -150,10 +160,34 @@ class FloorManager:
                     yield result
 
         except Exception as e:
-            await self._emit_error(f"讨论运行错误: {e}")
-            yield {"event_type": "error", "data": {"message": str(e)}}
+            error_msg = str(e)
+            # 区分 API 配置错误和运行时错误
+            if "api_key" in error_msg.lower() or "authentication" in error_msg.lower() or "401" in error_msg:
+                await self._emit_error(f"API 密钥无效或未配置: {error_msg}")
+                yield {
+                    "event_type": "api_error",
+                    "data": {
+                        "message": "API 密钥无效或未配置，请在设置中检查 API Key",
+                        "original_error": error_msg,
+                        "recoverable": False,
+                    },
+                }
+            elif "connection" in error_msg.lower() or "connect" in error_msg.lower():
+                await self._emit_error(f"无法连接到 LLM 服务: {error_msg}")
+                yield {
+                    "event_type": "api_error",
+                    "data": {
+                        "message": "无法连接到 AI 服务，请检查网络和服务器地址",
+                        "original_error": error_msg,
+                        "recoverable": False,
+                    },
+                }
+            else:
+                await self._emit_error(f"讨论运行错误: {error_msg}")
+                yield {"event_type": "error", "data": {"message": error_msg}}
         finally:
-            await self._set_state(FloorState.ENDED)
+            if self.state != FloorState.ENDED:
+                await self._set_state(FloorState.ENDED)
             yield {"event_type": "ended", "data": {"session_id": self.session_id}}
 
     async def _process_event(self, event: Any) -> Optional[dict]:
@@ -240,3 +274,52 @@ class FloorManager:
             return
 
         await put_human_input(name, text)
+
+    async def request_interrupt(self, speaker: str) -> None:
+        """处理打断请求。
+
+        当参与者请求打断当前发言者时调用。
+        记录打断者，切换到 INTERRUPTED 状态，
+        通知主持人进行下一轮选择。
+
+        Args:
+            speaker: 请求打断的参与者名字。
+        """
+        logger.info(f"打断请求: {speaker} 请求发言 (当前发言者: {self.current_speaker})")
+        self._interrupt_queue.append(speaker)
+
+        await self._set_state(FloorState.INTERRUPTED)
+
+        # 发送打断通知消息
+        await self._emit_message("系统", f"{speaker} 举手请求发言", "interrupt")
+
+        # 通知打断事件
+        if self._on_interrupt:
+            await self._on_interrupt(speaker, self.current_speaker or "")
+
+        # 短暂暂停后恢复到选择发言者状态
+        await asyncio.sleep(0.5)
+        await self._set_state(FloorState.SELECTING_SPEAKER)
+
+    async def handle_push_to_talk_start(self, speaker: str) -> None:
+        """处理 Push-to-Talk 开始事件。
+
+        标记参与者开始发言，切换到人类发言状态。
+
+        Args:
+            speaker: 开始发言的参与者名字。
+        """
+        logger.info(f"PTT 开始: {speaker} 开始发言")
+        if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
+            await self._set_state(FloorState.HUMAN_SPEAKING)
+            await self._emit_turn_change(speaker, is_human=True)
+
+    async def handle_push_to_talk_end(self, speaker: str) -> None:
+        """处理 Push-to-Talk 结束事件。
+
+        标记参与者结束发言。
+
+        Args:
+            speaker: 结束发言的参与者名字。
+        """
+        logger.info(f"PTT 结束: {speaker} 结束发言")

@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -16,6 +15,7 @@ from app.agents.character_templates import load_all_templates
 from app.agents.human_proxy import clear_human_queues, create_human_proxy, put_human_input
 from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character
+from app.config import settings
 from app.core.floor_manager import FloorManager
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
@@ -36,14 +36,14 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
     客户端发送格式:
     {
-        "type": "human_input",
+        "type": "human_input" | "push_to_talk_start" | "push_to_talk_end" | "interrupt",
         "speaker": "小明",
         "content": "我觉得..."
     }
 
     服务端推送格式:
     {
-        "event_type": "message" | "turn_change" | "stream" | "system" | "error" | "ended",
+        "event_type": "message" | "turn_change" | "stream" | "system" | "error" | "api_error" | "ended",
         "data": {...}
     }
     """
@@ -76,9 +76,34 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 await websocket.close()
                 return
 
+        # 验证 LLM 配置
+        is_valid, error_msg = settings.validate_llm_config()
+        if not is_valid:
+            await websocket.send_json({
+                "event_type": "api_error",
+                "data": {
+                    "message": error_msg,
+                    "code": "api_key_missing",
+                    "recoverable": False,
+                },
+            })
+            await websocket.close()
+            return
+
         # 创建 Agent 实例
-        moderator_client = create_moderator_client()
-        character_client = create_character_client()
+        try:
+            moderator_client = create_moderator_client()
+            character_client = create_character_client()
+        except Exception as e:
+            await websocket.send_json({
+                "event_type": "api_error",
+                "data": {
+                    "message": f"创建 AI 客户端失败: {e}",
+                    "recoverable": False,
+                },
+            })
+            await websocket.close()
+            return
 
         all_participant_names = [templates["moderator"].name]
         all_participant_names += [templates[cid].name for cid in character_ids]
@@ -141,9 +166,18 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 }
             )
 
+        async def on_interrupt(interrupter, current_speaker):
+            await websocket.send_json(
+                {
+                    "event_type": "interrupt",
+                    "data": {"interrupter": interrupter, "interrupted_speaker": current_speaker},
+                }
+            )
+
         floor_manager.on_message(on_message)
         floor_manager.on_turn_change(on_turn_change)
         floor_manager.on_state_change(on_state_change)
+        floor_manager.on_interrupt(on_interrupt)
 
         # 通知客户端讨论开始
         await websocket.send_json(
@@ -173,6 +207,18 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         speaker = msg.get("speaker", "")
                         content = msg.get("content", "")
                         await floor_manager.submit_human_input(speaker, content)
+                    elif msg.get("type") == "interrupt":
+                        # 打断请求 - 通知主持人并切换状态
+                        speaker = msg.get("speaker", "")
+                        await floor_manager.request_interrupt(speaker)
+                    elif msg.get("type") == "push_to_talk_start":
+                        # PTT 开始 - 标记用户开始发言
+                        speaker = msg.get("speaker", "")
+                        await floor_manager.handle_push_to_talk_start(speaker)
+                    elif msg.get("type") == "push_to_talk_end":
+                        # PTT 结束 - 标记用户结束发言
+                        speaker = msg.get("speaker", "")
+                        await floor_manager.handle_push_to_talk_end(speaker)
 
             except WebSocketDisconnect:
                 logger.info("WebSocket 断开连接")
@@ -208,7 +254,7 @@ async def _run_discussion(websocket: WebSocket, floor_manager: FloorManager, top
         if event["event_type"] == "ended":
             await websocket.send_json(event)
             break
-        elif event["event_type"] == "error":
+        elif event["event_type"] in ("error", "api_error"):
             await websocket.send_json(event)
             break
         elif event["event_type"] == "stream":

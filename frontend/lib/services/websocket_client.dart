@@ -12,7 +12,8 @@ enum WsEventType {
   system,
   humanInputRequested,
   error,
-  ended;
+  ended,
+  interrupt;
 
   static WsEventType fromString(String type) {
     return WsEventType.values.firstWhere(
@@ -25,7 +26,7 @@ enum WsEventType {
     return snakeCase
         .split('_')
         .asMap()
-        .map((i, part) => MapEntry(i, i == 0 ? part : part.capitalize()))
+        .map((i, part) => MapEntry(i, i == 0 ? part : '${part[0].toUpperCase()}${part.substring(1)}'))
         .values
         .join('');
   }
@@ -108,6 +109,36 @@ class DiscussionWebSocket {
       'type': 'human_input',
       'speaker': speaker,
       'content': content,
+    }));
+  }
+
+  /// 发送 Push-to-Talk 开始信号
+  void sendPushToTalkStart({required String speaker}) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'push_to_talk_start',
+      'speaker': speaker,
+    }));
+  }
+
+  /// 发送 Push-to-Talk 结束信号
+  void sendPushToTalkEnd({required String speaker}) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'push_to_talk_end',
+      'speaker': speaker,
+    }));
+  }
+
+  /// 发送打断请求（举手）
+  void sendInterrupt({required String speaker}) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'interrupt',
+      'speaker': speaker,
     }));
   }
 

@@ -1,19 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/discussion_models.dart';
-import '../../services/api_client.dart';
+import '../../state/settings_provider.dart';
 import '../session/session_screen.dart';
 
 /// 首页 - 话题选择和角色配置
-class HomeScreen extends StatefulWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final ApiClient _apiClient = ApiClient();
+class _HomeScreenState extends ConsumerState<HomeScreen> {
   List<Topic> _topics = [];
   List<CharacterTemplate> _characters = [];
   bool _loading = true;
@@ -31,8 +31,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadData() async {
     try {
-      final topicsData = await _apiClient.getTopics();
-      final charsData = await _apiClient.getCharacters();
+      final apiClient = ref.read(apiClientProvider);
+      final topicsData = await apiClient.getTopics();
+      final charsData = await apiClient.getCharacters();
       setState(() {
         _topics = topicsData.map((t) => Topic.fromJson(t)).toList();
         _characters = charsData.map((c) => CharacterTemplate.fromJson(c)).toList();
