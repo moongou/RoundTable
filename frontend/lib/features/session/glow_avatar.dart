@@ -66,6 +66,25 @@ class _GlowAvatarState extends State<GlowAvatar>
     0, 0, 0, 1, 0,
   ]);
 
+  /// Renders the avatar as a network image (URL) or emoji text.
+  static Widget _buildAvatarContent(String avatar, double size) {
+    if (avatar.startsWith('http')) {
+      return ClipOval(
+        child: Image.network(
+          avatar,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) =>
+              const Center(child: Text('🤖', style: TextStyle(fontSize: 28))),
+        ),
+      );
+    }
+    return Center(
+      child: Text(avatar, style: const TextStyle(fontSize: 28)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final color = AppColors.getParticipantColor(widget.name);
@@ -127,9 +146,7 @@ class _GlowAvatarState extends State<GlowAvatar>
                         ),
                       ],
                     ),
-                    child: Center(
-                      child: Text(widget.avatar, style: const TextStyle(fontSize: 28)),
-                    ),
+                    child: _buildAvatarContent(widget.avatar, size),
                   ),
                   if (widget.hasRaisedHand)
                     Positioned(

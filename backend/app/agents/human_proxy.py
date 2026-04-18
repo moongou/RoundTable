@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Awaitable, Callable, Optional
 
@@ -13,6 +14,8 @@ from autogen_agentchat.agents import UserProxyAgent
 from autogen_core import CancellationToken
 
 from app.models.session import ParticipantType
+
+logger = logging.getLogger(__name__)
 
 
 # 存储每个人类参与者的输入队列
@@ -38,13 +41,15 @@ def safe_agent_name(name: str) -> str:
     return safe if safe else "human"
 
 
-def make_human_input_func(name: str) -> Callable[[str, Optional[CancellationToken]], Awaitable[str]]:
+def make_human_input_func(name: str, timeout: float = 45.0) -> Callable[[str, Optional[CancellationToken]], Awaitable[str]]:
     """为指定的人类参与者创建 input_func。
 
     该函数会阻塞等待 STT/WebSocket 将转录文本放入队列。
+    若超时，自动返回跳过消息，避免讨论无限期挂起。
 
     Args:
         name: 参与者名字。
+        timeout: 等待超时秒数（默认 45 秒）。
 
     Returns:
         异步 input_func，供 UserProxyAgent 使用。
@@ -54,7 +59,11 @@ def make_human_input_func(name: str) -> Callable[[str, Optional[CancellationToke
         queue = _human_input_queues.get(name)
         if queue is None:
             raise RuntimeError(f"参与者 '{name}' 的输入队列不存在")
-        return await queue.get()
+        try:
+            return await asyncio.wait_for(queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"参与者 '{name}' 等待超时（{timeout}s），自动跳过本轮")
+            return "（我先听听大家的意见）"
 
     return input_func
 

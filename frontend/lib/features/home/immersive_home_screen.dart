@@ -399,7 +399,7 @@ class _IconBtn extends StatelessWidget {
 }
 
 // ─── Wide Layout ──────────────────────────────────────────────────────────────
-class _WideLayout extends StatelessWidget {
+class _WideLayout extends StatefulWidget {
   final List<Topic> topics;
   final List<Map<String, dynamic>> categories;
   final String? selectedCategory;
@@ -435,29 +435,59 @@ class _WideLayout extends StatelessWidget {
   });
 
   @override
+  State<_WideLayout> createState() => _WideLayoutState();
+}
+
+class _WideLayoutState extends State<_WideLayout> {
+  // Resizable panel widths (will be clamped to min/max on build)
+  double _leftPanelWidth = 300;   // category+topic combined
+  double _rightPanelWidth = 300;  // thinkers
+
+  static const double _minLeft = 180;
+  static const double _maxLeft = 520;
+  static const double _minRight = 200;
+  static const double _maxRight = 500;
+
+  @override
   Widget build(BuildContext context) {
-    final moderator = characters.where((c) => c.id == 'moderator').firstOrNull;
-    final selectableChars =
-        characters.where((c) => c.id != 'moderator').toList();
+    final moderator = widget.characters.where((c) => c.id == 'moderator').firstOrNull;
+    final selectableChars = widget.characters.where((c) => c.id != 'moderator').toList();
+    final totalWidth = MediaQuery.of(context).size.width;
+
+    // Ensure right panel doesn't exceed available space
+    final maxRight = (totalWidth - _leftPanelWidth - 320).clamp(_minRight, _maxRight);
+    final effectiveRight = _rightPanelWidth.clamp(_minRight, maxRight);
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // ── Left panel (resizable) ─────────────────────────────────────────
         SizedBox(
-          width: 300,
+          width: _leftPanelWidth,
           child: _LeftPanel(
-            topics: topics,
-            categories: categories,
-            selectedCategory: selectedCategory,
-            selectedTopicId: selectedTopicId,
-            onCategoryChanged: onCategoryChanged,
-            onTopicSelected: onTopicSelected,
+            topics: widget.topics,
+            categories: widget.categories,
+            selectedCategory: widget.selectedCategory,
+            selectedTopicId: widget.selectedTopicId,
+            onCategoryChanged: widget.onCategoryChanged,
+            onTopicSelected: widget.onTopicSelected,
           ),
         ),
+
+        // ── Left drag handle ───────────────────────────────────────────────
+        _ResizeHandle(
+          axis: Axis.vertical,
+          onDrag: (dx) {
+            setState(() {
+              _leftPanelWidth = (_leftPanelWidth + dx).clamp(_minLeft, _maxLeft);
+            });
+          },
+        ),
+
+        // ── Center column ──────────────────────────────────────────────────
         Expanded(
           child: Column(
             children: [
-              // 老师 — vertically centered between screen top and table top
               Expanded(
                 child: Center(
                   child: moderator != null
@@ -465,36 +495,90 @@ class _WideLayout extends StatelessWidget {
                       : const SizedBox.shrink(),
                 ),
               ),
-              // 圆桌
               _CenterTable(
-                canStart: canStart,
-                pulseAnim: pulseAnim,
-                onStart: onStart,
-                selectedCount:
-                    selectedCharacterIds.length + selectedThinkerIds.length,
+                canStart: widget.canStart,
+                pulseAnim: widget.pulseAnim,
+                onStart: widget.onStart,
+                selectedCount: widget.selectedCharacterIds.length +
+                    widget.selectedThinkerIds.length,
               ),
-              // 角色 — vertically centered between table bottom and screen bottom
               Expanded(
                 child: Center(
                   child: _InlineCharacterRow(
                     characters: selectableChars,
-                    selectedCharacterIds: selectedCharacterIds,
-                    onCharacterToggled: onCharacterToggled,
+                    selectedCharacterIds: widget.selectedCharacterIds,
+                    onCharacterToggled: widget.onCharacterToggled,
                   ),
                 ),
               ),
             ],
           ),
         ),
+
+        // ── Right drag handle ──────────────────────────────────────────────
+        _ResizeHandle(
+          axis: Axis.vertical,
+          onDrag: (dx) {
+            setState(() {
+              _rightPanelWidth = (_rightPanelWidth - dx).clamp(_minRight, maxRight);
+            });
+          },
+        ),
+
+        // ── Right panel (resizable) ────────────────────────────────────────
         SizedBox(
-          width: 250,
+          width: effectiveRight,
           child: _RightPanel(
-            thinkers: thinkers,
-            selectedThinkerIds: selectedThinkerIds,
-            onThinkerToggled: onThinkerToggled,
+            thinkers: widget.thinkers,
+            selectedThinkerIds: widget.selectedThinkerIds,
+            onThinkerToggled: widget.onThinkerToggled,
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Drag handle widget for resizing panels
+class _ResizeHandle extends StatefulWidget {
+  final Axis axis;
+  final ValueChanged<double> onDrag;
+
+  const _ResizeHandle({required this.axis, required this.onDrag});
+
+  @override
+  State<_ResizeHandle> createState() => _ResizeHandleState();
+}
+
+class _ResizeHandleState extends State<_ResizeHandle> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onHorizontalDragUpdate: (d) => widget.onDrag(d.delta.dx),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 6,
+          color: _hovered
+              ? _kNeonCyan.withValues(alpha: 0.35)
+              : _kBorder.withValues(alpha: 0.6),
+          child: Center(
+            child: Container(
+              width: 2,
+              height: 32,
+              decoration: BoxDecoration(
+                color: _hovered ? _kNeonCyan : _kTextSecondary.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(1),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -587,8 +671,8 @@ class _NarrowLayout extends StatelessWidget {
   }
 }
 
-// ─── Left Panel ───────────────────────────────────────────────────────────────
-class _LeftPanel extends StatelessWidget {
+// ─── Left Panel (2 sub-columns: categories | topics) ─────────────────────────
+class _LeftPanel extends StatefulWidget {
   final List<Topic> topics;
   final List<Map<String, dynamic>> categories;
   final String? selectedCategory;
@@ -606,6 +690,15 @@ class _LeftPanel extends StatelessWidget {
   });
 
   @override
+  State<_LeftPanel> createState() => _LeftPanelState();
+}
+
+class _LeftPanelState extends State<_LeftPanel> {
+  double _catColWidth = 90;
+  static const double _minCat = 72;
+  static const double _maxCat = 180;
+
+  @override
   Widget build(BuildContext context) {
     return Container(
       height: double.infinity,
@@ -613,18 +706,177 @@ class _LeftPanel extends StatelessWidget {
         color: _kSurface,
         border: Border(right: BorderSide(color: _kBorder)),
       ),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: _SectionPanel(
-          title: '话题',
-          neonColor: _kNeonCyan,
-          child: _TopicsContent(
-            topics: topics,
-            categories: categories,
-            selectedCategory: selectedCategory,
-            selectedTopicId: selectedTopicId,
-            onCategoryChanged: onCategoryChanged,
-            onTopicSelected: onTopicSelected,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ── Category column ───────────────────────────────────────────────
+          SizedBox(
+            width: _catColWidth,
+            child: Container(
+              decoration: const BoxDecoration(
+                border: Border(right: BorderSide(color: _kBorder, width: 0.5)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 14, 10, 8),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 2,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            color: _kNeonCyan,
+                            borderRadius: BorderRadius.circular(1),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        const Text('分类',
+                            style: TextStyle(
+                              color: _kNeonCyan,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.5,
+                            )),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _CategoryItem(
+                            label: '全部',
+                            selected: widget.selectedCategory == null,
+                            onTap: () => widget.onCategoryChanged(null),
+                          ),
+                          ...widget.categories.map((cat) {
+                            final id = cat['id'] as String? ?? '';
+                            final name = cat['name'] as String? ?? id;
+                            return _CategoryItem(
+                              label: name,
+                              selected: widget.selectedCategory == id,
+                              onTap: () => widget.onCategoryChanged(id),
+                            );
+                          }),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // ── Inner drag handle ─────────────────────────────────────────────
+          _ResizeHandle(
+            axis: Axis.vertical,
+            onDrag: (dx) {
+              setState(() {
+                _catColWidth = (_catColWidth + dx).clamp(_minCat, _maxCat);
+              });
+            },
+          ),
+
+          // ── Topics column ─────────────────────────────────────────────────
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 2,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: _kNeonCyan,
+                          borderRadius: BorderRadius.circular(1),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Text('话题',
+                          style: TextStyle(
+                            color: _kNeonCyan,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.5,
+                          )),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
+                    child: Column(
+                      children: widget.topics.map((topic) => _TopicRow(
+                        topic: topic,
+                        isSelected: widget.selectedTopicId == topic.id,
+                        onTap: () => widget.onTopicSelected(topic),
+                      )).toList(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Vertical category item (for the left sub-column)
+class _CategoryItem extends StatefulWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _CategoryItem({required this.label, required this.selected, required this.onTap});
+
+  @override
+  State<_CategoryItem> createState() => _CategoryItemState();
+}
+
+class _CategoryItemState extends State<_CategoryItem> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+          decoration: BoxDecoration(
+            color: widget.selected
+                ? _kNeonCyan.withValues(alpha: 0.15)
+                : _hovered
+                    ? _kCard
+                    : Colors.transparent,
+            border: Border(
+              left: BorderSide(
+                color: widget.selected ? _kNeonCyan : Colors.transparent,
+                width: 2,
+              ),
+            ),
+          ),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              color: widget.selected ? _kNeonCyan : _kTextSecondary,
+              fontSize: 12,
+              fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
+            ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
         ),
       ),

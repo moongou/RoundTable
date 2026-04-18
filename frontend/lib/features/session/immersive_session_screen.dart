@@ -171,6 +171,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
       setState(() => _statusText = '已连接');
 
+      // 连接后立即预填参与者，确保主持人(老师)和所有角色从一开始就显示在圆桌上
+      _prePopulateParticipants();
+
       // 监听事件
       _wsClient.events.listen(_handleEvent);
     } catch (e) {
@@ -180,6 +183,44 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   // 从系统事件获取的完整参与者列表
   List<String> _knownParticipants = [];
+
+  /// 角色 ID → 显示名映射（与后端 character_templates 对应）
+  static const _charIdToName = <String, String>{
+    'moderator':   '李老师',
+    'explorer':    '小探',
+    'skeptic':     '小疑',
+    'peacemaker':  '小和',
+    'storyteller': '小说',
+    'optimist':    '小明',
+    'questioner':  '小思',
+    'rationalist': '小理',
+    'empath':      '小爱',
+    'innovator':   '小想',
+    'pragmatist':  '小行',
+  };
+
+  /// 连接成功后立即预填参与者，确保老师和所有角色出现在圆桌上
+  void _prePopulateParticipants() {
+    // 始终包含老师（即使 characterIds 里没有 moderator，也强制加入）
+    final names = <String>{'李老师'};
+
+    // 所有选中的角色
+    for (final id in widget.characterIds) {
+      final name = _charIdToName[id] ?? id;
+      if (name != '李老师') names.add(name); // 避免重复
+    }
+
+    // 思想家直接使用 ID（后端会用 display_name，与 thinker yaml 里的 name 一致）
+    for (final id in widget.thinkerIds) {
+      names.add(id);
+    }
+
+    // 人类参与者
+    names.add(widget.humanName);
+
+    _knownParticipants = names.toList();
+    _buildParticipants();
+  }
 
   void _buildParticipants() {
     // 构建参与者列表：AI 角色 + 思想家 + 人类
@@ -203,7 +244,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       names.add(_currentSpeaker);
     }
 
-    // 旧角色模板的头像映射
+    // 旧角色模板的头像映射 - 使用 DiceBear 网络头像（PNG，64px）
+    // 每个名字/ID 对应一个固定的 DiceBear 头像 URL
+    // 备用 emoji 只在网络失败时显示（errorBuilder 里）
     const templateAvatarMap = {
       'moderator': '👩‍🏫',
       '李老师': '👩‍🏫',
@@ -229,21 +272,29 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       '小行': '🔧',
     };
 
+    /// DiceBear avatar URL for a given seed name
+    String diceBearUrl(String seed, {String style = 'notionists-neutral'}) {
+      final encoded = Uri.encodeComponent(seed);
+      return 'https://api.dicebear.com/7.x/$style/png?seed=$encoded&size=128&backgroundColor=b6e3f4,c0aede,d1d4f9,ffd5dc';
+    }
+
     // 为所有参与者分配头像并建立音色映射
     int thinkerVoiceIndex = 0;
     for (final name in names) {
       if (name == widget.humanName) {
-        avatars[name] = '🙋';
+        avatars[name] = diceBearUrl(name, style: 'personas');
         // 人类不需要 TTS 音色
-      } else if (templateAvatarMap.containsKey(name)) {
-        avatars[name] = templateAvatarMap[name]!;
-        _voiceMap.putIfAbsent(name, () => _nameToVoice[name] ?? 'zh-CN-XiaoxiaoNeural');
       } else {
-        // 思想家或动态参与者 - 轮转分配男声
-        avatars[name] = '🧠';
-        _voiceMap.putIfAbsent(name,
-            () => _maleThinkerVoices[thinkerVoiceIndex % _maleThinkerVoices.length]);
-        thinkerVoiceIndex++;
+        // AI 角色和思想家都使用 DiceBear 网络头像
+        avatars[name] = diceBearUrl(name);
+        if (templateAvatarMap.containsKey(name)) {
+          _voiceMap.putIfAbsent(name, () => _nameToVoice[name] ?? 'zh-CN-XiaoxiaoNeural');
+        } else {
+          // 思想家 - 轮转分配男声
+          _voiceMap.putIfAbsent(name,
+              () => _maleThinkerVoices[thinkerVoiceIndex % _maleThinkerVoices.length]);
+          thinkerVoiceIndex++;
+        }
       }
     }
 
