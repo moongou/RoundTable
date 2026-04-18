@@ -21,12 +21,20 @@ _human_input_queues: dict[str, asyncio.Queue[str]] = {}
 
 
 def safe_agent_name(name: str) -> str:
-    """将任意名字转为 AutoGen 兼容格式（只允许 [a-zA-Z0-9_-]）。
+    """将任意名字转为合法 Python 标识符（AutoGen 要求 str.isidentifier()）。
 
-    非 ASCII 字符替换为 u{hex} 编码，保证唯一性和确定性。
-    例如: "同学" → "u540cu5b66"
+    - 连字符 '-' → 下划线 '_'
+    - 其他非 ASCII / 非标识符字符 → u{hex} 编码
+    - 若首字符为数字，前缀 '_'
+    例如: "henry-ford" → "henry_ford", "同学" → "u540cu5b66"
     """
-    safe = re.sub(r"[^a-zA-Z0-9_\-]", lambda m: f"u{ord(m.group()):04x}", name)
+    safe = re.sub(
+        r"[^a-zA-Z0-9_]",
+        lambda m: "_" if m.group() == "-" else f"u{ord(m.group()):04x}",
+        name,
+    )
+    if safe and safe[0].isdigit():
+        safe = "_" + safe
     return safe if safe else "human"
 
 

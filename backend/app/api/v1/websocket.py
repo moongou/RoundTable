@@ -132,7 +132,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             if cid in templates and cid != "moderator":
                 agent_display_map[cid] = templates[cid].name
         for tid in thinker_ids:
-            agent_display_map[tid] = get_thinker(tid).get("name", tid)
+            agent_display_map[safe_agent_name(tid)] = get_thinker(tid).get("name", tid)
         for hn in dict.fromkeys(human_names):
             agent_display_map[safe_agent_name(hn)] = hn
 

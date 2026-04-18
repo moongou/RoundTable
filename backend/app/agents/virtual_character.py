@@ -6,6 +6,7 @@ from autogen_agentchat.agents import AssistantAgent
 from autogen_core.models import ChatCompletionClient
 
 from app.agents.character_templates import get_template
+from app.agents.human_proxy import safe_agent_name
 from app.core.thinkers import get_thinker
 
 
@@ -56,7 +57,7 @@ def create_thinker_agent(
     system_message += f"\n\n讨论主题：{topic}"
 
     return AssistantAgent(
-        name=thinker_id,
+        name=safe_agent_name(thinker_id),
         model_client=model_client,
         system_message=system_message,
         description=description,

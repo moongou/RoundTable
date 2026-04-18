@@ -434,49 +434,62 @@ class _WideLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    final moderator = characters.where((c) => c.id == 'moderator').firstOrNull;
+    final selectableChars = characters.where((c) => c.id != 'moderator').toList();
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        SizedBox(
+          width: 300,
+          child: _LeftPanel(
+            topics: topics,
+            categories: categories,
+            selectedCategory: selectedCategory,
+            selectedTopicId: selectedTopicId,
+            onCategoryChanged: onCategoryChanged,
+            onTopicSelected: onTopicSelected,
+          ),
+        ),
         Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Column(
             children: [
-              SizedBox(
-                width: 300,
-                child: _LeftPanel(
-                  topics: topics,
-                  categories: categories,
-                  selectedCategory: selectedCategory,
-                  selectedTopicId: selectedTopicId,
-                  onCategoryChanged: onCategoryChanged,
-                  onTopicSelected: onTopicSelected,
-                ),
-              ),
+              // 老师 — vertically centered between screen top and table top
               Expanded(
                 child: Center(
-                  child: _CenterTable(
-                    canStart: canStart,
-                    pulseAnim: pulseAnim,
-                    onStart: onStart,
-                    selectedCount:
-                        selectedCharacterIds.length + selectedThinkerIds.length,
-                  ),
+                  child: moderator != null
+                      ? _ModeratorBadge(mod: moderator)
+                      : const SizedBox.shrink(),
                 ),
               ),
-              SizedBox(
-                width: 250,
-                child: _RightPanel(
-                  thinkers: thinkers,
-                  selectedThinkerIds: selectedThinkerIds,
-                  onThinkerToggled: onThinkerToggled,
+              // 圆桌
+              _CenterTable(
+                canStart: canStart,
+                pulseAnim: pulseAnim,
+                onStart: onStart,
+                selectedCount:
+                    selectedCharacterIds.length + selectedThinkerIds.length,
+              ),
+              // 角色 — vertically centered between table bottom and screen bottom
+              Expanded(
+                child: Center(
+                  child: _InlineCharacterRow(
+                    characters: selectableChars,
+                    selectedCharacterIds: selectedCharacterIds,
+                    onCharacterToggled: onCharacterToggled,
+                  ),
                 ),
               ),
             ],
           ),
         ),
-        _CharacterBar(
-          characters: characters,
-          selectedCharacterIds: selectedCharacterIds,
-          onCharacterToggled: onCharacterToggled,
+        SizedBox(
+          width: 250,
+          child: _RightPanel(
+            thinkers: thinkers,
+            selectedThinkerIds: selectedThinkerIds,
+            onThinkerToggled: onThinkerToggled,
+          ),
         ),
       ],
     );
@@ -754,15 +767,26 @@ class _TopicsContent extends StatelessWidget {
             ),
           ),
         const SizedBox(height: 10),
-        ...topics.take(14).map((topic) => _TopicRow(
-              topic: topic,
-              isSelected: selectedTopicId == topic.id,
-              onTap: () => onTopicSelected(topic),
-            )),
-        if (topics.length > 14)
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisSpacing: 4,
+            crossAxisSpacing: 4,
+            mainAxisExtent: 44,
+          ),
+          itemCount: topics.length.clamp(0, 28),
+          itemBuilder: (_, i) => _TopicRow(
+            topic: topics[i],
+            isSelected: selectedTopicId == topics[i].id,
+            onTap: () => onTopicSelected(topics[i]),
+          ),
+        ),
+        if (topics.length > 28)
           Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: Text('+${topics.length - 14} 个话题',
+            child: Text('+${topics.length - 28} 个话题',
                 style: const TextStyle(
                     color: _kTextSecondary, fontSize: 11)),
           ),
@@ -1002,18 +1026,24 @@ class _ThinkerGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: thinkers
-          .map((t) => _ThinkerChip(
-                avatar: t['avatar'] as String? ?? '🧠',
-                name: t['name'] as String? ?? (t['id'] as String? ?? ''),
-                isSelected: selectedIds.contains(t['id'] as String? ?? ''),
-                onTap: () => onToggled(t['id'] as String? ?? ''),
-              ))
-          .toList(),
-    );
+    return LayoutBuilder(builder: (context, constraints) {
+      final chipW = (constraints.maxWidth - 8) / 2;
+      return Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: thinkers
+            .map((t) => SizedBox(
+                  width: chipW,
+                  child: _ThinkerChip(
+                    avatar: t['avatar'] as String? ?? '🧠',
+                    name: t['name'] as String? ?? (t['id'] as String? ?? ''),
+                    isSelected: selectedIds.contains(t['id'] as String? ?? ''),
+                    onTap: () => onToggled(t['id'] as String? ?? ''),
+                  ),
+                ))
+            .toList(),
+      );
+    });
   }
 }
 
@@ -1046,6 +1076,7 @@ class _ThinkerChipState extends State<_ThinkerChip> {
         onTap: widget.onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
+          width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
           decoration: BoxDecoration(
             color: widget.isSelected
@@ -1288,13 +1319,54 @@ class _StartButtonState extends State<_StartButton> {
   }
 }
 
-// ─── Character Bar ────────────────────────────────────────────────────────────
-class _CharacterBar extends StatelessWidget {
+// ─── Moderator Badge (above table) ───────────────────────────────────────────
+class _ModeratorBadge extends StatelessWidget {
+  final CharacterTemplate mod;
+  const _ModeratorBadge({required this.mod});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+      decoration: BoxDecoration(
+        color: _kNeonGold.withValues(alpha: 0.12),
+        border: Border.all(color: _kNeonGold.withValues(alpha: 0.65), width: 1.5),
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(color: _kNeonGold.withValues(alpha: 0.20), blurRadius: 18),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.school_rounded, color: _kNeonGold, size: 15),
+          const SizedBox(width: 7),
+          Text(mod.avatar, style: const TextStyle(fontSize: 17)),
+          const SizedBox(width: 5),
+          Text(
+            mod.name,
+            style: const TextStyle(
+                color: _kNeonGold, fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '主持',
+            style: TextStyle(
+                color: _kNeonGold.withValues(alpha: 0.55), fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Inline Character Row (below table) ──────────────────────────────────────
+class _InlineCharacterRow extends StatelessWidget {
   final List<CharacterTemplate> characters;
   final Set<String> selectedCharacterIds;
   final ValueChanged<String> onCharacterToggled;
 
-  const _CharacterBar({
+  const _InlineCharacterRow({
     required this.characters,
     required this.selectedCharacterIds,
     required this.onCharacterToggled,
@@ -1302,80 +1374,24 @@ class _CharacterBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final moderator =
-        characters.where((c) => c.id == 'moderator').firstOrNull;
-    final selectableChars =
-        characters.where((c) => c.id != 'moderator').toList();
-
-    return Container(
-      decoration: const BoxDecoration(
-        color: _kSurface,
-        border: Border(top: BorderSide(color: _kBorder)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (moderator != null) ..._buildModeratorChip(moderator),
-            if (moderator != null)
-              Container(
-                width: 1,
-                height: 34,
-                color: _kBorder,
-                margin: const EdgeInsets.symmetric(horizontal: 16),
-              ),
-            ...selectableChars.map(
-              (char) => Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: _CharChip(
-                  avatar: char.avatar,
-                  name: char.name,
-                  isSelected: selectedCharacterIds.contains(char.id),
-                  onTap: () => onCharacterToggled(char.id),
-                ),
-              ),
-            ),
-          ],
-        ),
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: characters
+            .map((char) => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: _CharChip(
+                    avatar: char.avatar,
+                    name: char.name,
+                    isSelected: selectedCharacterIds.contains(char.id),
+                    onTap: () => onCharacterToggled(char.id),
+                  ),
+                ))
+            .toList(),
       ),
     );
   }
-
-  List<Widget> _buildModeratorChip(CharacterTemplate mod) => [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-          decoration: BoxDecoration(
-            color: _kNeonGold.withValues(alpha: 0.12),
-            border: Border.all(
-                color: _kNeonGold.withValues(alpha: 0.65), width: 1.5),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.school_rounded, color: _kNeonGold, size: 14),
-              const SizedBox(width: 6),
-              Text(mod.avatar, style: const TextStyle(fontSize: 15)),
-              const SizedBox(width: 4),
-              Text(
-                mod.name,
-                style: const TextStyle(
-                    color: _kNeonGold,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(width: 5),
-              Text(
-                '主持',
-                style: TextStyle(
-                    color: _kNeonGold.withValues(alpha: 0.55), fontSize: 11),
-              ),
-            ],
-          ),
-        ),
-      ];
 }
 
 // ─── Loading View ─────────────────────────────────────────────────────────────
