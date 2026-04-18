@@ -132,15 +132,17 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
       if (key.isNotEmpty) updates['${p.id}_api_key'] = key;
       if (url.isNotEmpty) updates['${p.id}_base_url'] = url;
       if (mdl.isNotEmpty) updates['${p.id}_model'] = mdl;
-      if (updates.isEmpty) { _snack('无内容更改'); return; }
+      // 同时切换到此提供商（保存即激活）
+      updates['llm_provider'] = p.id;
       final client = ref.read(apiClientProvider);
       if (persist) {
         await client.saveConfig(updates);
-        _snack('✅ 已写入 .env 永久保存');
+        _snack('✅ 已写入 .env 并切换到 ${p.name}');
       } else {
         await client.updateConfig(updates);
-        _snack('✅ 已应用（本次运行有效）');
+        _snack('✅ 已应用并切换到 ${p.name}（本次运行有效）');
       }
+      await ref.read(localSettingsProvider.notifier).setLlmProvider(p.id);
       ref.invalidate(providersProvider);
       ref.invalidate(currentConfigProvider);
     } catch (e) {
@@ -360,179 +362,255 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
           ),
         ],
       ),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 600),
-          child: ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        children: [
-          // ─ 服务器地址 ──────────────────────────────────────────────────
-          _Section(title: '服务器地址', icon: Icons.dns_outlined, children: [
-            Row(children: [
-              Expanded(child: _Field(ctrl: _serverUrlCtrl, hint: 'http://localhost:8001', onDone: (_) => _saveServerUrl())),
-              const SizedBox(width: 8),
-              _GoldBtn('保存', onTap: _saveServerUrl),
-            ]),
-            const SizedBox(height: 8),
-            currentAsync.when(
-              data: (c) => Text('当前：${c.llmProviderName} › ${c.model}',
-                  style: const TextStyle(color: AppColors.warmGray, fontSize: 11)),
-              loading: () => const SizedBox.shrink(),
-              error: (_, __) => const Text('⚠ 无法连接服务器，请检查地址',
-                  style: TextStyle(color: Colors.orange, fontSize: 11)),
-            ),
-          ]),
-          const SizedBox(height: 14),
-
-          // ─ LLM 提供商 ──────────────────────────────────────────────────
-          _Section(title: 'AI 模型提供商', icon: Icons.smart_toy_outlined, children: [
-            providersAsync.when(
-              data: (list) => Column(children: list.map((p) => _providerTile(p, s)).toList()),
-              loading: () => const _Spin(),
-              error: (e, _) => _ErrorBox('模型提供商加载失败: $e'),
-            ),
-          ]),
-          const SizedBox(height: 14),
-
-          // ─ ASR ────────────────────────────────────────────────────────
-          _Section(title: '语音识别（ASR）', icon: Icons.mic_outlined, children: [
-            speechAsync.when(
-              data: (sp) => Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: sp.asrProviders.map((p) => _speechTile(p, s.asrProvider, isAsr: true)).toList(),
-              ),
-              loading: () => const _Spin(),
-              error: (e, _) => _ErrorBox('语音识别配置加载失败: $e'),
-            ),
-          ]),
-          const SizedBox(height: 14),
-
-          // ─ TTS ────────────────────────────────────────────────────────
-          _Section(title: '语音合成（TTS）', icon: Icons.volume_up_outlined, children: [
-            speechAsync.when(
-              data: (sp) => Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: sp.ttsProviders.map((p) => _speechTile(p, s.ttsProvider, isAsr: false)).toList(),
-              ),
-              loading: () => const _Spin(),
-              error: (e, _) => _ErrorBox('语音合成配置加载失败: $e'),
-            ),
-          ]),
-          const SizedBox(height: 14),
-
-          // ─ Push-to-Talk ───────────────────────────────────────────────
-          _Section(title: '交互方式', icon: Icons.touch_app_outlined, children: [
-            SwitchListTile(
-              title: const Text('按住说话（Push-to-Talk）', style: TextStyle(color: AppColors.warmWhite)),
-              subtitle: const Text('空格键：按住录音，松开发送  ·  Esc：取消',
-                  style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
-              value: s.pushToTalk,
-              onChanged: (v) async {
-                ref.read(localSettingsProvider.notifier).setPushToTalk(v);
-                await ref.read(apiClientProvider).updateConfig({'push_to_talk': v});
-              },
-              contentPadding: EdgeInsets.zero,
-              activeColor: AppColors.amberGold,
-              dense: true,
-            ),
-          ]),
-          const SizedBox(height: 14),
-
-          // ─ 网络搜索（Tavily）────────────────────────────────────────────
-          _Section(title: '网络搜索（Tavily）', icon: Icons.travel_explore_outlined, children: [
-            currentAsync.when(
-              data: (c) => Row(children: [
-                Icon(c.webSearchEnabled ? Icons.check_circle : Icons.cancel,
-                    size: 14, color: c.webSearchEnabled ? Colors.green : Colors.red),
-                const SizedBox(width: 6),
-                Text(c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用',
-                    style: TextStyle(
-                        color: c.webSearchEnabled ? Colors.green : Colors.orange, fontSize: 12)),
-              ]),
-              loading: () => const SizedBox.shrink(),
-              error: (_, __) => const SizedBox.shrink(),
-            ),
-            const SizedBox(height: 8),
-            const Text('为圆桌讨论启用实时网络搜索能力',
-                style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
-            const SizedBox(height: 8),
-            const _Label('Tavily API Key'),
-            _Field(ctrl: _tavilyKeyCtrl, hint: '输入 Tavily API Key（tvly-...）', obscure: true),
-            const SizedBox(height: 8),
-            Row(children: [
-              _OutBtn(_testingTavily ? '测试中…' : '🔌 测试连接',
-                  onTap: _testingTavily ? null : _testTavily, loading: _testingTavily),
-              if (_tavilyTestResult != null) ...[
-                const SizedBox(width: 8),
-                Icon(_tavilyTestResult!['success'] == true ? Icons.check_circle : Icons.cancel,
-                    color: _tavilyTestResult!['success'] == true ? Colors.green : Colors.red, size: 14),
-                const SizedBox(width: 4),
-                Flexible(child: Text(
-                  _tavilyTestResult!['success'] == true ? '✓ 搜索可用' : _tavilyTestResult!['error']?.toString() ?? '失败',
-                  style: TextStyle(fontSize: 10,
-                      color: _tavilyTestResult!['success'] == true ? Colors.green : Colors.red),
-                  overflow: TextOverflow.ellipsis,
-                )),
-              ],
-            ]),
-            const SizedBox(height: 10),
-            Row(children: [
-              Expanded(child: _OutBtn('应用（本次有效）', onTap: () => _saveTavily())),
-              const SizedBox(width: 8),
-              Expanded(child: _GoldBtn('💾 写入 .env', onTap: () => _saveTavily(persist: true))),
-            ]),
-          ]),
-          const SizedBox(height: 14),
-
-          // ─ 配置总览 ──────────────────────────────────────────────────
-          _Section(title: '配置总览', icon: Icons.dashboard_outlined, children: [
-            currentAsync.when(
-              data: (c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                _SummaryRow('AI 模型', '${c.llmProviderName}  ›  ${c.model}'),
-                _SummaryRow('API Key', c.apiKeyMasked.isNotEmpty ? c.apiKeyMasked : '未配置'),
-                _SummaryRow('语音识别', s.asrProvider.toUpperCase()),
-                _SummaryRow('语音合成', s.ttsProvider.toUpperCase()),
-                _SummaryRow('网络搜索', c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用'),
-                _SummaryRow('交互方式', s.pushToTalk ? '按住说话' : '自由对话'),
-              ]),
-              loading: () => const _Spin(),
-              error: (e, _) => _ErrorBox('无法加载配置: $e'),
-            ),
-          ]),
-          const SizedBox(height: 14),
-
-          // ─ 本地服务健康 ───────────────────────────────────────────────
-          _Section(
-            title: '本地服务状态',
-            icon: Icons.monitor_heart_outlined,
-            action: IconButton(
-              icon: _healthRefreshing
-                  ? const SizedBox(width: 14, height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.amberGold))
-                  : const Icon(Icons.refresh, size: 16, color: AppColors.amberGold),
-              onPressed: _healthRefreshing ? null : () async {
-                setState(() => _healthRefreshing = true);
-                ref.invalidate(healthStatusProvider);
-                await Future.delayed(const Duration(seconds: 2));
-                setState(() => _healthRefreshing = false);
-              },
-              tooltip: '刷新',
-            ),
-            children: [
-              healthAsync.when(
-                data: (map) => Column(children: map.entries.map((e) => _HealthTile(health: e.value)).toList()),
-                loading: () => const _Spin(),
-                error: (e, _) => _ErrorBox('本地服务状态检查失败: $e'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-        ],
-      ),
-        ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final wide = constraints.maxWidth > 900;
+          if (wide) {
+            return _buildWideLayout(s, providersAsync, speechAsync, healthAsync, currentAsync);
+          }
+          return _buildNarrowLayout(s, providersAsync, speechAsync, healthAsync, currentAsync);
+        },
       ),
     );
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  Wide layout (>900 px): two columns
+  // ─────────────────────────────────────────────────────────────────────────
+
+  Widget _buildWideLayout(LocalSettings s, AsyncValue providersAsync,
+      AsyncValue speechAsync, AsyncValue healthAsync, AsyncValue currentAsync) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Left column – server + LLM + web search
+        Expanded(
+          flex: 5,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 10, 32),
+            children: [
+              _buildServerSection(currentAsync),
+              const SizedBox(height: 14),
+              _buildLlmSection(providersAsync, s),
+              const SizedBox(height: 14),
+              _buildTavilySection(currentAsync),
+            ],
+          ),
+        ),
+        // Right column – ASR + TTS + interaction + summary + health
+        Expanded(
+          flex: 4,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(10, 16, 20, 32),
+            children: [
+              _buildAsrSection(speechAsync, s),
+              const SizedBox(height: 14),
+              _buildTtsSection(speechAsync, s),
+              const SizedBox(height: 14),
+              _buildInteractionSection(s),
+              const SizedBox(height: 14),
+              _buildSummarySection(s, currentAsync),
+              const SizedBox(height: 14),
+              _buildHealthSection(healthAsync),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  Narrow layout (≤900 px): single column
+  // ─────────────────────────────────────────────────────────────────────────
+
+  Widget _buildNarrowLayout(LocalSettings s, AsyncValue providersAsync,
+      AsyncValue speechAsync, AsyncValue healthAsync, AsyncValue currentAsync) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      children: [
+        _buildServerSection(currentAsync),
+        const SizedBox(height: 14),
+        _buildLlmSection(providersAsync, s),
+        const SizedBox(height: 14),
+        _buildAsrSection(speechAsync, s),
+        const SizedBox(height: 14),
+        _buildTtsSection(speechAsync, s),
+        const SizedBox(height: 14),
+        _buildInteractionSection(s),
+        const SizedBox(height: 14),
+        _buildTavilySection(currentAsync),
+        const SizedBox(height: 14),
+        _buildSummarySection(s, currentAsync),
+        const SizedBox(height: 14),
+        _buildHealthSection(healthAsync),
+        const SizedBox(height: 32),
+      ],
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  Section builders (reused by both layouts)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  Widget _buildServerSection(AsyncValue currentAsync) => _Section(
+    title: '服务器地址', icon: Icons.dns_outlined, children: [
+      Row(children: [
+        Expanded(child: _Field(ctrl: _serverUrlCtrl, hint: 'http://localhost:8001', onDone: (_) => _saveServerUrl())),
+        const SizedBox(width: 8),
+        _GoldBtn('保存', onTap: _saveServerUrl),
+      ]),
+      const SizedBox(height: 8),
+      currentAsync.when(
+        data: (c) => Text('当前：${c.llmProviderName} › ${c.model}',
+            style: const TextStyle(color: AppColors.warmGray, fontSize: 11)),
+        loading: () => const SizedBox.shrink(),
+        error: (_, __) => const Text('⚠ 无法连接服务器，请检查地址',
+            style: TextStyle(color: Colors.orange, fontSize: 11)),
+      ),
+    ],
+  );
+
+  Widget _buildLlmSection(AsyncValue providersAsync, LocalSettings s) => _Section(
+    title: 'AI 模型提供商', icon: Icons.smart_toy_outlined, children: [
+      providersAsync.when(
+        data: (list) => Column(children: list.map((p) => _providerTile(p, s)).toList()),
+        loading: () => const _Spin(),
+        error: (e, _) => _ErrorBox('模型提供商加载失败: $e'),
+      ),
+    ],
+  );
+
+  Widget _buildAsrSection(AsyncValue speechAsync, LocalSettings s) => _Section(
+    title: '语音识别（ASR）', icon: Icons.mic_outlined, children: [
+      speechAsync.when(
+        data: (sp) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: sp.asrProviders.map((p) => _speechTile(p, s.asrProvider, isAsr: true)).toList(),
+        ),
+        loading: () => const _Spin(),
+        error: (e, _) => _ErrorBox('语音识别配置加载失败: $e'),
+      ),
+    ],
+  );
+
+  Widget _buildTtsSection(AsyncValue speechAsync, LocalSettings s) => _Section(
+    title: '语音合成（TTS）', icon: Icons.volume_up_outlined, children: [
+      speechAsync.when(
+        data: (sp) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: sp.ttsProviders.map((p) => _speechTile(p, s.ttsProvider, isAsr: false)).toList(),
+        ),
+        loading: () => const _Spin(),
+        error: (e, _) => _ErrorBox('语音合成配置加载失败: $e'),
+      ),
+    ],
+  );
+
+  Widget _buildInteractionSection(LocalSettings s) => _Section(
+    title: '交互方式', icon: Icons.touch_app_outlined, children: [
+      SwitchListTile(
+        title: const Text('按住说话（Push-to-Talk）', style: TextStyle(color: AppColors.warmWhite)),
+        subtitle: const Text('空格键：按住录音，松开发送  ·  Esc：取消',
+            style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
+        value: s.pushToTalk,
+        onChanged: (v) async {
+          ref.read(localSettingsProvider.notifier).setPushToTalk(v);
+          await ref.read(apiClientProvider).updateConfig({'push_to_talk': v});
+        },
+        contentPadding: EdgeInsets.zero,
+        activeColor: AppColors.amberGold,
+        dense: true,
+      ),
+    ],
+  );
+
+  Widget _buildTavilySection(AsyncValue currentAsync) => _Section(
+    title: '网络搜索（Tavily）', icon: Icons.travel_explore_outlined, children: [
+      currentAsync.when(
+        data: (c) => Row(children: [
+          Icon(c.webSearchEnabled ? Icons.check_circle : Icons.cancel,
+              size: 14, color: c.webSearchEnabled ? Colors.green : Colors.red),
+          const SizedBox(width: 6),
+          Text(c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用',
+              style: TextStyle(
+                  color: c.webSearchEnabled ? Colors.green : Colors.orange, fontSize: 12)),
+        ]),
+        loading: () => const SizedBox.shrink(),
+        error: (_, __) => const SizedBox.shrink(),
+      ),
+      const SizedBox(height: 8),
+      const Text('为圆桌讨论启用实时网络搜索能力',
+          style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
+      const SizedBox(height: 8),
+      const _Label('Tavily API Key'),
+      _Field(ctrl: _tavilyKeyCtrl, hint: '输入 Tavily API Key（tvly-...）', obscure: true),
+      const SizedBox(height: 8),
+      Row(children: [
+        _OutBtn(_testingTavily ? '测试中…' : '🔌 测试连接',
+            onTap: _testingTavily ? null : _testTavily, loading: _testingTavily),
+        if (_tavilyTestResult != null) ...[
+          const SizedBox(width: 8),
+          Icon(_tavilyTestResult!['success'] == true ? Icons.check_circle : Icons.cancel,
+              color: _tavilyTestResult!['success'] == true ? Colors.green : Colors.red, size: 14),
+          const SizedBox(width: 4),
+          Flexible(child: Text(
+            _tavilyTestResult!['success'] == true ? '✓ 搜索可用' : _tavilyTestResult!['error']?.toString() ?? '失败',
+            style: TextStyle(fontSize: 10,
+                color: _tavilyTestResult!['success'] == true ? Colors.green : Colors.red),
+            overflow: TextOverflow.ellipsis,
+          )),
+        ],
+      ]),
+      const SizedBox(height: 10),
+      Row(children: [
+        Expanded(child: _OutBtn('应用（本次有效）', onTap: () => _saveTavily())),
+        const SizedBox(width: 8),
+        Expanded(child: _GoldBtn('💾 写入 .env', onTap: () => _saveTavily(persist: true))),
+      ]),
+    ],
+  );
+
+  Widget _buildSummarySection(LocalSettings s, AsyncValue currentAsync) => _Section(
+    title: '配置总览', icon: Icons.dashboard_outlined, children: [
+      currentAsync.when(
+        data: (c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _SummaryRow('AI 模型', '${c.llmProviderName}  ›  ${c.model}'),
+          _SummaryRow('API Key', c.apiKeyMasked.isNotEmpty ? c.apiKeyMasked : '未配置'),
+          _SummaryRow('语音识别', s.asrProvider.toUpperCase()),
+          _SummaryRow('语音合成', s.ttsProvider.toUpperCase()),
+          _SummaryRow('网络搜索', c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用'),
+          _SummaryRow('交互方式', s.pushToTalk ? '按住说话' : '自由对话'),
+        ]),
+        loading: () => const _Spin(),
+        error: (e, _) => _ErrorBox('无法加载配置: $e'),
+      ),
+    ],
+  );
+
+  Widget _buildHealthSection(AsyncValue healthAsync) => _Section(
+    title: '本地服务状态',
+    icon: Icons.monitor_heart_outlined,
+    action: IconButton(
+      icon: _healthRefreshing
+          ? const SizedBox(width: 14, height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.amberGold))
+          : const Icon(Icons.refresh, size: 16, color: AppColors.amberGold),
+      onPressed: _healthRefreshing ? null : () async {
+        setState(() => _healthRefreshing = true);
+        ref.invalidate(healthStatusProvider);
+        await Future.delayed(const Duration(seconds: 2));
+        setState(() => _healthRefreshing = false);
+      },
+      tooltip: '刷新',
+    ),
+    children: [
+      healthAsync.when(
+        data: (map) => Column(children: map.entries.map((e) => _HealthTile(health: e.value)).toList()),
+        loading: () => const _Spin(),
+        error: (e, _) => _ErrorBox('本地服务状态检查失败: $e'),
+      ),
+    ],
+  );
 
   // ─────────────────────────────────────────────────────────────────────────
   //  Provider tile

@@ -50,6 +50,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _isMyTurn = false;
   String _statusText = '连接中...';
   bool _hasRaisedHand = false;
+  // 错误追踪：如果先收到错误事件，结束时显示错误原因而非"讨论已结束"
+  String? _lastErrorMessage;
 
   // 参与者
   List<SeatedParticipant> _participants = [];
@@ -293,12 +295,21 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         });
       case WsEventType.error:
         final data = event.data;
+        final errMsg = data?['message'] ?? data?['original_error'] ?? '未知错误';
         setState(() {
-          _statusText = '错误: ${data?['message'] ?? '未知错误'}';
+          _lastErrorMessage = errMsg.toString();
+          _statusText = '错误: $_lastErrorMessage';
         });
+        // Show error dialog
+        if (mounted) {
+          _showErrorDialog(_lastErrorMessage!);
+        }
       case WsEventType.ended:
+        final endedWithError = _lastErrorMessage != null;
         setState(() {
-          _statusText = '讨论已结束';
+          _statusText = endedWithError
+              ? '会话已中断: ${_lastErrorMessage!}'
+              : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
         });
@@ -391,8 +402,59 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     super.dispose();
   }
 
-  void _showChatHistory() {
-    showModalBottomSheet(
+  void _showErrorDialog(String errorMessage) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2A2015),
+        title: const Row(children: [
+          Icon(Icons.error_outline, color: Colors.red, size: 22),
+          SizedBox(width: 8),
+          Text('无法开始讨论', style: TextStyle(color: Color(0xFFF5DEB3), fontSize: 16)),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+              ),
+              child: Text(
+                errorMessage,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '请检查设置页面中的 AI 模型配置，确保已选择正确的提供商并填写有效的 API Key。',
+              style: TextStyle(color: Color(0xFFAA9977), fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.of(context).pushReplacementNamed('/settings');
+            },
+            child: const Text('前往设置', style: TextStyle(color: Color(0xFFD4A017))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭', style: TextStyle(color: Color(0xFFAA9977))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showChatHistory() {    showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.studyWall.withValues(alpha: 0.95),
