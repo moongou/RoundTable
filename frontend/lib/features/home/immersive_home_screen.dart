@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 
 import '../../models/discussion_models.dart';
 import '../../painters/bookshelf_painter.dart';
@@ -10,7 +12,6 @@ import '../../painters/round_table_painter.dart';
 import '../../state/settings_provider.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
-import '../session/glow_avatar.dart';
 import '../session/immersive_session_screen.dart';
 import 'scroll_topic_card.dart';
 
@@ -26,10 +27,14 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     with TickerProviderStateMixin {
   List<Topic> _topics = [];
   List<CharacterTemplate> _characters = [];
+  List<Map<String, dynamic>> _thinkers = [];
+  List<Map<String, dynamic>> _categories = [];
   bool _loading = true;
 
   Topic? _selectedTopic;
-  final Set<String> _selectedCharacterIds = {'explorer', 'skeptic'};
+  String? _selectedCategory;
+  final Set<String> _selectedCharacterIds = {};
+  final Set<String> _selectedThinkerIds = {};
   final TextEditingController _nameController = TextEditingController(text: '同学');
 
   late AnimationController _candleController;
@@ -55,9 +60,17 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       final apiClient = ref.read(apiClientProvider);
       final topicsData = await apiClient.getTopics();
       final charsData = await apiClient.getCharacters();
+      List<Map<String, dynamic>> thinkersData = [];
+      List<Map<String, dynamic>> categoriesData = [];
+      try {
+        thinkersData = await apiClient.getThinkers();
+        categoriesData = await apiClient.getTopicCategories();
+      } catch (_) {}
       setState(() {
         _topics = topicsData.map((t) => Topic.fromJson(t)).toList();
         _characters = charsData.map((c) => CharacterTemplate.fromJson(c)).toList();
+        _thinkers = thinkersData;
+        _categories = categoriesData;
         _loading = false;
       });
       _entranceController.forward();
@@ -71,6 +84,13 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     }
   }
 
+  void _openDevPanel(BuildContext context) {
+    // Open devpanel in a new tab - runs on :8888 on the same host
+    final host = Uri.base.host;
+    final url = 'http://$host:8888';
+    html.window.open(url, '_blank');
+  }
+
   @override
   void dispose() {
     _candleController.dispose();
@@ -79,7 +99,12 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     super.dispose();
   }
 
-  bool get _canStart => _selectedTopic != null;
+  bool get _canStart => _selectedTopic != null && (_selectedCharacterIds.isNotEmpty || _selectedThinkerIds.isNotEmpty);
+
+  List<Topic> get _filteredTopics {
+    if (_selectedCategory == null) return _topics;
+    return _topics.where((t) => t.category == _selectedCategory).toList();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -150,6 +175,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 
     return Column(
       children: [
+        // ─ 顶部标题栏 + 控件 ────────────────────────────────────────
         Padding(
           padding: const EdgeInsets.only(top: 48, left: 24, right: 24),
           child: Row(
@@ -160,8 +186,42 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   style: AppTheme.calligraphyStyleDark(fontSize: 28),
                 ),
               ),
+              // 姓名输入
+              SizedBox(
+                width: 100,
+                height: 36,
+                child: TextField(
+                  controller: _nameController,
+                  style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText: '你的名字',
+                    hintStyle: const TextStyle(color: AppColors.warmGray, fontSize: 12),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3)),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: AppColors.amberGold),
+                    ),
+                    filled: true,
+                    fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
               IconButton(
-                icon: const Icon(Icons.settings, color: AppColors.warmGray),
+                icon: const Icon(Icons.monitor_heart_outlined, color: AppColors.warmGray, size: 20),
+                tooltip: '后台服务',
+                onPressed: () => _openDevPanel(context),
+              ),
+              IconButton(
+                icon: const Icon(Icons.settings, color: AppColors.warmGray, size: 20),
                 onPressed: () => Navigator.pushNamed(context, '/settings'),
               ),
             ],
@@ -172,19 +232,69 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           style: TextStyle(color: AppColors.warmGray, fontSize: 14),
         ),
 
-        const Spacer(),
+        const SizedBox(height: 16),
 
+        // ─ 话题分类筛选 ─────────────────────────────────────────────
+        if (_categories.isNotEmpty) ...[
+          SizedBox(
+            height: 36,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              itemCount: _categories.length + 1,
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  final isAll = _selectedCategory == null;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: Text('全部', style: TextStyle(
+                        color: isAll ? AppColors.scrollTitle : AppColors.warmGray,
+                        fontSize: 12,
+                      )),
+                      selected: isAll,
+                      selectedColor: AppColors.amberGold,
+                      backgroundColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+                      onSelected: (_) => setState(() => _selectedCategory = null),
+                    ),
+                  );
+                }
+                final cat = _categories[index - 1];
+                final catId = cat['id'] as String? ?? '';
+                final catName = cat['name'] as String? ?? catId;
+                final count = cat['count'] as int? ?? 0;
+                final isSelected = _selectedCategory == catId;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text('$catName($count)', style: TextStyle(
+                      color: isSelected ? AppColors.scrollTitle : AppColors.warmGray,
+                      fontSize: 12,
+                    )),
+                    selected: isSelected,
+                    selectedColor: AppColors.amberGold,
+                    backgroundColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+                    onSelected: (_) => setState(() => _selectedCategory = catId),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // ─ 话题卡片（水平滚动，更紧凑） ──────────────────────────────
         SizedBox(
-          height: 220,
+          height: 200,
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            itemCount: _topics.length,
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            itemCount: _filteredTopics.length,
             itemBuilder: (context, index) {
-              final topic = _topics[index];
+              final topic = _filteredTopics[index];
               final rotation = (index % 2 == 0) ? -2.0 : 1.5;
               return Padding(
-                padding: const EdgeInsets.only(right: 16),
+                padding: const EdgeInsets.only(right: 14),
                 child: ScrollTopicCard(
                   topic: topic,
                   isSelected: _selectedTopic?.id == topic.id,
@@ -196,105 +306,101 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           ),
         ),
 
-        const SizedBox(height: 24),
+        const Spacer(),
 
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Text('选择讨论角色', style: AppTheme.calligraphyStyleDark(fontSize: 16)),
-        ),
-        const SizedBox(height: 12),
-        SizedBox(
-          height: 90,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
+        // ─ 思想家选择区域（底部） ──────────────────────────────────────
+        if (_thinkers.isNotEmpty) ...[
+          Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
-            itemCount: _characters.where((c) => c.id != 'moderator').length,
-            itemBuilder: (context, index) {
-              final char = _characters.where((c) => c.id != 'moderator').toList()[index];
-              final isSelected = _selectedCharacterIds.contains(char.id);
-              return Padding(
-                padding: const EdgeInsets.only(right: 16),
-                child: GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      if (_selectedCharacterIds.contains(char.id)) {
-                        if (_selectedCharacterIds.length > 1) {
-                          _selectedCharacterIds.remove(char.id);
-                        }
-                      } else {
-                        _selectedCharacterIds.add(char.id);
-                      }
-                    });
-                  },
-                  child: GlowAvatar(
-                    name: char.displayName,
-                    avatar: char.avatar,
-                    isDimmed: !isSelected,
-                    isCurrentSpeaker: isSelected,
+            child: Row(
+              children: [
+                Text('邀请思想家', style: AppTheme.calligraphyStyleDark(fontSize: 15)),
+                const SizedBox(width: 8),
+                if (_selectedThinkerIds.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: AppColors.amberGold,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text('${_selectedThinkerIds.length}位',
+                        style: const TextStyle(color: AppColors.scrollTitle, fontSize: 11, fontWeight: FontWeight.w500)),
                   ),
-                ),
-              );
-            },
+                const Spacer(),
+                Text('可选，滑动查看更多 →',
+                    style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
+              ],
+            ),
           ),
-        ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 44,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              itemCount: _thinkers.length,
+              itemBuilder: (context, index) {
+                final thinker = _thinkers[index];
+                final id = thinker['id'] as String? ?? '';
+                final name = thinker['name'] as String? ?? id;
+                final avatar = thinker['avatar'] as String? ?? '🧠';
+                final isSelected = _selectedThinkerIds.contains(id);
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: FilterChip(
+                    avatar: Text(avatar, style: const TextStyle(fontSize: 14)),
+                    label: Text(name, style: TextStyle(
+                      color: isSelected ? AppColors.scrollTitle : AppColors.warmWhite,
+                      fontSize: 12,
+                    )),
+                    selected: isSelected,
+                    selectedColor: AppColors.amberGold.withValues(alpha: 0.7),
+                    backgroundColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+                    checkmarkColor: AppColors.scrollTitle,
+                    onSelected: (selected) {
+                      setState(() {
+                        if (selected) {
+                          _selectedThinkerIds.add(id);
+                        } else {
+                          _selectedThinkerIds.remove(id);
+                        }
+                      });
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
 
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
 
+        // ─ 入座按钮（底部居中） ──────────────────────────────────────
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 120,
-                child: TextField(
-                  controller: _nameController,
-                  style: const TextStyle(color: AppColors.warmWhite, fontSize: 14),
-                  decoration: InputDecoration(
-                    hintText: '你的名字',
-                    hintStyle: const TextStyle(color: AppColors.warmGray),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3)),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: AppColors.amberGold),
-                    ),
-                    filled: true,
-                    fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
+          child: SizedBox(
+            width: 220,
+            height: 48,
+            child: FilledButton.icon(
+              onPressed: _canStart ? _startDiscussion : null,
+              icon: const Icon(Icons.event_seat, size: 18),
+              label: Text(
+                _canStart ? '入座开始' : '选择话题后入座',
+                style: AppTheme.calligraphyStyle(
+                  fontSize: 16,
+                  color: _canStart ? Colors.white : AppColors.warmGray,
                 ),
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: _canStart ? _startDiscussion : null,
-                  icon: const Icon(Icons.event_seat),
-                  label: Text(
-                    _canStart ? '入座开始' : '选择话题后入座',
-                    style: AppTheme.calligraphyStyle(
-                      fontSize: 16,
-                      color: _canStart ? AppColors.scrollTitle : AppColors.warmGray,
-                    ),
-                  ),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: _canStart
-                        ? AppColors.amberGold
-                        : AppColors.studyWallLight,
-                    foregroundColor: AppColors.scrollTitle,
-                    minimumSize: const Size(double.infinity, 48),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
+              style: FilledButton.styleFrom(
+                backgroundColor: _canStart
+                    ? const Color(0xFF5BA3D9)
+                    : AppColors.studyWallLight,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24),
                 ),
               ),
-            ],
+            ),
           ),
         ),
 
@@ -311,6 +417,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
         builder: (context) => ImmersiveSessionScreen(
           topic: _selectedTopic!,
           characterIds: _selectedCharacterIds.toList(),
+          thinkerIds: _selectedThinkerIds.toList(),
           humanName: _nameController.text.isEmpty ? '同学' : _nameController.text,
         ),
       ),

@@ -14,10 +14,11 @@ from fastapi import APIRouter, HTTPException
 from app.agents.character_templates import load_all_templates
 from app.agents.human_proxy import clear_human_queues, create_human_proxy
 from app.agents.moderator import create_moderator
-from app.agents.virtual_character import create_virtual_character
+from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.core.floor_manager import FloorManager
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
+from app.core.thinkers import get_thinker
 from app.core.topics import get_topic_by_id
 from app.core.turn_scheduler import create_discussion_team
 from app.models.session import (
@@ -51,6 +52,11 @@ async def create_session(request: CreateSessionRequest):
         if char_id not in templates:
             raise HTTPException(status_code=404, detail=f"角色 '{char_id}' 不存在")
 
+    # 验证思想家存在
+    for tid in request.thinker_ids:
+        if not get_thinker(tid):
+            raise HTTPException(status_code=404, detail=f"思想家 '{tid}' 不存在")
+
     # 创建参与者列表
     participants: list[Participant] = []
 
@@ -76,6 +82,19 @@ async def create_session(request: CreateSessionRequest):
                 avatar=template.avatar,
             )
         )
+
+    # 思想家角色
+    for tid in request.thinker_ids:
+        thinker = get_thinker(tid)
+        if thinker:
+            participants.append(
+                Participant(
+                    name=thinker.get("name", tid),
+                    type=ParticipantType.AI_CHARACTER,
+                    description=thinker.get("description", ""),
+                    avatar=thinker.get("avatar", "🧠"),
+                )
+            )
 
     # 人类参与者
     for human_name in request.human_names:

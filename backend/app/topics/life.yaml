@@ -7,7 +7,7 @@ topics:
     category: life
     age_range: "8-14"
     guide_questions:
-      - "好友"和"朋友"有什么区别？
+      - '好友和朋友有什么区别？'
       - 你能和一个观点完全不同的人做朋友吗？
       - 友谊需要什么来维持？
     tags: [友谊, 社交, 真诚, 关系]
@@ -26,7 +26,7 @@ topics:
 
   - id: life-002
     title: 失败是好事吗
-    description: "失败是成功之母"这句话你听过无数遍，但你真的相信吗？失败到底有什么价值？
+    description: '失败是成功之母这句话你听过无数遍，但你真的相信吗？失败到底有什么价值？'
     category: life
     age_range: "8-14"
     guide_questions:
@@ -142,7 +142,7 @@ topics:
     age_range: "8-14"
     guide_questions:
       - 你有过因为"不够完美"而不敢开始的经历吗？
-      - "追求卓越"和"完美主义"有什么区别？
+      - '追求卓越和完美主义有什么区别？'
       - 接受"不完美"意味着降低标准吗？
     tags: [完美主义, 行动, 标准, 心理]
     story: |
@@ -179,7 +179,7 @@ topics:
 
   - id: life-009
     title: 金钱能买什么
-    description: "钱不是万能的，但没钱是万万不能的。"金钱的边界在哪里？
+    description: '钱不是万能的，但没钱是万万不能的。金钱的边界在哪里？'
     category: life
     age_range: "10-14"
     guide_questions:

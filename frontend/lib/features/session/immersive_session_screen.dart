@@ -22,12 +22,14 @@ import 'table_participant_ring.dart';
 class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   final Topic topic;
   final List<String> characterIds;
+  final List<String> thinkerIds;
   final String humanName;
 
   const ImmersiveSessionScreen({
     super.key,
     required this.topic,
     required this.characterIds,
+    this.thinkerIds = const [],
     required this.humanName,
   });
 
@@ -113,6 +115,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       final sessionData = await apiClient.createSession(
         topicId: widget.topic.id,
         characterIds: widget.characterIds,
+        thinkerIds: widget.thinkerIds,
         humanNames: [widget.humanName],
       );
 
@@ -125,6 +128,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         sessionId: sessionId,
         topicId: widget.topic.id,
         characterIds: widget.characterIds,
+        thinkerIds: widget.thinkerIds,
         humanNames: [widget.humanName],
       );
 
@@ -137,12 +141,20 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     }
   }
 
+  // 从系统事件获取的完整参与者列表
+  List<String> _knownParticipants = [];
+
   void _buildParticipants() {
-    // 构建参与者列表：AI 角色 + 人类
+    // 构建参与者列表：AI 角色 + 思想家 + 人类
     final names = <String>{};
     final avatars = <String, String>{};
 
-    // 从已有消息中提取参与者
+    // 从系统事件的参与者列表中获取
+    for (final name in _knownParticipants) {
+      names.add(name);
+    }
+
+    // 从已有消息中补充参与者
     for (final msg in _messages) {
       if (msg.type != 'system') {
         names.add(msg.source);
@@ -154,33 +166,32 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       names.add(_currentSpeaker);
     }
 
-    // 话题中的角色信息 - 使用 characterIds 映射
-    const avatarMap = {
-      'moderator': '👩‍🏫',
-      'explorer': '🔍',
-      'skeptic': '🤔',
-      'peacemaker': '🕊️',
-      'storyteller': '📖',
+    // 旧角色模板的头像映射
+    const templateAvatarMap = {
+      'moderator': '👩‍🏫', '李老师': '👩‍🏫',
+      'explorer': '🔍', '小探': '🔍',
+      'skeptic': '🤔', '小疑': '🤔',
+      'peacemaker': '🕊️', '小和': '🕊️',
+      'storyteller': '📖', '小说': '📖',
+      'optimist': '☀️', '小明': '☀️',
+      'questioner': '🤨', '小思': '🤨',
+      'rationalist': '🧮', '小理': '🧮',
+      'empath': '💗', '小爱': '💗',
+      'innovator': '💡', '小想': '💡',
+      'pragmatist': '🔧', '小行': '🔧',
     };
 
-    const nameMap = {
-      'moderator': '李老师',
-      'explorer': '小探',
-      'skeptic': '小疑',
-      'peacemaker': '小和',
-      'storyteller': '小说',
-    };
-
-    // 先添加 AI 角色
-    for (final charId in widget.characterIds) {
-      final name = nameMap[charId] ?? charId;
-      names.add(name);
-      avatars[name] = avatarMap[charId] ?? '🤖';
+    // 为所有参与者分配头像
+    for (final name in names) {
+      if (name == widget.humanName) {
+        avatars[name] = '🙋';
+      } else if (templateAvatarMap.containsKey(name)) {
+        avatars[name] = templateAvatarMap[name]!;
+      } else {
+        // 思想家或动态参与者 - 使用通用思想家头像
+        avatars[name] = '🧠';
+      }
     }
-
-    // 添加人类参与者
-    names.add(widget.humanName);
-    avatars[widget.humanName] = '🙋';
 
     setState(() {
       _participants = names.map((name) {
@@ -260,6 +271,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case WsEventType.system:
         final data = event.data;
         if (data != null) {
+          // 从系统事件捕获参与者列表
+          final participants = data['participants'];
+          if (participants is List) {
+            _knownParticipants = participants.cast<String>();
+            _buildParticipants();
+          }
           setState(() {
             _messages.add(ChatMessage(
               source: '系统',

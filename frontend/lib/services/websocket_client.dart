@@ -63,6 +63,7 @@ class DiscussionWebSocket {
     required String topicId,
     required List<String> characterIds,
     required List<String> humanNames,
+    List<String> thinkerIds = const [],
   }) async {
     final uri = Uri.parse('$wsUrl/api/v1/ws/discussion/$sessionId');
     _channel = WebSocketChannel.connect(uri);
@@ -73,6 +74,7 @@ class DiscussionWebSocket {
     _channel!.sink.add(jsonEncode({
       'topic_id': topicId,
       'character_ids': characterIds,
+      'thinker_ids': thinkerIds,
       'human_names': humanNames,
     }));
 

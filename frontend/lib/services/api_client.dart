@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../models/config_models.dart';
 
@@ -7,11 +8,20 @@ class ApiClient {
   late final Dio _dio;
 
   ApiClient({String baseUrl = 'http://localhost:8001'}) {
+    // Web 环境：自动使用浏览器当前 origin，避免 localhost vs 127.0.0.1 的跨域问题
+    final effectiveUrl = kIsWeb ? Uri.base.origin : baseUrl;
     _dio = Dio(BaseOptions(
-      baseUrl: baseUrl,
+      baseUrl: effectiveUrl,
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 30),
       headers: {'Content-Type': 'application/json'},
+    ));
+
+    // 错误拦截器：将 Dio 底层错误转为用户友好的中文提示
+    _dio.interceptors.add(InterceptorsWrapper(
+      onError: (DioException e, ErrorInterceptorHandler handler) {
+        handler.next(e.copyWith(message: _friendlyError(e)));
+      },
     ));
   }
 
@@ -21,6 +31,28 @@ class ApiClient {
   }
 
   String get baseUrl => _dio.options.baseUrl;
+
+  /// 将 DioException 转为用户友好的中文错误信息
+  static String _friendlyError(DioException e) {
+    switch (e.type) {
+      case DioExceptionType.connectionError:
+        return '无法连接服务器，请确认后端服务已启动 (${e.requestOptions.baseUrl})';
+      case DioExceptionType.connectionTimeout:
+        return '连接超时，请检查服务器地址是否正确';
+      case DioExceptionType.sendTimeout:
+      case DioExceptionType.receiveTimeout:
+        return '请求超时，服务器响应过慢';
+      case DioExceptionType.badResponse:
+        final code = e.response?.statusCode ?? 0;
+        if (code == 404) return '接口不存在 (404)，请检查后端版本';
+        if (code >= 500) return '服务器内部错误 ($code)';
+        return '服务器返回错误 ($code)';
+      case DioExceptionType.cancel:
+        return '请求已取消';
+      default:
+        return '网络错误: ${e.message ?? "未知"}';
+    }
+  }
 
   // ── 话题 API ──────────────────────────────────────────────────────────────
 
@@ -54,12 +86,14 @@ class ApiClient {
     required String topicId,
     required List<String> characterIds,
     required List<String> humanNames,
+    List<String> thinkerIds = const [],
     int maxTurns = 30,
   }) async {
     final response = await _dio.post('/api/v1/sessions/', data: {
       'topic_id': topicId,
       'character_ids': characterIds,
       'human_names': humanNames,
+      'thinker_ids': thinkerIds,
       'max_turns': maxTurns,
     });
     return Map<String, dynamic>.from(response.data);
@@ -118,12 +152,89 @@ class ApiClient {
     return ConfigValidation.fromJson(response.data as Map<String, dynamic>);
   }
 
+  /// 更新运行时配置（LLM 提供商、API Key、模型等）
+  Future<Map<String, dynamic>> updateConfig(Map<String, dynamic> updates) async {
+    final response = await _dio.post('/api/v1/config/update', data: updates);
+    return Map<String, dynamic>.from(response.data);
+  }
+
+  /// 将配置持久化写入 .env 文件
+  Future<Map<String, dynamic>> saveConfig(Map<String, dynamic> updates) async {
+    final response = await _dio.post('/api/v1/config/save', data: updates);
+    return Map<String, dynamic>.from(response.data);
+  }
+
+  /// 测试 LLM 提供商连接，返回可用模型列表
+  Future<ProviderTestResult> testProvider({
+    required String providerId,
+    String? apiKey,
+    String? baseUrl,
+  }) async {
+    final response = await _dio.post('/api/v1/config/test-provider', data: {
+      'provider_id': providerId,
+      if (apiKey != null && apiKey.isNotEmpty) 'api_key': apiKey,
+      if (baseUrl != null && baseUrl.isNotEmpty) 'base_url': baseUrl,
+    });
+    return ProviderTestResult.fromJson(response.data as Map<String, dynamic>);
+  }
+
+  /// 测试语音服务连接，返回可用音色列表
+  Future<VoiceServiceTestResult> testVoiceService({
+    required String service,
+    String? url,
+    String? apiKey,
+  }) async {
+    final response = await _dio.post('/api/v1/config/test-voice-service', data: {
+      'service': service,
+      if (url != null && url.isNotEmpty) 'url': url,
+      if (apiKey != null && apiKey.isNotEmpty) 'api_key': apiKey,
+    });
+    return VoiceServiceTestResult.fromJson(response.data as Map<String, dynamic>);
+  }
+
+  /// 获取网络搜索配置
+  Future<WebSearchConfig> getWebSearchConfig() async {
+    final response = await _dio.get('/api/v1/config/web-search');
+    return WebSearchConfig.fromJson(response.data as Map<String, dynamic>);
+  }
+
+  /// 测试网络搜索 API 连接
+  Future<Map<String, dynamic>> testWebSearch({String? apiKey}) async {
+    final response = await _dio.post('/api/v1/config/test-web-search', data: {
+      if (apiKey != null && apiKey.isNotEmpty) 'api_key': apiKey,
+    });
+    return Map<String, dynamic>.from(response.data);
+  }
+
+  /// 获取所有思想家
+  Future<List<Map<String, dynamic>>> getThinkers({String? domain}) async {
+    final response = await _dio.get(
+      '/api/v1/thinkers/',
+      queryParameters: {
+        if (domain != null) 'domain': domain,
+        'size': 100,
+      },
+    );
+    final data = response.data;
+    if (data is Map && data.containsKey('items')) {
+      return List<Map<String, dynamic>>.from(data['items']);
+    }
+    return List<Map<String, dynamic>>.from(data);
+  }
+
+  /// 获取话题分类列表
+  Future<List<Map<String, dynamic>>> getTopicCategories() async {
+    final response = await _dio.get('/api/v1/topics/categories/');
+    return List<Map<String, dynamic>>.from(response.data);
+  }
+
   // ── WebSocket ─────────────────────────────────────────────────────────────
 
   /// 构建 WebSocket URL
   String getWebSocketUrl(String sessionId) {
-    return _dio.options.baseUrl
-        .replaceAll('http', 'ws')
-        .replaceAll('https', 'wss');
+    final base = _dio.options.baseUrl.isNotEmpty
+        ? _dio.options.baseUrl
+        : (kIsWeb ? Uri.base.origin : 'http://localhost:8001');
+    return base.replaceAll('https', 'wss').replaceAll('http', 'ws');
   }
 }

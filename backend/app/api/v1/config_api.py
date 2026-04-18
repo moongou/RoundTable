@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter
@@ -17,6 +18,7 @@ from app.config import (
     PROVIDER_DEFAULTS,
     PROVIDER_NAMES,
     TTS_PROVIDERS,
+    VOICE_SERVICE_META,
     settings,
 )
 
@@ -47,7 +49,7 @@ async def list_providers():
             "model": model,
             "has_api_key": has_key,
             "is_active": pid == settings.llm_provider,
-            "needs_api_key": pid != "ollama",
+            "needs_api_key": pid not in ("ollama",),
         })
 
     return providers
@@ -55,23 +57,52 @@ async def list_providers():
 
 @router.get("/speech")
 async def list_speech_providers():
-    """列出语音识别/合成服务提供商。"""
+    """列出语音识别/合成服务提供商（含当前URL配置）。"""
+    def voice_service_detail(service_id: str) -> dict:
+        meta = VOICE_SERVICE_META.get(service_id, {})
+        url = settings.get_voice_service_url(service_id) or meta.get("default_url", "")
+        api_key = ""
+        if service_id == "openai_whisper":
+            key = settings.openai_whisper_api_key or settings.openai_api_key
+            api_key = "***" if key else ""
+        elif service_id == "openai_tts":
+            key = settings.openai_api_key
+            api_key = "***" if key else ""
+        return {
+            "url": url,
+            "default_url": meta.get("default_url", ""),
+            "needs_api_key": meta.get("needs_api_key", False),
+            "has_api_key": bool(api_key),
+        }
+
     return {
         "asr": [
-            {"id": pid, "name": name, "is_active": pid == settings.asr_provider}
+            {
+                "id": pid,
+                "name": name,
+                "is_active": pid == settings.asr_provider,
+                **voice_service_detail(pid),
+            }
             for pid, name in ASR_PROVIDERS.items()
         ],
         "tts": [
-            {"id": pid, "name": name, "is_active": pid == settings.tts_provider}
+            {
+                "id": pid,
+                "name": name,
+                "is_active": pid == settings.tts_provider,
+                **voice_service_detail(pid),
+            }
             for pid, name in TTS_PROVIDERS.items()
         ],
         "push_to_talk": settings.push_to_talk,
+        "tts_voice": settings.tts_voice,
+        "cosyvoice_voice": settings.cosyvoice_voice,
     }
 
 
 @router.get("/health")
 async def check_services_health():
-    """检查本地服务是否可达。"""
+    """检查本地服务是否可达（使用当前配置的 URL）。"""
     results = {}
     tasks = []
 
@@ -87,8 +118,15 @@ async def check_services_health():
         except Exception:
             results[name] = {"url": url, "reachable": False, "status_code": None}
 
-    for name, svc in LOCAL_SERVICE_DEFAULTS.items():
-        tasks.append(check_service(name, svc["url"], svc["health"]))
+    # 使用当前配置的实际 URL
+    service_urls = {
+        "edge_tts": (settings.edge_tts_url, "/v1/models"),
+        "cosyvoice": (settings.cosyvoice_url, "/health"),
+        "funasr": (settings.funasr_url, "/"),
+        "ollama": (settings.ollama_base_url.replace("/v1", ""), "/api/tags"),
+    }
+    for name, (url, health) in service_urls.items():
+        tasks.append(check_service(name, url, health))
 
     await asyncio.gather(*tasks)
     return results
@@ -116,6 +154,8 @@ async def get_current_config():
         "asr_provider": settings.asr_provider,
         "tts_provider": settings.tts_provider,
         "push_to_talk": settings.push_to_talk,
+        "web_search_enabled": settings.web_search_enabled,
+        "tavily_configured": bool(settings.tavily_api_key),
     }
 
 
@@ -124,3 +164,276 @@ async def validate_current_config():
     """验证当前 LLM 配置是否有效。"""
     is_valid, error_msg = settings.validate_llm_config()
     return {"valid": is_valid, "message": error_msg if not is_valid else "配置有效"}
+
+
+@router.post("/update")
+async def update_config(updates: dict):
+    """运行时更新配置（不持久化到 .env 文件）。"""
+    try:
+        settings.update_runtime(updates)
+        return {
+            "success": True,
+            "message": "配置已更新",
+            "current_provider": settings.llm_provider,
+            "current_model": getattr(settings, f"{settings.llm_provider}_model", ""),
+        }
+    except Exception as e:
+        return {"success": False, "message": f"更新配置失败: {e}"}
+
+
+@router.post("/save")
+async def save_config_to_env(updates: dict):
+    """将配置持久化写入 .env 文件（同时更新运行时）。"""
+    try:
+        env_path = Path(settings.base_dir) / ".env"
+
+        # 读取现有 .env
+        env_lines: list[str] = []
+        if env_path.exists():
+            env_lines = env_path.read_text(encoding="utf-8").splitlines()
+
+        # 逐一更新或追加
+        saved_keys: list[str] = []
+        for key, value in updates.items():
+            key_upper = key.upper()
+            found = False
+            for i, line in enumerate(env_lines):
+                stripped = line.split("=")[0].strip()
+                if stripped == key_upper:
+                    env_lines[i] = f"{key_upper}={value}"
+                    found = True
+                    break
+            if not found:
+                env_lines.append(f"{key_upper}={value}")
+            saved_keys.append(key)
+
+        env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+        settings.update_runtime(updates)
+
+        return {"success": True, "saved_keys": saved_keys, "message": f"已保存 {len(saved_keys)} 项配置"}
+    except Exception as e:
+        logger.error(f"保存配置失败: {e}")
+        return {"success": False, "message": f"保存失败: {e}"}
+
+
+@router.post("/test-provider")
+async def test_provider(body: dict):
+    """测试 LLM 提供商连接，并尝试获取可用模型列表。
+
+    Body:
+        provider_id: 提供商 ID
+        api_key: API Key（可选，为空时使用当前配置）
+        base_url: Base URL（可选，为空时使用当前配置）
+    """
+    provider_id = body.get("provider_id", "")
+    api_key = body.get("api_key", "").strip()
+    base_url = body.get("base_url", "").strip()
+
+    # 回退到当前配置
+    if not api_key:
+        api_key = getattr(settings, f"{provider_id}_api_key", "")
+    if not base_url:
+        base_url = getattr(settings, f"{provider_id}_base_url", "")
+    if not base_url:
+        base_url = PROVIDER_DEFAULTS.get(provider_id, {}).get("base_url", "")
+
+    if not base_url:
+        return {"success": False, "models": [], "error": "未配置 Base URL"}
+
+    # Ollama 本地：使用 /api/tags 获取模型列表
+    if provider_id == "ollama":
+        ollama_root = base_url.replace("/v1", "").rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{ollama_root}/api/tags")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = sorted([m["name"] for m in data.get("models", [])])
+                    return {"success": True, "models": models, "error": None}
+                return {"success": False, "models": [], "error": f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {"success": False, "models": [], "error": str(e)}
+
+    # Anthropic 特殊处理（不支持标准 /models）
+    if provider_id == "anthropic":
+        # Anthropic does not have a public model list endpoint; return curated list
+        models = [
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+        ]
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                # Send a minimal request to verify key validity
+                resp = await client.post(
+                    f"{base_url}/messages",
+                    headers=headers,
+                    json={"model": "claude-3-5-haiku-20241022", "max_tokens": 1,
+                          "messages": [{"role": "user", "content": "hi"}]},
+                )
+                if resp.status_code in (200, 201):
+                    return {"success": True, "models": models, "error": None}
+                err = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
+                return {"success": False, "models": [], "error": err}
+        except Exception as e:
+            return {"success": False, "models": [], "error": str(e)}
+
+    # Gemini 特殊处理
+    if provider_id == "gemini":
+        models = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"]
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/models",
+                    params={"key": api_key},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = sorted([
+                        m["name"].replace("models/", "")
+                        for m in data.get("models", [])
+                        if "generateContent" in m.get("supportedGenerationMethods", [])
+                    ])
+                    return {"success": True, "models": models, "error": None}
+                return {"success": False, "models": [], "error": f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {"success": False, "models": [], "error": str(e)}
+
+    # 标准 OpenAI 兼容：GET /models
+    headers: dict = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw = data.get("data", data if isinstance(data, list) else [])
+                models = sorted(
+                    [m.get("id", m) if isinstance(m, dict) else str(m) for m in raw]
+                )
+                return {"success": True, "models": models, "error": None}
+            # Try to extract error message
+            try:
+                err_body = resp.json()
+                err_msg = (err_body.get("error", {}) or {}).get("message", f"HTTP {resp.status_code}")
+            except Exception:
+                err_msg = f"HTTP {resp.status_code}"
+            return {"success": False, "models": [], "error": err_msg}
+    except Exception as e:
+        return {"success": False, "models": [], "error": str(e)}
+
+
+@router.post("/test-voice-service")
+async def test_voice_service(body: dict):
+    """测试语音服务连接，尝试获取可用音色/模型列表。
+
+    Body:
+        service: 服务 ID (funasr / edge_tts / cosyvoice / openai_tts / openai_whisper)
+        url: 服务 URL（可选，为空时使用当前配置）
+        api_key: API Key（可选，仅部分服务需要）
+    """
+    service = body.get("service", "")
+    url = body.get("url", "").strip()
+    api_key = body.get("api_key", "").strip()
+
+    if not url:
+        url = settings.get_voice_service_url(service)
+    if not url:
+        meta = VOICE_SERVICE_META.get(service, {})
+        url = meta.get("default_url", "")
+
+    if not url:
+        return {"success": False, "status_code": None, "url": url, "voices": [], "error": "未配置 URL"}
+
+    meta = VOICE_SERVICE_META.get(service, {})
+    health_path = meta.get("health_path", "/")
+    voices: list[str] = []
+
+    # Special handling per service
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            headers: dict = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            elif service in ("openai_whisper", "openai_tts"):
+                key = settings.openai_whisper_api_key or settings.openai_api_key
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+
+            resp = await client.get(f"{url.rstrip('/')}{health_path}", headers=headers)
+            reachable = resp.status_code < 500
+
+            # Try to extract voice/model list
+            if reachable:
+                if service == "edge_tts":
+                    try:
+                        voices_resp = await client.get(f"{url.rstrip('/')}/v1/models")
+                        if voices_resp.status_code == 200:
+                            raw = voices_resp.json()
+                            if isinstance(raw, list):
+                                voices = sorted([m.get("id", "") or m.get("name", "") for m in raw if isinstance(m, dict)][:50])
+                    except Exception:
+                        pass
+                elif service == "cosyvoice":
+                    try:
+                        v_resp = await client.get(f"{url.rstrip('/')}/speakers")
+                        if v_resp.status_code == 200:
+                            raw = v_resp.json()
+                            voices = raw if isinstance(raw, list) else list(raw.get("speakers", []))
+                    except Exception:
+                        voices = ["default", "中文女声", "中文男声"]
+                elif service in ("openai_tts",):
+                    voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+                elif service == "funasr":
+                    voices = []  # ASR has no voice list
+
+            return {
+                "success": reachable,
+                "status_code": resp.status_code,
+                "url": url,
+                "voices": voices,
+                "error": None if reachable else f"HTTP {resp.status_code}",
+            }
+    except Exception as e:
+        return {"success": False, "status_code": None, "url": url, "voices": [], "error": str(e)}
+
+
+@router.get("/web-search")
+async def get_web_search_config():
+    """获取网络搜索配置。"""
+    key = settings.tavily_api_key
+    return {
+        "enabled": settings.web_search_enabled,
+        "has_api_key": bool(key),
+        "api_key_masked": (key[:4] + "..." + key[-4:]) if key and len(key) > 8 else ("***" if key else ""),
+        "base_url": settings.tavily_base_url,
+    }
+
+
+@router.post("/test-web-search")
+async def test_web_search(body: dict):
+    """测试 Tavily 网络搜索 API 连接。"""
+    api_key = body.get("api_key", "").strip() or settings.tavily_api_key
+    if not api_key:
+        return {"success": False, "error": "未配置 Tavily API Key"}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{settings.tavily_base_url}/search",
+                json={"api_key": api_key, "query": "test", "max_results": 1},
+            )
+            if resp.status_code == 200:
+                return {"success": True, "error": None}
+            try:
+                err_body = resp.json()
+                err_msg = err_body.get("detail", err_body.get("message", f"HTTP {resp.status_code}"))
+            except Exception:
+                err_msg = f"HTTP {resp.status_code}"
+            return {"success": False, "error": err_msg}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

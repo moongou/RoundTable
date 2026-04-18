@@ -48,6 +48,18 @@ PROVIDER_DEFAULTS = {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "model": "qwen-max",
     },
+    "zhipu": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+    },
+    "anthropic": {
+        "base_url": "https://api.anthropic.com/v1",
+        "model": "claude-3-5-sonnet-20241022",
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "model": "gemini-2.0-flash",
+    },
 }
 
 # 所有可用的提供商列表
@@ -63,6 +75,9 @@ PROVIDER_NAMES = {
     "doubao": "豆包",
     "volcengine": "火山引擎",
     "bailian": "阿里百炼",
+    "zhipu": "智谱AI (ChatGLM)",
+    "anthropic": "Anthropic Claude",
+    "gemini": "Google Gemini",
 }
 
 
@@ -72,6 +87,7 @@ ASR_PROVIDERS = {
     "browser": "浏览器原生语音识别",
     "funasr": "FunASR 本地服务",
     "openai_whisper": "OpenAI Whisper API",
+    "disabled": "禁用语音识别（纯文本输入）",
 }
 
 TTS_PROVIDERS = {
@@ -79,6 +95,7 @@ TTS_PROVIDERS = {
     "edge_tts": "OpenAI Edge TTS 本地服务",
     "cosyvoice": "CosyVoice 本地服务",
     "openai_tts": "OpenAI TTS API",
+    "disabled": "禁用语音合成（纯文本显示）",
 }
 
 LOCAL_SERVICE_DEFAULTS = {
@@ -86,6 +103,45 @@ LOCAL_SERVICE_DEFAULTS = {
     "cosyvoice": {"url": "http://localhost:50000", "health": "/health"},
     "funasr": {"url": "http://localhost:10096", "health": "/"},
     "ollama": {"url": "http://localhost:11434", "health": "/api/tags"},
+}
+
+# 语音服务提供商详细元数据
+VOICE_SERVICE_META = {
+    "funasr": {
+        "name": "FunASR 本地语音识别",
+        "default_url": "http://localhost:10096",
+        "type": "asr",
+        "needs_api_key": False,
+        "health_path": "/",
+    },
+    "openai_whisper": {
+        "name": "OpenAI Whisper API",
+        "default_url": "https://api.openai.com/v1",
+        "type": "asr",
+        "needs_api_key": True,
+        "health_path": "/models",
+    },
+    "edge_tts": {
+        "name": "OpenAI Edge TTS 本地服务",
+        "default_url": "http://localhost:5051",
+        "type": "tts",
+        "needs_api_key": False,
+        "health_path": "/v1/models",
+    },
+    "cosyvoice": {
+        "name": "CosyVoice 本地语音合成",
+        "default_url": "http://localhost:50000",
+        "type": "tts",
+        "needs_api_key": False,
+        "health_path": "/health",
+    },
+    "openai_tts": {
+        "name": "OpenAI TTS API",
+        "default_url": "https://api.openai.com/v1",
+        "type": "tts",
+        "needs_api_key": True,
+        "health_path": "/models",
+    },
 }
 
 
@@ -140,19 +196,49 @@ class Settings(BaseSettings):
     bailian_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     bailian_model: str = "qwen-max"
 
+    # 智谱AI (ChatGLM)
+    zhipu_api_key: str = ""
+    zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    zhipu_model: str = "glm-4-flash"
+
+    # Anthropic Claude
+    anthropic_api_key: str = ""
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
+    anthropic_model: str = "claude-3-5-sonnet-20241022"
+
+    # Google Gemini
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_model: str = "gemini-2.0-flash"
+
+    # ── 自定义提供商 ─────────────────────────────────────────────────────
+    custom_providers: str = "[]"  # JSON string of custom provider configs
+
     # ── 语音服务 ────────────────────────────────────────────────────────────
 
     # ASR (语音识别)
     asr_provider: str = "browser"  # browser / funasr / openai_whisper
-    asr_url: str = "http://localhost:10096"
+    asr_url: str = "http://localhost:10096"  # deprecated, use funasr_url
+    funasr_url: str = "http://localhost:10096"
+    openai_whisper_api_key: str = ""  # uses openai_api_key if blank
+    openai_whisper_base_url: str = "https://api.openai.com/v1"
 
     # TTS (语音合成)
     tts_provider: str = "browser"  # browser / edge_tts / cosyvoice / openai_tts
-    tts_url: str = "http://localhost:5051"
-    tts_voice: str = "alloy"
+    tts_url: str = "http://localhost:5051"  # deprecated, use edge_tts_url
+    edge_tts_url: str = "http://localhost:5051"
+    cosyvoice_url: str = "http://localhost:50000"
+    tts_voice: str = "zh-CN-XiaoxiaoNeural"
+    cosyvoice_voice: str = "default"
 
     # 交互方式
     push_to_talk: bool = True
+
+    # ── 网络搜索 ───────────────────────────────────────────────────────────
+
+    tavily_api_key: str = ""
+    tavily_base_url: str = "https://api.tavily.com"
+    web_search_enabled: bool = False
 
     # ── 服务器 ─────────────────────────────────────────────────────────────
 
@@ -234,6 +320,45 @@ class Settings(BaseSettings):
         if runtime_override:
             config.update(runtime_override)
         return config
+
+    def update_runtime(self, updates: dict) -> None:
+        """运行时动态更新配置（不写入 .env 文件）。
+
+        允许前端通过 API 更新 LLM 提供商、API Key、模型名等配置。
+
+        Args:
+            updates: 配置字段与新值的映射。
+        """
+        allowed_fields = {
+            "llm_provider", "asr_provider", "tts_provider", "push_to_talk",
+            "max_turns", "human_turn_timeout",
+            # Voice service URLs
+            "funasr_url", "edge_tts_url", "cosyvoice_url",
+            "openai_whisper_api_key", "openai_whisper_base_url",
+            "tts_voice", "cosyvoice_voice",
+            # Web search
+            "tavily_api_key", "tavily_base_url", "web_search_enabled",
+        }
+        # 动态允许所有提供商的 api_key / base_url / model 字段
+        for pid in PROVIDER_DEFAULTS:
+            allowed_fields.add(f"{pid}_api_key")
+            allowed_fields.add(f"{pid}_base_url")
+            allowed_fields.add(f"{pid}_model")
+
+        for field, value in updates.items():
+            if field in allowed_fields and hasattr(self, field):
+                object.__setattr__(self, field, value)
+
+    def get_voice_service_url(self, service_id: str) -> str:
+        """获取语音服务的 URL。"""
+        url_map = {
+            "funasr": self.funasr_url,
+            "edge_tts": self.edge_tts_url,
+            "cosyvoice": self.cosyvoice_url,
+            "openai_whisper": self.openai_whisper_base_url,
+            "openai_tts": self.openai_base_url,
+        }
+        return url_map.get(service_id, "")
 
 
 settings = Settings()

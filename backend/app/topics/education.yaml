@@ -68,12 +68,12 @@ topics:
 
   - id: education-004
     title: 家长该"鸡娃"吗
-    description: "鸡娃"——家长过度推动孩子学习——在中国引发了激烈争论。这是爱还是伤害？
+    description: '鸡娃——家长过度推动孩子学习——在中国引发了激烈争论。这是爱还是伤害？'
     category: education
     age_range: "8-14"
     guide_questions:
       - 父母的期望和你的兴趣冲突时怎么办？
-      - "鸡娃"真的能让孩子更成功吗？
+      - '鸡娃真的能让孩子更成功吗？'
       - 什么是"恰到好处"的教育推动？
     tags: [鸡娃, 家庭教育, 压力, 成功]
     story: |
@@ -133,7 +133,7 @@ topics:
 
   - id: education-007
     title: 批判性思维能教吗
-    description: "批判性思维"是21世纪最重要的能力之一，但你能教一个人如何思考吗？
+    description: '批判性思维是21世纪最重要的能力之一，但你能教一个人如何思考吗？'
     category: education
     age_range: "10-14"
     guide_questions:

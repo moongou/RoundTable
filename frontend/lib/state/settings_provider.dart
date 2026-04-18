@@ -7,10 +7,12 @@ import '../services/api_client.dart';
 // ── ApiClient Provider ─────────────────────────────────────────────────────
 
 /// 提供 ApiClient 单例，baseUrl 从本地设置读取
+/// Web 环境下自动使用浏览器 origin 避免跨域问题
 final apiClientProvider = Provider<ApiClient>((ref) {
   final asyncSettings = ref.watch(localSettingsProvider);
-  // 异步设置未加载完时用默认值
   final serverUrl = asyncSettings.valueOrNull?.serverUrl ?? 'http://localhost:8001';
+  // Web: ApiClient 构造器内部会自动使用 Uri.base.origin
+  // 非 Web: 使用用户配置的 serverUrl
   return ApiClient(baseUrl: serverUrl);
 });
 

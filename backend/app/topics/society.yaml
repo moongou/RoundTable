@@ -71,7 +71,7 @@ topics:
     age_range: "10-14"
     guide_questions:
       - 为什么同工不同酬仍然存在？
-      - "男主外女主内"的观念从何而来？
+      - '男主外女主内的观念从何而来？'
       - 性别平等对男性有什么好处？
     tags: [性别, 平等, 女权, 职场]
     story: |
@@ -129,7 +129,7 @@ topics:
 
   - id: society-007
     title: 消费主义的陷阱
-    description: "双十一"一天的交易额超过数千亿。我们是在满足需求，还是被制造了需求？
+    description: '双十一一天的交易额超过数千亿。我们是在满足需求，还是被制造了需求？'
     category: society
     age_range: "8-14"
     guide_questions:

@@ -80,6 +80,37 @@ def get_topic_by_id(topic_id: str) -> Topic | None:
     return None
 
 
+def get_topic_categories() -> list[dict]:
+    """获取所有话题分类及其统计信息。"""
+    all_data = _load_all_topic_data()
+    categories: dict[str, dict] = {}
+
+    # 分类中文名映射
+    category_names = {}
+    for yaml_file in sorted(TOPICS_DIR.glob("*.yaml")):
+        try:
+            with open(yaml_file, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            cat_id = data.get("category", "")
+            cat_cn = data.get("category_cn", cat_id)
+            if cat_id:
+                category_names[cat_id] = cat_cn
+        except Exception:
+            pass
+
+    for t in all_data:
+        cat = t.get("category", "unknown")
+        if cat not in categories:
+            categories[cat] = {
+                "id": cat,
+                "name": category_names.get(cat, cat),
+                "count": 0,
+            }
+        categories[cat]["count"] += 1
+
+    return list(categories.values())
+
+
 def get_all_categories() -> list[dict]:
     """获取所有分类及其话题数量。"""
     all_data = _load_all_topic_data()

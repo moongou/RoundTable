@@ -14,11 +14,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.agents.character_templates import load_all_templates
 from app.agents.human_proxy import clear_human_queues, create_human_proxy, put_human_input
 from app.agents.moderator import create_moderator
-from app.agents.virtual_character import create_virtual_character
+from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
 from app.core.floor_manager import FloorManager
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
+from app.core.thinkers import get_thinker
 from app.core.topics import get_topic_by_id
 from app.core.turn_scheduler import create_discussion_team
 
@@ -57,6 +58,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         topic_id = config.get("topic_id")
         character_ids = config.get("character_ids", ["explorer", "skeptic"])
+        thinker_ids = config.get("thinker_ids", [])
         human_names = config.get("human_names", ["同学"])
 
         # 验证话题
@@ -75,6 +77,19 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 )
                 await websocket.close()
                 return
+
+        # 验证思想家
+        for tid in thinker_ids:
+            if not get_thinker(tid):
+                await websocket.send_json(
+                    {"event_type": "error", "data": {"message": f"思想家 '{tid}' 不存在"}}
+                )
+                await websocket.close()
+                return
+
+        # 确保至少有一个角色参与
+        if not character_ids and not thinker_ids:
+            character_ids = ["explorer", "skeptic"]
 
         # 验证 LLM 配置
         is_valid, error_msg = settings.validate_llm_config()
@@ -107,6 +122,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         all_participant_names = [templates["moderator"].name]
         all_participant_names += [templates[cid].name for cid in character_ids]
+        all_participant_names += [get_thinker(tid).get("name", tid) for tid in thinker_ids]
         all_participant_names += human_names
 
         moderator = create_moderator(
@@ -120,12 +136,18 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             for cid in character_ids
         ]
 
+        # 创建思想家角色
+        thinker_agents = [
+            create_thinker_agent(tid, model_client=character_client, topic=topic.title)
+            for tid in thinker_ids
+        ]
+
         humans = [create_human_proxy(name) for name in human_names]
 
         # 创建讨论团队
         team = create_discussion_team(
             moderator=moderator,
-            characters=characters,
+            characters=characters + thinker_agents,
             humans=humans,
             selector_client=moderator_client,
         )
@@ -136,7 +158,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         # 创建 Floor Manager
         floor_manager = FloorManager(
             team=team,
-            ai_agents=[moderator] + characters,
+            ai_agents=[moderator] + characters + thinker_agents,
             human_agents=humans,
             safety_filter=safety_filter,
         )

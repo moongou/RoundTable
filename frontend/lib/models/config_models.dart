@@ -1,4 +1,4 @@
-/// 配置相关数据模型，与后端 config API 对齐
+// 配置相关数据模型，与后端 config API 对齐
 
 /// LLM 提供商信息
 class ProviderInfo {
@@ -49,6 +49,12 @@ class ProviderInfo {
         return '🌋';
       case 'bailian':
         return '🔥';
+      case 'zhipu':
+        return '🧠';
+      case 'anthropic':
+        return '🤖';
+      case 'gemini':
+        return '💎';
       default:
         return '🤖';
     }
@@ -58,16 +64,44 @@ class ProviderInfo {
   bool get isLocal => id == 'ollama';
 }
 
+/// 提供商连接测试结果
+class ProviderTestResult {
+  final bool success;
+  final List<String> models;
+  final String? error;
+
+  const ProviderTestResult({
+    required this.success,
+    required this.models,
+    this.error,
+  });
+
+  factory ProviderTestResult.fromJson(Map<String, dynamic> json) =>
+      ProviderTestResult(
+        success: json['success'] as bool? ?? false,
+        models: List<String>.from(json['models'] as List? ?? []),
+        error: json['error'] as String?,
+      );
+}
+
 /// 语音识别（ASR）提供商
 class SpeechProviderInfo {
   final String id;
   final String name;
   final bool isActive;
+  final String url;
+  final String defaultUrl;
+  final bool needsApiKey;
+  final bool hasApiKey;
 
   const SpeechProviderInfo({
     required this.id,
     required this.name,
     required this.isActive,
+    this.url = '',
+    this.defaultUrl = '',
+    this.needsApiKey = false,
+    this.hasApiKey = false,
   });
 
   factory SpeechProviderInfo.fromJson(Map<String, dynamic> json) =>
@@ -75,6 +109,33 @@ class SpeechProviderInfo {
         id: json['id'] as String,
         name: json['name'] as String,
         isActive: json['is_active'] as bool? ?? false,
+        url: json['url'] as String? ?? '',
+        defaultUrl: json['default_url'] as String? ?? '',
+        needsApiKey: json['needs_api_key'] as bool? ?? false,
+        hasApiKey: json['has_api_key'] as bool? ?? false,
+      );
+}
+
+/// 语音服务连接测试结果
+class VoiceServiceTestResult {
+  final bool success;
+  final List<String> voices;
+  final String? error;
+  final String url;
+
+  const VoiceServiceTestResult({
+    required this.success,
+    required this.voices,
+    required this.url,
+    this.error,
+  });
+
+  factory VoiceServiceTestResult.fromJson(Map<String, dynamic> json) =>
+      VoiceServiceTestResult(
+        success: json['success'] as bool? ?? false,
+        voices: List<String>.from(json['voices'] as List? ?? []),
+        url: json['url'] as String? ?? '',
+        error: json['error'] as String?,
       );
 }
 
@@ -83,11 +144,15 @@ class SpeechConfig {
   final List<SpeechProviderInfo> asrProviders;
   final List<SpeechProviderInfo> ttsProviders;
   final bool pushToTalk;
+  final String ttsVoice;
+  final String cosyvoiceVoice;
 
   const SpeechConfig({
     required this.asrProviders,
     required this.ttsProviders,
     required this.pushToTalk,
+    this.ttsVoice = 'zh-CN-XiaoxiaoNeural',
+    this.cosyvoiceVoice = 'default',
   });
 
   factory SpeechConfig.fromJson(Map<String, dynamic> json) => SpeechConfig(
@@ -98,6 +163,8 @@ class SpeechConfig {
             .map((e) => SpeechProviderInfo.fromJson(e as Map<String, dynamic>))
             .toList(),
         pushToTalk: json['push_to_talk'] as bool? ?? true,
+        ttsVoice: json['tts_voice'] as String? ?? 'zh-CN-XiaoxiaoNeural',
+        cosyvoiceVoice: json['cosyvoice_voice'] as String? ?? 'default',
       );
 }
 
@@ -133,6 +200,8 @@ class CurrentConfig {
   final String asrProvider;
   final String ttsProvider;
   final bool pushToTalk;
+  final bool webSearchEnabled;
+  final bool tavilyConfigured;
 
   const CurrentConfig({
     required this.llmProvider,
@@ -142,6 +211,8 @@ class CurrentConfig {
     required this.asrProvider,
     required this.ttsProvider,
     required this.pushToTalk,
+    this.webSearchEnabled = false,
+    this.tavilyConfigured = false,
   });
 
   factory CurrentConfig.fromJson(Map<String, dynamic> json) => CurrentConfig(
@@ -152,6 +223,8 @@ class CurrentConfig {
         asrProvider: json['asr_provider'] as String? ?? 'browser',
         ttsProvider: json['tts_provider'] as String? ?? 'browser',
         pushToTalk: json['push_to_talk'] as bool? ?? true,
+        webSearchEnabled: json['web_search_enabled'] as bool? ?? false,
+        tavilyConfigured: json['tavily_configured'] as bool? ?? false,
       );
 }
 
@@ -200,3 +273,27 @@ class LocalSettings {
         pushToTalk: pushToTalk ?? this.pushToTalk,
       );
 }
+
+/// 网络搜索配置
+class WebSearchConfig {
+  final bool enabled;
+  final bool hasApiKey;
+  final String apiKeyMasked;
+  final String baseUrl;
+
+  const WebSearchConfig({
+    required this.enabled,
+    required this.hasApiKey,
+    required this.apiKeyMasked,
+    required this.baseUrl,
+  });
+
+  factory WebSearchConfig.fromJson(Map<String, dynamic> json) =>
+      WebSearchConfig(
+        enabled: json['enabled'] as bool? ?? false,
+        hasApiKey: json['has_api_key'] as bool? ?? false,
+        apiKeyMasked: json['api_key_masked'] as String? ?? '',
+        baseUrl: json['base_url'] as String? ?? 'https://api.tavily.com',
+      );
+}
+

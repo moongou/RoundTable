@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 
-from app.core.topics import get_all_topics, get_topic_by_id
+from app.core.topics import get_all_topics, get_topic_by_id, get_topic_categories
 from app.models.session import Topic
 
 router = APIRouter(prefix="/topics", tags=["topics"])
@@ -15,6 +15,12 @@ async def list_topics(category: str | None = None):
     if category:
         topics = [t for t in topics if t.category == category]
     return topics
+
+
+@router.get("/categories/")
+async def list_categories():
+    """获取所有话题分类及其话题数量。"""
+    return get_topic_categories()
 
 
 @router.get("/{topic_id}", response_model=Topic)

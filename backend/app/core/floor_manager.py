@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Optional
 
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_agentchat.base import TaskResult
 from autogen_agentchat.messages import (
     ModelClientStreamingChunkEvent,
     SelectSpeakerEvent,
@@ -161,6 +162,7 @@ class FloorManager:
 
         except Exception as e:
             error_msg = str(e)
+            logger.error(f"讨论运行异常: {type(e).__name__}: {error_msg}", exc_info=True)
             # 区分 API 配置错误和运行时错误
             if "api_key" in error_msg.lower() or "authentication" in error_msg.lower() or "401" in error_msg:
                 await self._emit_error(f"API 密钥无效或未配置: {error_msg}")
@@ -172,7 +174,7 @@ class FloorManager:
                         "recoverable": False,
                     },
                 }
-            elif "connection" in error_msg.lower() or "connect" in error_msg.lower():
+            elif "connection" in error_msg.lower() or "connect" in error_msg.lower() or "timeout" in error_msg.lower():
                 await self._emit_error(f"无法连接到 LLM 服务: {error_msg}")
                 yield {
                     "event_type": "api_error",
@@ -182,9 +184,29 @@ class FloorManager:
                         "recoverable": False,
                     },
                 }
+            elif "rate" in error_msg.lower() or "429" in error_msg or "quota" in error_msg.lower():
+                await self._emit_error(f"API 调用频率受限: {error_msg}")
+                yield {
+                    "event_type": "api_error",
+                    "data": {
+                        "message": "AI 服务调用频率受限或配额已用完，请稍后再试",
+                        "original_error": error_msg,
+                        "recoverable": True,
+                    },
+                }
+            elif "model" in error_msg.lower() and ("not found" in error_msg.lower() or "not exist" in error_msg.lower()):
+                await self._emit_error(f"模型不存在: {error_msg}")
+                yield {
+                    "event_type": "api_error",
+                    "data": {
+                        "message": "指定的模型不存在，请在设置中检查模型名称",
+                        "original_error": error_msg,
+                        "recoverable": False,
+                    },
+                }
             else:
                 await self._emit_error(f"讨论运行错误: {error_msg}")
-                yield {"event_type": "error", "data": {"message": error_msg}}
+                yield {"event_type": "error", "data": {"message": f"讨论出现异常: {error_msg}"}}
         finally:
             if self.state != FloorState.ENDED:
                 await self._set_state(FloorState.ENDED)
@@ -246,7 +268,7 @@ class FloorManager:
             }
 
         # 人类输入请求
-        if isinstance(event, UserInputRequested):
+        if isinstance(event, UserInputRequestedEvent):
             # 等待人类输入，带超时
             speaker = self.current_speaker or ""
             await self._set_state(FloorState.HUMAN_SPEAKING)
@@ -255,7 +277,13 @@ class FloorManager:
                 "data": {"speaker": speaker},
             }
 
+        # 任务完成结果
+        if isinstance(event, TaskResult):
+            logger.info(f"讨论任务完成: stop_reason={event.stop_reason}")
+            return None  # 任务完成后 run() 的 finally 会发送 ended
+
         # 忽略其他事件类型
+        logger.debug(f"忽略未知事件类型: {type(event).__name__}")
         return None
 
     async def submit_human_input(self, name: str, text: str) -> None:
