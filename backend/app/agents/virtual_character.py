@@ -25,7 +25,7 @@ def create_virtual_character(
     system_message = template.system_message + f"\n\n讨论主题：{topic}"
 
     return AssistantAgent(
-        name=template.name,
+        name=template.id,
         model_client=model_client,
         system_message=system_message,
         description=template.description,
@@ -56,7 +56,7 @@ def create_thinker_agent(
     system_message += f"\n\n讨论主题：{topic}"
 
     return AssistantAgent(
-        name=name,
+        name=thinker_id,
         model_client=model_client,
         system_message=system_message,
         description=description,

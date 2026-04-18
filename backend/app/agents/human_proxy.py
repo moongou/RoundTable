@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Awaitable, Callable, Optional
 
 from autogen_agentchat.agents import UserProxyAgent
@@ -15,8 +16,18 @@ from app.models.session import ParticipantType
 
 
 # 存储每个人类参与者的输入队列
-# 键: 参与者名字, 值: asyncio.Queue[str]
+# 键: 显示名字 (display_name), 值: asyncio.Queue[str]
 _human_input_queues: dict[str, asyncio.Queue[str]] = {}
+
+
+def safe_agent_name(name: str) -> str:
+    """将任意名字转为 AutoGen 兼容格式（只允许 [a-zA-Z0-9_-]）。
+
+    非 ASCII 字符替换为 u{hex} 编码，保证唯一性和确定性。
+    例如: "同学" → "u540cu5b66"
+    """
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", lambda m: f"u{ord(m.group()):04x}", name)
+    return safe if safe else "human"
 
 
 def make_human_input_func(name: str) -> Callable[[str, Optional[CancellationToken]], Awaitable[str]]:
@@ -40,26 +51,28 @@ def make_human_input_func(name: str) -> Callable[[str, Optional[CancellationToke
     return input_func
 
 
-def create_human_proxy(name: str, description: str = "") -> UserProxyAgent:
+def create_human_proxy(display_name: str, description: str = "") -> UserProxyAgent:
     """创建人类参与者 UserProxyAgent。
 
     Args:
-        name: 参与者名字（如"小明"）。
+        display_name: 参与者显示名字（如"小明"，可含中文）。
         description: 参与者描述。
 
     Returns:
         配置好的 UserProxyAgent，其 input_func 从 asyncio.Queue 读取。
+        Agent 内部 name 为 AutoGen 兼容的 ASCII 格式；显示名保存在 description 中。
     """
+    agent_name = safe_agent_name(display_name)
     if not description:
-        description = f"学生{name}，真人参与者"
+        description = f"学生{display_name}，真人参与者"
 
-    # 创建该参与者的输入队列
-    _human_input_queues[name] = asyncio.Queue()
+    # 输入队列以显示名为键，方便 put_human_input 按原始名称写入
+    _human_input_queues[display_name] = asyncio.Queue()
 
     return UserProxyAgent(
-        name=name,
+        name=agent_name,
         description=description,
-        input_func=make_human_input_func(name),
+        input_func=make_human_input_func(display_name),
     )
 
 

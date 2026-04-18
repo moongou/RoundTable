@@ -434,41 +434,49 @@ class _WideLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
       children: [
-        SizedBox(
-          width: 300,
-          child: _LeftPanel(
-            topics: topics,
-            categories: categories,
-            selectedCategory: selectedCategory,
-            selectedTopicId: selectedTopicId,
-            characters: characters,
-            selectedCharacterIds: selectedCharacterIds,
-            onCategoryChanged: onCategoryChanged,
-            onTopicSelected: onTopicSelected,
-            onCharacterToggled: onCharacterToggled,
-          ),
-        ),
         Expanded(
-          child: Center(
-            child: _CenterTable(
-              canStart: canStart,
-              pulseAnim: pulseAnim,
-              onStart: onStart,
-              selectedCount:
-                  selectedCharacterIds.length + selectedThinkerIds.length,
-            ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 300,
+                child: _LeftPanel(
+                  topics: topics,
+                  categories: categories,
+                  selectedCategory: selectedCategory,
+                  selectedTopicId: selectedTopicId,
+                  onCategoryChanged: onCategoryChanged,
+                  onTopicSelected: onTopicSelected,
+                ),
+              ),
+              Expanded(
+                child: Center(
+                  child: _CenterTable(
+                    canStart: canStart,
+                    pulseAnim: pulseAnim,
+                    onStart: onStart,
+                    selectedCount:
+                        selectedCharacterIds.length + selectedThinkerIds.length,
+                  ),
+                ),
+              ),
+              SizedBox(
+                width: 250,
+                child: _RightPanel(
+                  thinkers: thinkers,
+                  selectedThinkerIds: selectedThinkerIds,
+                  onThinkerToggled: onThinkerToggled,
+                ),
+              ),
+            ],
           ),
         ),
-        SizedBox(
-          width: 250,
-          child: _RightPanel(
-            thinkers: thinkers,
-            selectedThinkerIds: selectedThinkerIds,
-            onThinkerToggled: onThinkerToggled,
-          ),
+        _CharacterBar(
+          characters: characters,
+          selectedCharacterIds: selectedCharacterIds,
+          onCharacterToggled: onCharacterToggled,
         ),
       ],
     );
@@ -569,22 +577,16 @@ class _LeftPanel extends StatelessWidget {
   final List<Map<String, dynamic>> categories;
   final String? selectedCategory;
   final String? selectedTopicId;
-  final List<CharacterTemplate> characters;
-  final Set<String> selectedCharacterIds;
   final ValueChanged<String?> onCategoryChanged;
   final ValueChanged<Topic> onTopicSelected;
-  final ValueChanged<String> onCharacterToggled;
 
   const _LeftPanel({
     required this.topics,
     required this.categories,
     required this.selectedCategory,
     required this.selectedTopicId,
-    required this.characters,
-    required this.selectedCharacterIds,
     required this.onCategoryChanged,
     required this.onTopicSelected,
-    required this.onCharacterToggled,
   });
 
   @override
@@ -597,32 +599,17 @@ class _LeftPanel extends StatelessWidget {
       ),
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _SectionPanel(
-              title: '话题',
-              neonColor: _kNeonCyan,
-              child: _TopicsContent(
-                topics: topics,
-                categories: categories,
-                selectedCategory: selectedCategory,
-                selectedTopicId: selectedTopicId,
-                onCategoryChanged: onCategoryChanged,
-                onTopicSelected: onTopicSelected,
-              ),
-            ),
-            const SizedBox(height: 20),
-            _SectionPanel(
-              title: '角色',
-              neonColor: _kNeonViolet,
-              child: _CharacterGrid(
-                characters: characters,
-                selectedIds: selectedCharacterIds,
-                onToggled: onCharacterToggled,
-              ),
-            ),
-          ],
+        child: _SectionPanel(
+          title: '话题',
+          neonColor: _kNeonCyan,
+          child: _TopicsContent(
+            topics: topics,
+            categories: categories,
+            selectedCategory: selectedCategory,
+            selectedTopicId: selectedTopicId,
+            onCategoryChanged: onCategoryChanged,
+            onTopicSelected: onTopicSelected,
+          ),
         ),
       ),
     );
@@ -1299,6 +1286,96 @@ class _StartButtonState extends State<_StartButton> {
       ),
     );
   }
+}
+
+// ─── Character Bar ────────────────────────────────────────────────────────────
+class _CharacterBar extends StatelessWidget {
+  final List<CharacterTemplate> characters;
+  final Set<String> selectedCharacterIds;
+  final ValueChanged<String> onCharacterToggled;
+
+  const _CharacterBar({
+    required this.characters,
+    required this.selectedCharacterIds,
+    required this.onCharacterToggled,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final moderator =
+        characters.where((c) => c.id == 'moderator').firstOrNull;
+    final selectableChars =
+        characters.where((c) => c.id != 'moderator').toList();
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: _kSurface,
+        border: Border(top: BorderSide(color: _kBorder)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (moderator != null) ..._buildModeratorChip(moderator),
+            if (moderator != null)
+              Container(
+                width: 1,
+                height: 34,
+                color: _kBorder,
+                margin: const EdgeInsets.symmetric(horizontal: 16),
+              ),
+            ...selectableChars.map(
+              (char) => Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: _CharChip(
+                  avatar: char.avatar,
+                  name: char.name,
+                  isSelected: selectedCharacterIds.contains(char.id),
+                  onTap: () => onCharacterToggled(char.id),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildModeratorChip(CharacterTemplate mod) => [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+          decoration: BoxDecoration(
+            color: _kNeonGold.withValues(alpha: 0.12),
+            border: Border.all(
+                color: _kNeonGold.withValues(alpha: 0.65), width: 1.5),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.school_rounded, color: _kNeonGold, size: 14),
+              const SizedBox(width: 6),
+              Text(mod.avatar, style: const TextStyle(fontSize: 15)),
+              const SizedBox(width: 4),
+              Text(
+                mod.name,
+                style: const TextStyle(
+                    color: _kNeonGold,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(width: 5),
+              Text(
+                '主持',
+                style: TextStyle(
+                    color: _kNeonGold.withValues(alpha: 0.55), fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+      ];
 }
 
 // ─── Loading View ─────────────────────────────────────────────────────────────

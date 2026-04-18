@@ -21,6 +21,9 @@ const processes = {
   backend: { proc: null, logs: [], label: '后端 (FastAPI :8001)' },
 };
 
+// 是否正在停止中（kill 后端口可能短暂残留，此时强制上报 running=false）
+let _backendStopping = false;
+
 function log(service, line) {
   const entry = { t: new Date().toISOString().slice(11, 19), line };
   processes[service].logs.push(entry);
@@ -31,6 +34,7 @@ function log(service, line) {
 }
 
 function startBackend() {
+  _backendStopping = false; // clear any stale stopping state
   if (processes.backend.proc) return { ok: false, msg: '已在运行' };
   if (isPortListening(8001)) {
     log('backend', '⚠ 端口 8001 已被占用（外部进程）');
@@ -49,6 +53,7 @@ function startBackend() {
   proc.on('exit', code => {
     log('backend', '⏹ 进程退出 (code ' + code + ')');
     processes.backend.proc = null;
+    _backendStopping = false;
     broadcastStatus();
   });
   log('backend', '▶ 启动后端...');
@@ -58,9 +63,11 @@ function startBackend() {
 
 function stopBackend() {
   if (processes.backend.proc) {
-    processes.backend.proc.kill('SIGTERM');
+    _backendStopping = true;
+    const procToKill = processes.backend.proc;
     processes.backend.proc = null;
-    // Also kill any remaining processes on the port (e.g., uvicorn --reload children)
+    procToKill.kill('SIGTERM');
+    // Kill any remaining processes on the port (e.g., uvicorn --reload children)
     setTimeout(() => {
       getAllPortPids(8001).forEach(pid => {
         try { execSync('kill -9 ' + pid, { timeout: 1000 }); } catch(e) {}
@@ -68,21 +75,34 @@ function stopBackend() {
       broadcastStatus();
     }, 600);
     log('backend', '⏹ 已停止');
-    broadcastStatus();
+    broadcastStatus(); // _backendStopping=true → running=false immediately
+    // Clear flag once port is actually free
+    let attempts = 0;
+    const pollTimer = setInterval(() => {
+      attempts++;
+      if (!isPortListening(8001) || attempts >= 20) {
+        clearInterval(pollTimer);
+        _backendStopping = false;
+        broadcastStatus();
+      }
+    }, 500);
     return { ok: true };
   }
+  _backendStopping = true;
   const pids = getAllPortPids(8001);
-  if (pids.length === 0) return { ok: false, msg: '未运行' };
+  if (pids.length === 0) { _backendStopping = false; return { ok: false, msg: '未运行' }; }
   pids.forEach(pid => {
     try { execSync('kill -9 ' + pid, { timeout: 2000 }); } catch(e) { /* ignore */ }
   });
   log('backend', '⏹ 已停止外部进程，等待端口释放…');
-  // Poll until port is actually released, then broadcast final stopped state
+  broadcastStatus(); // _backendStopping=true → running=false immediately
+  // Poll until port is actually released, then clear stopping state
   let attempts = 0;
   const timer = setInterval(() => {
     attempts++;
     if (!isPortListening(8001) || attempts >= 20) {
       clearInterval(timer);
+      _backendStopping = false;
       if (!isPortListening(8001)) {
         log('backend', '✅ 端口 8001 已释放');
       } else {
@@ -91,7 +111,6 @@ function stopBackend() {
       broadcastStatus();
     }
   }, 500);
-  broadcastStatus();
   return { ok: true };
 }
 
@@ -130,10 +149,12 @@ function getAllPortPids(port) {
 function getStatus() {
   const backendManaged = !!processes.backend.proc;
   const backendPortUp = isPortListening(8001);
+  // While explicitly stopping: report not-running so Start button re-enables immediately
+  const backendRunning = _backendStopping ? false : backendPortUp;
   const flutterEmbedded = fs.existsSync(path.join(BACKEND_DIR, 'static', 'index.html'));
   return {
-    backend: { running: backendPortUp, managed: backendManaged },
-    flutter: { embedded: flutterEmbedded, backendRunning: backendPortUp },
+    backend: { running: backendRunning, managed: backendManaged },
+    flutter: { embedded: flutterEmbedded, backendRunning: backendRunning },
   };
 }
 

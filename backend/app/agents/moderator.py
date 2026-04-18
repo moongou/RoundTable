@@ -40,7 +40,7 @@ def create_moderator(
     system_message += f"\n参与者：{', '.join(participant_names)}"
 
     return AssistantAgent(
-        name="老师",
+        name="moderator",
         model_client=model_client,
         system_message=system_message,
         description="讨论主持人李老师，负责引导讨论流程、点名和总结观点",

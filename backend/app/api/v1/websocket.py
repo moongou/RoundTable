@@ -12,7 +12,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.agents.character_templates import load_all_templates
-from app.agents.human_proxy import clear_human_queues, create_human_proxy, put_human_input
+from app.agents.human_proxy import clear_human_queues, create_human_proxy, put_human_input, safe_agent_name
 from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
@@ -120,24 +120,21 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             await websocket.close()
             return
 
+        # Display names (Chinese) for system prompt and frontend display
         all_participant_names = [templates["moderator"].name]
-        all_participant_names += [templates[cid].name for cid in character_ids]
+        all_participant_names += [templates[cid].name for cid in character_ids if cid in templates and cid != "moderator"]
         all_participant_names += [get_thinker(tid).get("name", tid) for tid in thinker_ids]
         all_participant_names += human_names
 
-        # ── 确保参与者名字唯一（避免 AutoGen uniqueness 错误）──
-        def _dedup_names(names: list[str]) -> list[str]:
-            seen: dict[str, int] = {}
-            result = []
-            for n in names:
-                if n not in seen:
-                    seen[n] = 0
-                    result.append(n)
-                else:
-                    seen[n] += 1
-                    result.append(f"{n}{seen[n]}")
-            return result
-        all_participant_names = _dedup_names(all_participant_names)
+        # internal agent name → Chinese display name (for translating events to frontend)
+        agent_display_map: dict[str, str] = {"moderator": templates["moderator"].name}
+        for cid in character_ids:
+            if cid in templates and cid != "moderator":
+                agent_display_map[cid] = templates[cid].name
+        for tid in thinker_ids:
+            agent_display_map[tid] = get_thinker(tid).get("name", tid)
+        for hn in dict.fromkeys(human_names):
+            agent_display_map[safe_agent_name(hn)] = hn
 
         moderator = create_moderator(
             model_client=moderator_client,
@@ -147,7 +144,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         characters = [
             create_virtual_character(cid, model_client=character_client, topic=topic.title)
-            for cid in character_ids
+            for cid in character_ids if cid != "moderator"
         ]
 
         # 创建思想家角色
@@ -158,7 +155,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         humans = [create_human_proxy(name) for name in dict.fromkeys(human_names)]
 
-        # ── 去重：确保没有同名 Agent（AutoGen 要求名字唯一）──
+        # 去重：确保没有同名 Agent（AutoGen 要求名字唯一）
         seen_names: set[str] = set()
         unique_agents = []
         for agent in [moderator] + characters + thinker_agents + humans:
@@ -191,18 +188,20 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         # 注册回调，将事件推送到 WebSocket
         async def on_message(source, content, msg_type):
+            display_source = agent_display_map.get(source, source)
             await websocket.send_json(
                 {
                     "event_type": "message",
-                    "data": {"source": source, "content": content, "msg_type": msg_type},
+                    "data": {"source": display_source, "content": content, "msg_type": msg_type},
                 }
             )
 
         async def on_turn_change(speaker, is_human):
+            display_speaker = agent_display_map.get(speaker, speaker)
             await websocket.send_json(
                 {
                     "event_type": "turn_change",
-                    "data": {"speaker": speaker, "is_human": is_human},
+                    "data": {"speaker": display_speaker, "is_human": is_human},
                 }
             )
 
@@ -218,7 +217,10 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             await websocket.send_json(
                 {
                     "event_type": "interrupt",
-                    "data": {"interrupter": interrupter, "interrupted_speaker": current_speaker},
+                    "data": {
+                        "interrupter": agent_display_map.get(interrupter, interrupter),
+                        "interrupted_speaker": agent_display_map.get(current_speaker, current_speaker),
+                    },
                 }
             )
 
