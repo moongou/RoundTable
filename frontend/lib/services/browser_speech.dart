@@ -21,7 +21,7 @@ class BrowserTtsService implements TtsService {
   bool get isSpeaking => _isSpeaking;
 
   @override
-  Future<void> speak(String text, {String? voice}) async {
+  Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
     await stop();
 
     try {
@@ -30,7 +30,7 @@ class BrowserTtsService implements TtsService {
 
       final utterance = html.SpeechSynthesisUtterance(text);
       utterance.lang = 'zh-CN';
-      utterance.rate = 1.0;
+      utterance.rate = rate;
       utterance.pitch = 1.0;
       utterance.volume = 1.0;
 

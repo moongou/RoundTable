@@ -518,8 +518,8 @@ class _WideLayout extends StatefulWidget {
 
 class _WideLayoutState extends State<_WideLayout> {
   // Resizable panel widths
-  double _leftPanelWidth = 340;   // category+topic combined (c: +38px ≈1cm)
-  double _rightPanelWidth = 390;  // thinkers (e: 300*1.3=390)
+  double _leftPanelWidth = 340; // category+topic combined (c: +38px ≈1cm)
+  double _rightPanelWidth = 390; // thinkers (e: 300*1.3=390)
 
   // Thinker domain filter (e)
   String? _selectedThinkerDomain;
@@ -811,7 +811,7 @@ class _LeftPanelState extends State<_LeftPanel> {
                 children: [
                   // Category header — larger font to signal first-level hierarchy
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 16, 10, 10),
+                    padding: const EdgeInsets.fromLTRB(24, 16, 10, 10),
                     child: Row(
                       children: [
                         Container(
@@ -826,7 +826,7 @@ class _LeftPanelState extends State<_LeftPanel> {
                         const Text('分类',
                             style: TextStyle(
                               color: _kNeonCyan,
-                              fontSize: 13,       // larger for first level
+                              fontSize: 13, // larger for first level
                               fontWeight: FontWeight.w800,
                               letterSpacing: 2,
                             )),
@@ -834,25 +834,27 @@ class _LeftPanelState extends State<_LeftPanel> {
                     ),
                   ),
                   Expanded(
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _CategoryItem(
-                            label: '全部',
-                            selected: widget.selectedCategory == null,
-                            onTap: () => widget.onCategoryChanged(null),
-                          ),
-                          ...widget.categories.map((cat) {
-                            final id = cat['id'] as String? ?? '';
-                            final name = cat['name'] as String? ?? id;
-                            return _CategoryItem(
-                              label: name,
-                              selected: widget.selectedCategory == id,
-                              onTap: () => widget.onCategoryChanged(id),
-                            );
-                          }),
-                        ],
+                    child: Center(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _CategoryItem(
+                              label: '全部',
+                              selected: widget.selectedCategory == null,
+                              onTap: () => widget.onCategoryChanged(null),
+                            ),
+                            ...widget.categories.map((cat) {
+                              final id = cat['id'] as String? ?? '';
+                              final name = cat['name'] as String? ?? id;
+                              return _CategoryItem(
+                                label: name,
+                                selected: widget.selectedCategory == id,
+                                onTap: () => widget.onCategoryChanged(id),
+                              );
+                            }),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -893,7 +895,7 @@ class _LeftPanelState extends State<_LeftPanel> {
                       const Text('话题',
                           style: TextStyle(
                             color: _kTextSecondary,
-                            fontSize: 11,        // smaller for second level
+                            fontSize: 11, // smaller for second level
                             fontWeight: FontWeight.w600,
                             letterSpacing: 1.8,
                             fontStyle: FontStyle.italic,
@@ -1000,7 +1002,7 @@ class _CategoryItemState extends State<_CategoryItem> {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 140),
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          padding: const EdgeInsets.fromLTRB(24, 10, 10, 10),
           decoration: BoxDecoration(
             color: widget.selected
                 ? _kNeonCyan.withValues(alpha: 0.15)
@@ -1024,7 +1026,8 @@ class _CategoryItemState extends State<_CategoryItem> {
                   style: TextStyle(
                     color: widget.selected ? _kNeonCyan : _kTextSecondary,
                     fontSize: 12,
-                    fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
+                    fontWeight:
+                        widget.selected ? FontWeight.w600 : FontWeight.normal,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -1092,23 +1095,32 @@ class _RightPanel extends StatelessWidget {
             child: Row(
               children: [
                 Container(
-                  width: 3, height: 16,
+                  width: 3,
+                  height: 16,
                   decoration: BoxDecoration(
                     color: _kNeonGold,
                     borderRadius: BorderRadius.circular(2),
-                    boxShadow: [BoxShadow(color: _kNeonGold.withValues(alpha: 0.5), blurRadius: 6)],
+                    boxShadow: [
+                      BoxShadow(
+                          color: _kNeonGold.withValues(alpha: 0.5),
+                          blurRadius: 6)
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),
                 const Text('思想家',
                     style: TextStyle(
-                      color: _kNeonGold, fontSize: 13,
-                      fontWeight: FontWeight.w700, letterSpacing: 2,
+                      color: _kNeonGold,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 2,
                     )),
                 const Spacer(),
                 if (selectedThinkerIds.isNotEmpty)
                   Text('已选 ${selectedThinkerIds.length}',
-                      style: TextStyle(color: _kNeonGold.withValues(alpha: 0.7), fontSize: 11)),
+                      style: TextStyle(
+                          color: _kNeonGold.withValues(alpha: 0.7),
+                          fontSize: 11)),
               ],
             ),
           ),
@@ -1119,20 +1131,27 @@ class _RightPanel extends StatelessWidget {
               height: 32,
               child: ScrollConfiguration(
                 behavior: ScrollConfiguration.of(context).copyWith(
-                  dragDevices: {PointerDeviceKind.touch, PointerDeviceKind.mouse, PointerDeviceKind.trackpad},
+                  dragDevices: {
+                    PointerDeviceKind.touch,
+                    PointerDeviceKind.mouse,
+                    PointerDeviceKind.trackpad
+                  },
                 ),
                 child: ListView(
                   scrollDirection: Axis.horizontal,
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   children: [
-                    _DomainTag(label: '全部', selected: selectedDomain == null,
+                    _DomainTag(
+                        label: '全部',
+                        selected: selectedDomain == null,
                         onTap: () => onDomainChanged(null)),
                     ...domains.map((d) => _DomainTag(
-                      label: d['name'] as String,
-                      selected: selectedDomain == d['id'],
-                      onTap: () => onDomainChanged(
-                          selectedDomain == d['id'] ? null : d['id'] as String),
-                    )),
+                          label: d['name'] as String,
+                          selected: selectedDomain == d['id'],
+                          onTap: () => onDomainChanged(selectedDomain == d['id']
+                              ? null
+                              : d['id'] as String),
+                        )),
                   ],
                 ),
               ),
@@ -1162,7 +1181,8 @@ class _DomainTag extends StatefulWidget {
   final String label;
   final bool selected;
   final VoidCallback onTap;
-  const _DomainTag({required this.label, required this.selected, required this.onTap});
+  const _DomainTag(
+      {required this.label, required this.selected, required this.onTap});
   @override
   State<_DomainTag> createState() => _DomainTagState();
 }
@@ -1184,21 +1204,30 @@ class _DomainTagState extends State<_DomainTag> {
             decoration: BoxDecoration(
               color: widget.selected
                   ? _kNeonGold.withValues(alpha: 0.18)
-                  : _hovered ? _kCard : _kCard.withValues(alpha: 0.5),
+                  : _hovered
+                      ? _kCard
+                      : _kCard.withValues(alpha: 0.5),
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color: widget.selected ? _kNeonGold.withValues(alpha: 0.9) : _kBorder,
+                color: widget.selected
+                    ? _kNeonGold.withValues(alpha: 0.9)
+                    : _kBorder,
                 width: widget.selected ? 1.5 : 1,
               ),
               boxShadow: widget.selected
-                  ? [BoxShadow(color: _kNeonGold.withValues(alpha: 0.2), blurRadius: 6)]
+                  ? [
+                      BoxShadow(
+                          color: _kNeonGold.withValues(alpha: 0.2),
+                          blurRadius: 6)
+                    ]
                   : null,
             ),
             child: Text(widget.label,
                 style: TextStyle(
                   color: widget.selected ? _kNeonGold : _kTextSecondary,
                   fontSize: 11,
-                  fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
+                  fontWeight:
+                      widget.selected ? FontWeight.w600 : FontWeight.normal,
                 )),
           ),
         ),

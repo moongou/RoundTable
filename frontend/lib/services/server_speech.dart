@@ -34,14 +34,18 @@ class ServerTtsService implements TtsService {
   bool get isSpeaking => _isSpeaking;
 
   @override
-  Future<void> speak(String text, {String? voice}) async {
+  Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
     await stop();
 
     try {
       _isSpeaking = true;
       final response = await _dio.post<List<int>>(
         '/api/v1/voice/tts',
-        data: {'text': text, 'voice': voice ?? 'alloy'},
+        data: {
+          'text': text,
+          'voice': voice ?? 'alloy',
+          if (rate != 1.0) 'speed': rate,
+        },
         options: Options(responseType: ResponseType.bytes),
       );
 
@@ -51,6 +55,7 @@ class ServerTtsService implements TtsService {
 
       _audioElement = html.AudioElement()
         ..src = url
+        ..playbackRate = rate
         ..autoplay = true;
 
       final completer = Completer<void>();

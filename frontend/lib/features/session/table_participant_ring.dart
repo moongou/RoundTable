@@ -52,7 +52,8 @@ class TableParticipantRing extends StatelessWidget {
       final humanIdx = reordered.indexWhere((p) => p.isHuman);
       if (humanIdx >= 0) {
         final human = reordered.removeAt(humanIdx);
-        final targetIdx = (reordered.length / 2).round().clamp(1, reordered.length);
+        final targetIdx =
+            (reordered.length / 2).round().clamp(1, reordered.length);
         reordered.insert(targetIdx, human);
       }
     }

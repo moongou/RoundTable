@@ -36,9 +36,21 @@ def load_all_thinkers() -> dict[str, dict]:
             with open(yaml_file, encoding="utf-8") as f:
                 data = yaml.safe_load(f)
 
+            file_domain = data.get("domain", "")
+            file_domain_cn = data.get("domain_cn", file_domain)
+
             for thinker in data.get("thinkers", []):
                 tid = thinker.get("id")
                 if tid:
+                    # Ensure domain is a flat string for frontend consumption
+                    raw_domain = thinker.get("domain", [])
+                    if isinstance(raw_domain, list):
+                        thinker["domain"] = raw_domain[0] if raw_domain else file_domain
+                    elif not raw_domain:
+                        thinker["domain"] = file_domain
+                    # Inject domain_cn from file header
+                    if "domain_cn" not in thinker or not thinker["domain_cn"]:
+                        thinker["domain_cn"] = file_domain_cn
                     _thinkers_cache[tid] = thinker
         except Exception as e:
             logger.error(f"加载思想家文件失败 {yaml_file}: {e}")
@@ -56,7 +68,7 @@ def get_thinker(thinker_id: str) -> Optional[dict]:
 def get_thinkers_by_domain(domain: str) -> list[dict]:
     """获取指定领域的思想家列表。"""
     thinkers = load_all_thinkers()
-    return [t for t in thinkers.values() if domain in t.get("domain", [])]
+    return [t for t in thinkers.values() if t.get("domain") == domain]
 
 
 def get_all_domains() -> list[dict]:
@@ -66,7 +78,8 @@ def get_all_domains() -> list[dict]:
     domain_cn: dict[str, str] = {}
 
     for t in thinkers.values():
-        for d in t.get("domain", []):
+        d = t.get("domain", "")
+        if d:
             domain_count[d] = domain_count.get(d, 0) + 1
             if d not in domain_cn:
                 domain_cn[d] = t.get("domain_cn", d)

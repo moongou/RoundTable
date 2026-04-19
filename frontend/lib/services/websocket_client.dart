@@ -26,7 +26,8 @@ enum WsEventType {
     return snakeCase
         .split('_')
         .asMap()
-        .map((i, part) => MapEntry(i, i == 0 ? part : '${part[0].toUpperCase()}${part.substring(1)}'))
+        .map((i, part) => MapEntry(
+            i, i == 0 ? part : '${part[0].toUpperCase()}${part.substring(1)}'))
         .values
         .join('');
   }
@@ -48,7 +49,8 @@ class WsEvent {
 /// WebSocket 客户端，用于接收讨论事件和发送人类输入
 class DiscussionWebSocket {
   WebSocketChannel? _channel;
-  final StreamController<WsEvent> _eventController = StreamController<WsEvent>.broadcast();
+  final StreamController<WsEvent> _eventController =
+      StreamController<WsEvent>.broadcast();
   bool _connected = false;
 
   /// 事件流

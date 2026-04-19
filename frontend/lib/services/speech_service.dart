@@ -9,7 +9,7 @@ import 'server_speech.dart';
 /// TTS 服务抽象接口
 abstract class TtsService {
   /// 朗读文本
-  Future<void> speak(String text, {String? voice});
+  Future<void> speak(String text, {String? voice, double rate = 1.0});
 
   /// 停止朗读
   Future<void> stop();
