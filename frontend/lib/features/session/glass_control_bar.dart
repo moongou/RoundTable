@@ -41,7 +41,8 @@ class GlassControlBar extends StatefulWidget {
 class _GlassControlBarState extends State<GlassControlBar> {
   @override
   Widget build(BuildContext context) {
-    if (!widget.isMyTurn && !widget.canInterrupt) return const SizedBox.shrink();
+    if (!widget.isMyTurn && !widget.canInterrupt)
+      return const SizedBox.shrink();
 
     return Container(
       margin: const EdgeInsets.all(12),
@@ -70,9 +71,7 @@ class _GlassControlBarState extends State<GlassControlBar> {
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
           child: SafeArea(
-            child: widget.isMyTurn
-                ? _buildMyTurnRow()
-                : _buildInterruptOnly(),
+            child: widget.isMyTurn ? _buildMyTurnRow() : _buildInterruptOnly(),
           ),
         ),
       ),
@@ -94,9 +93,7 @@ class _GlassControlBarState extends State<GlassControlBar> {
                   color: AppColors.amberGold, size: 14),
               const SizedBox(width: 6),
               Text(
-                widget.isRecording
-                    ? '正在录音... 松开空格键结束'
-                    : '轮到你了！按住空格键发言，或直接输入文字',
+                widget.isRecording ? '正在录音... 松开空格键结束' : '轮到你了！按住空格键发言，或直接输入文字',
                 style: TextStyle(
                   color: widget.isRecording
                       ? const Color(0xFF00FFCC)
@@ -147,23 +144,21 @@ class _GlassControlBarState extends State<GlassControlBar> {
             Expanded(
               child: TextField(
                 controller: widget.inputController,
-                style: const TextStyle(
-                    color: AppColors.warmWhite, fontSize: 14),
+                style:
+                    const TextStyle(color: AppColors.warmWhite, fontSize: 14),
                 decoration: InputDecoration(
                   hintText: '或直接输入文字...',
-                  hintStyle: const TextStyle(
-                      color: AppColors.warmGray, fontSize: 13),
+                  hintStyle:
+                      const TextStyle(color: AppColors.warmGray, fontSize: 13),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(24),
                     borderSide: BorderSide(
-                        color:
-                            AppColors.warmGray.withValues(alpha: 0.3)),
+                        color: AppColors.warmGray.withValues(alpha: 0.3)),
                   ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(24),
                     borderSide: BorderSide(
-                        color:
-                            AppColors.warmGray.withValues(alpha: 0.3)),
+                        color: AppColors.warmGray.withValues(alpha: 0.3)),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(24),
@@ -171,10 +166,9 @@ class _GlassControlBarState extends State<GlassControlBar> {
                         color: AppColors.amberGold, width: 1.5),
                   ),
                   filled: true,
-                  fillColor:
-                      AppColors.studyWallLight.withValues(alpha: 0.5),
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
+                  fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   isDense: true,
                 ),
                 onSubmitted: (_) => widget.onSendMessage(),

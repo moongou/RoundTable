@@ -74,17 +74,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   // 角色显示名 → Edge TTS 音色映射
   static const _nameToVoice = <String, String>{
-    '李老师': 'zh-CN-XiaoxiaoNeural',   // 温暖女声·教师
-    '小探': 'zh-CN-YunxiNeural',        // 少年男声·探索
-    '小疑': 'zh-CN-YunzeNeural',        // 深沉男声·质疑
-    '小和': 'zh-CN-XiaoyiNeural',       // 柔和女声·和平
-    '小说': 'zh-CN-XiaohanNeural',      // 活泼女声·讲故事
-    '小明': 'zh-CN-YunjieNeural',       // 阳光男声·乐观
-    '小思': 'zh-CN-YunxiaNeural',       // 明亮男声·提问
-    '小理': 'zh-CN-YunyangNeural',      // 正式男声·理性
-    '小爱': 'zh-CN-XiaohanNeural',      // 温柔女声·共情
-    '小想': 'zh-CN-YunfengNeural',      // 稳健男声·创新
-    '小行': 'zh-CN-YunjianNeural',      // 强劲男声·务实
+    '李老师': 'zh-CN-XiaoxiaoNeural', // 温暖女声·教师
+    '小探': 'zh-CN-YunxiNeural', // 少年男声·探索
+    '小疑': 'zh-CN-YunzeNeural', // 深沉男声·质疑
+    '小和': 'zh-CN-XiaoyiNeural', // 柔和女声·和平
+    '小说': 'zh-CN-XiaohanNeural', // 活泼女声·讲故事
+    '小明': 'zh-CN-YunjieNeural', // 阳光男声·乐观
+    '小思': 'zh-CN-YunxiaNeural', // 明亮男声·提问
+    '小理': 'zh-CN-YunyangNeural', // 正式男声·理性
+    '小爱': 'zh-CN-XiaohanNeural', // 温柔女声·共情
+    '小想': 'zh-CN-YunfengNeural', // 稳健男声·创新
+    '小行': 'zh-CN-YunjianNeural', // 强劲男声·务实
   };
 
   // 每次会话分配的参与者音色表（用于思想家的哈希分配）
@@ -186,17 +186,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   /// 角色 ID → 显示名映射（与后端 character_templates 对应）
   static const _charIdToName = <String, String>{
-    'moderator':   '李老师',
-    'explorer':    '小探',
-    'skeptic':     '小疑',
-    'peacemaker':  '小和',
+    'moderator': '李老师',
+    'explorer': '小探',
+    'skeptic': '小疑',
+    'peacemaker': '小和',
     'storyteller': '小说',
-    'optimist':    '小明',
-    'questioner':  '小思',
+    'optimist': '小明',
+    'questioner': '小思',
     'rationalist': '小理',
-    'empath':      '小爱',
-    'innovator':   '小想',
-    'pragmatist':  '小行',
+    'empath': '小爱',
+    'innovator': '小想',
+    'pragmatist': '小行',
   };
 
   /// 连接成功后立即预填参与者，确保老师和所有角色出现在圆桌上
@@ -288,11 +288,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         // AI 角色和思想家都使用 DiceBear 网络头像
         avatars[name] = diceBearUrl(name);
         if (templateAvatarMap.containsKey(name)) {
-          _voiceMap.putIfAbsent(name, () => _nameToVoice[name] ?? 'zh-CN-XiaoxiaoNeural');
+          _voiceMap.putIfAbsent(
+              name, () => _nameToVoice[name] ?? 'zh-CN-XiaoxiaoNeural');
         } else {
           // 思想家 - 轮转分配男声
-          _voiceMap.putIfAbsent(name,
-              () => _maleThinkerVoices[thinkerVoiceIndex % _maleThinkerVoices.length]);
+          _voiceMap.putIfAbsent(
+              name,
+              () => _maleThinkerVoices[
+                  thinkerVoiceIndex % _maleThinkerVoices.length]);
           thinkerVoiceIndex++;
         }
       }
@@ -676,7 +679,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                     child: SpeakingBubble(
                       speaker: _centerSpeaker,
                       content: _centerMessage,
-                      speakerColor: AppColors.getParticipantColor(_centerSpeaker),
+                      speakerColor:
+                          AppColors.getParticipantColor(_centerSpeaker),
                       isVisible: true,
                     ),
                   ),

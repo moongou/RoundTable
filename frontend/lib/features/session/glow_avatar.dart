@@ -60,10 +60,26 @@ class _GlowAvatarState extends State<GlowAvatar>
   }
 
   static const _grayscaleFilter = ColorFilter.matrix(<double>[
-    0.2126, 0.7152, 0.0722, 0, 0,
-    0.2126, 0.7152, 0.0722, 0, 0,
-    0.2126, 0.7152, 0.0722, 0, 0,
-    0, 0, 0, 1, 0,
+    0.2126,
+    0.7152,
+    0.0722,
+    0,
+    0,
+    0.2126,
+    0.7152,
+    0.0722,
+    0,
+    0,
+    0.2126,
+    0.7152,
+    0.0722,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
   ]);
 
   /// Renders the avatar as a network image (URL) or emoji text.
@@ -93,8 +109,10 @@ class _GlowAvatarState extends State<GlowAvatar>
     return AnimatedBuilder(
       animation: _pulseController,
       builder: (context, child) {
-        final glowScale = widget.isSpeaking ? 1.0 + _pulseController.value * 0.15 : 1.0;
-        final glowAlpha = widget.isSpeaking ? 0.4 + _pulseController.value * 0.3 : 0.0;
+        final glowScale =
+            widget.isSpeaking ? 1.0 + _pulseController.value * 0.15 : 1.0;
+        final glowAlpha =
+            widget.isSpeaking ? 0.4 + _pulseController.value * 0.3 : 0.0;
 
         final avatarContent = Opacity(
           opacity: widget.isDimmed ? 0.4 : 1.0,
@@ -158,7 +176,8 @@ class _GlowAvatarState extends State<GlowAvatar>
                           color: AppColors.accentWarm,
                           shape: BoxShape.circle,
                         ),
-                        child: const Icon(Icons.back_hand, size: 14, color: Colors.white),
+                        child: const Icon(Icons.back_hand,
+                            size: 14, color: Colors.white),
                       ),
                     ),
                   if (widget.isSpeaking)
@@ -171,7 +190,8 @@ class _GlowAvatarState extends State<GlowAvatar>
                         decoration: BoxDecoration(
                           color: AppColors.glowGreen,
                           shape: BoxShape.circle,
-                          border: Border.all(color: AppColors.warmWhite, width: 2),
+                          border:
+                              Border.all(color: AppColors.warmWhite, width: 2),
                         ),
                       ),
                     ),
@@ -182,7 +202,9 @@ class _GlowAvatarState extends State<GlowAvatar>
                 widget.name,
                 style: TextStyle(
                   color: widget.isCurrentSpeaker ? color : AppColors.warmWhite,
-                  fontWeight: widget.isCurrentSpeaker ? FontWeight.bold : FontWeight.normal,
+                  fontWeight: widget.isCurrentSpeaker
+                      ? FontWeight.bold
+                      : FontWeight.normal,
                   fontSize: 12,
                 ),
                 maxLines: 1,

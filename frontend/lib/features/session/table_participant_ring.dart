@@ -54,7 +54,7 @@ class TableParticipantRing extends StatelessWidget {
             return Positioned(
               left: cx + avatarRadius * cos(angle) - 32,
               top: cy + avatarRadius * sin(angle) - 38,
-                child: GlowAvatar(
+              child: GlowAvatar(
                 name: p.name,
                 avatar: p.avatar,
                 isSpeaking: p.isSpeaking,

@@ -440,8 +440,8 @@ class _WideLayout extends StatefulWidget {
 
 class _WideLayoutState extends State<_WideLayout> {
   // Resizable panel widths (will be clamped to min/max on build)
-  double _leftPanelWidth = 300;   // category+topic combined
-  double _rightPanelWidth = 300;  // thinkers
+  double _leftPanelWidth = 300; // category+topic combined
+  double _rightPanelWidth = 300; // thinkers
 
   static const double _minLeft = 180;
   static const double _maxLeft = 520;
@@ -450,12 +450,15 @@ class _WideLayoutState extends State<_WideLayout> {
 
   @override
   Widget build(BuildContext context) {
-    final moderator = widget.characters.where((c) => c.id == 'moderator').firstOrNull;
-    final selectableChars = widget.characters.where((c) => c.id != 'moderator').toList();
+    final moderator =
+        widget.characters.where((c) => c.id == 'moderator').firstOrNull;
+    final selectableChars =
+        widget.characters.where((c) => c.id != 'moderator').toList();
     final totalWidth = MediaQuery.of(context).size.width;
 
     // Ensure right panel doesn't exceed available space
-    final maxRight = (totalWidth - _leftPanelWidth - 320).clamp(_minRight, _maxRight);
+    final maxRight =
+        (totalWidth - _leftPanelWidth - 320).clamp(_minRight, _maxRight);
     final effectiveRight = _rightPanelWidth.clamp(_minRight, maxRight);
 
     return Row(
@@ -479,7 +482,8 @@ class _WideLayoutState extends State<_WideLayout> {
           axis: Axis.vertical,
           onDrag: (dx) {
             setState(() {
-              _leftPanelWidth = (_leftPanelWidth + dx).clamp(_minLeft, _maxLeft);
+              _leftPanelWidth =
+                  (_leftPanelWidth + dx).clamp(_minLeft, _maxLeft);
             });
           },
         ),
@@ -520,7 +524,8 @@ class _WideLayoutState extends State<_WideLayout> {
           axis: Axis.vertical,
           onDrag: (dx) {
             setState(() {
-              _rightPanelWidth = (_rightPanelWidth - dx).clamp(_minRight, maxRight);
+              _rightPanelWidth =
+                  (_rightPanelWidth - dx).clamp(_minRight, maxRight);
             });
           },
         ),
@@ -572,7 +577,9 @@ class _ResizeHandleState extends State<_ResizeHandle> {
               width: 2,
               height: 32,
               decoration: BoxDecoration(
-                color: _hovered ? _kNeonCyan : _kTextSecondary.withValues(alpha: 0.4),
+                color: _hovered
+                    ? _kNeonCyan
+                    : _kTextSecondary.withValues(alpha: 0.4),
                 borderRadius: BorderRadius.circular(1),
               ),
             ),
@@ -812,11 +819,13 @@ class _LeftPanelState extends State<_LeftPanel> {
                   child: SingleChildScrollView(
                     padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
                     child: Column(
-                      children: widget.topics.map((topic) => _TopicRow(
-                        topic: topic,
-                        isSelected: widget.selectedTopicId == topic.id,
-                        onTap: () => widget.onTopicSelected(topic),
-                      )).toList(),
+                      children: widget.topics
+                          .map((topic) => _TopicRow(
+                                topic: topic,
+                                isSelected: widget.selectedTopicId == topic.id,
+                                onTap: () => widget.onTopicSelected(topic),
+                              ))
+                          .toList(),
                     ),
                   ),
                 ),
@@ -835,7 +844,8 @@ class _CategoryItem extends StatefulWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  const _CategoryItem({required this.label, required this.selected, required this.onTap});
+  const _CategoryItem(
+      {required this.label, required this.selected, required this.onTap});
 
   @override
   State<_CategoryItem> createState() => _CategoryItemState();
