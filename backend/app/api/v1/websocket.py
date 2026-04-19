@@ -59,7 +59,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         topic_id = config.get("topic_id")
         character_ids = config.get("character_ids", ["explorer", "skeptic"])
         thinker_ids = config.get("thinker_ids", [])
-        human_names = config.get("human_names", ["同学"])
+        human_names = config.get("human_names", ["豆苗"])
 
         # 验证话题
         topic = get_topic_by_id(topic_id)
@@ -293,7 +293,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         except Exception:
             pass
     finally:
-        clear_human_queues()
+        clear_human_queues(human_names)  # only clear THIS session's queues
         logger.info(f"WebSocket 清理完成: session_id={session_id}")
 
 

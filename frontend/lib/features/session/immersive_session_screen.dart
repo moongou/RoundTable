@@ -51,6 +51,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _isMyTurn = false;
   String _statusText = '连接中...';
   bool _hasRaisedHand = false;
+  bool _isPaused = false;
+  // TTS 顺序播放队列 (i)
+  final List<({String text, String? voice})> _ttsQueue = [];
+  bool _ttsPlaying = false;
   // 错误追踪：如果先收到错误事件，结束时显示错误原因而非"讨论已结束"
   String? _lastErrorMessage;
 
@@ -116,8 +120,27 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       vsync: this,
       duration: const Duration(milliseconds: 600),
     );
+    // Global hardware keyboard listener for spacebar PTT (works even when text field is focused)
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
     _initVoiceServices();
     _startDiscussion();
+  }
+
+  /// Global key handler for spacebar push-to-talk (l: spacebar fix)
+  bool _onHardwareKey(KeyEvent event) {
+    if (!_isPushToTalk) return false;
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.space) {
+      if (_isMyTurn && !_isRecording && !_isPaused) {
+        _onPttStart();
+        return true; // consume the event
+      }
+    } else if (event is KeyUpEvent && event.logicalKey == LogicalKeyboardKey.space) {
+      if (_isRecording) {
+        _onPttEnd();
+        return true;
+      }
+    }
+    return false;
   }
 
   void _initVoiceServices() {
@@ -336,10 +359,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             _centerSpeaker = source;
           });
 
-          // 如果是 AI 角色/主持人消息，自动 TTS 朗读
+          // 如果是 AI 角色/主持人消息，排队 TTS 朗读（顺序播放，i）
           if (msgType != 'system' && source != widget.humanName) {
             final voice = _voiceMap[source];
-            _ttsService.speak(content, voice: voice);
+            _enqueueTts(content, voice);
           }
 
           _buildParticipants();
@@ -489,6 +512,48 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     });
   }
 
+  // ── TTS 顺序播放队列 (i) ────────────────────────────────────────────────────
+
+  /// Add text to the TTS queue and start playback if not already playing.
+  void _enqueueTts(String text, String? voice) {
+    _ttsQueue.add((text: text, voice: voice));
+    if (!_ttsPlaying) _playNextTts();
+  }
+
+  /// Play next item in queue; called recursively until queue is empty.
+  Future<void> _playNextTts() async {
+    if (_ttsQueue.isEmpty || _isPaused) {
+      _ttsPlaying = false;
+      return;
+    }
+    _ttsPlaying = true;
+    final item = _ttsQueue.removeAt(0);
+    await _ttsService.speak(item.text, voice: item.voice);
+    // After speak() resolves, play the next item (if any)
+    if (mounted) _playNextTts();
+  }
+
+  // ── 暂停 / 继续 ─────────────────────────────────────────────────────────────
+
+  void _onTogglePause() {
+    if (_isPaused) {
+      setState(() {
+        _isPaused = false;
+        _statusText = '继续讨论...';
+      });
+      _wsClient.sendResume();
+      // Resume TTS queue
+      if (_ttsQueue.isNotEmpty && !_ttsPlaying) _playNextTts();
+    } else {
+      setState(() {
+        _isPaused = true;
+        _statusText = '已暂停';
+      });
+      _ttsService.stop();
+      _wsClient.sendPause();
+    }
+  }
+
   // ── 打断 ────────────────────────────────────────────────────────────────────
 
   void _onInterrupt() {
@@ -519,6 +584,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     _ttsService.dispose();
     _asrService.dispose();
     _wsClient.dispose();
@@ -665,6 +731,20 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               ),
             ),
 
+            // ── 动态麦克风：随发言者移动 (l) ──
+            if (_currentSpeaker.isNotEmpty)
+              Center(
+                child: SizedBox(
+                  width: (tableRadius + 80) * 2,
+                  height: (tableRadius + 80) * 2,
+                  child: _AnimatedMicOnTable(
+                    speakerName: _currentSpeaker,
+                    participants: _participants,
+                    tableRadius: tableRadius,
+                  ),
+                ),
+              ),
+
             // ── 底部字幕条 ──
             if (_centerSpeaker.isNotEmpty && _centerMessage.isNotEmpty)
               Positioned(
@@ -723,7 +803,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               child: SafeArea(
                 child: Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
@@ -735,39 +815,65 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                     ),
                   ),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
+                      // ── 左上：返回 + 暂停 (m) ──
                       IconButton(
                         icon: const Icon(Icons.arrow_back,
                             color: AppColors.warmWhite),
                         onPressed: () => Navigator.of(context).pop(),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                       ),
-                      Expanded(
+                      const SizedBox(width: 4),
+                      // Pause button (m)
+                      _PauseButton(
+                        isPaused: _isPaused,
+                        onToggle: _onTogglePause,
+                      ),
+                      const Spacer(),
+                      // ── 顶部中央：话题标题 + 状态 (f) ──
+                      Flexible(
+                        flex: 3,
                         child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
                               widget.topic.title,
-                              style:
-                                  AppTheme.calligraphyStyleDark(fontSize: 16),
+                              style: AppTheme.calligraphyStyleDark(fontSize: 15),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
                             ),
+                            const SizedBox(height: 2),
                             Text(
                               _statusText,
                               style: TextStyle(
                                 color: _isMyTurn
                                     ? AppColors.amberGold
                                     : AppColors.warmGray,
-                                fontSize: 12,
+                                fontSize: 11,
                               ),
+                              textAlign: TextAlign.center,
                             ),
                           ],
                         ),
                       ),
+                      const Spacer(),
+                      // ── 右上：举手 + 历史 (m) ──
+                      // Raise Hand button (m)
+                      _RaiseHandButton(
+                        hasRaisedHand: _hasRaisedHand,
+                        canInterrupt: canInterrupt,
+                        onTap: _onInterrupt,
+                      ),
+                      const SizedBox(width: 4),
                       IconButton(
                         icon: const Icon(Icons.history,
                             color: AppColors.warmGray),
                         onPressed: _showChatHistory,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                       ),
                     ],
                   ),
@@ -843,6 +949,198 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── 动态麦克风 ────────────────────────────────────────────────────────────────
+/// Animated mic that moves to the position of the current speaker on the table (l).
+class _AnimatedMicOnTable extends StatefulWidget {
+  final String speakerName;
+  final List<SeatedParticipant> participants;
+  final double tableRadius;
+
+  const _AnimatedMicOnTable({
+    required this.speakerName,
+    required this.participants,
+    required this.tableRadius,
+  });
+
+  @override
+  State<_AnimatedMicOnTable> createState() => _AnimatedMicOnTableState();
+}
+
+class _AnimatedMicOnTableState extends State<_AnimatedMicOnTable>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _pulseCtrl;
+  late Animation<double> _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _pulse = Tween<double>(begin: 0.8, end: 1.25).animate(
+        CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  /// Reorders participants same as TableParticipantRing so angles are consistent.
+  List<SeatedParticipant> _reordered(List<SeatedParticipant> list) {
+    final r = List<SeatedParticipant>.from(list);
+    if (r.length < 2) return r;
+    final modIdx = r.indexWhere((p) => p.name == '李老师');
+    if (modIdx > 0) { final m = r.removeAt(modIdx); r.insert(0, m); }
+    final humanIdx = r.indexWhere((p) => p.isHuman);
+    if (humanIdx >= 0) {
+      final h = r.removeAt(humanIdx);
+      final ti = (r.length / 2).round().clamp(1, r.length);
+      r.insert(ti, h);
+    }
+    return r;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reordered = _reordered(widget.participants);
+    final total = reordered.length;
+    final idx = reordered.indexWhere((p) => p.name == widget.speakerName);
+    if (total == 0 || idx < 0) return const SizedBox.shrink();
+
+    final angle = (idx / total) * 2 * pi - pi / 2;
+    // Place mic slightly inside the avatar ring
+    final r = widget.tableRadius + 10.0;
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final cx = constraints.maxWidth / 2;
+      final cy = constraints.maxHeight / 2;
+      final x = cx + r * cos(angle);
+      final y = cy + r * sin(angle);
+
+      return Stack(clipBehavior: Clip.none, children: [
+        Positioned(
+          left: x - 14,
+          top: y - 14,
+          child: AnimatedBuilder(
+            animation: _pulse,
+            builder: (context, _) {
+              return Container(
+                width: 28 * _pulse.value,
+                height: 28 * _pulse.value,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFF00FFCC).withValues(alpha: 0.15),
+                  border: Border.all(
+                    color: const Color(0xFF00FFCC).withValues(alpha: 0.7),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF00FFCC).withValues(alpha: 0.3 * _pulse.value),
+                      blurRadius: 12,
+                      spreadRadius: 3,
+                    )
+                  ],
+                ),
+                child: const Icon(Icons.mic, color: Color(0xFF00FFCC), size: 16),
+              );
+            },
+          ),
+        ),
+      ]);
+    });
+  }
+}
+
+// ─── 暂停按钮 ──────────────────────────────────────────────────────────────────
+/// Compact pause/resume button for the top-left of the session screen (m).
+class _PauseButton extends StatelessWidget {
+  final bool isPaused;
+  final VoidCallback onToggle;
+  const _PauseButton({required this.isPaused, required this.onToggle});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: isPaused ? '继续讨论' : '暂停讨论',
+      child: GestureDetector(
+        onTap: onToggle,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: isPaused
+                ? AppColors.amberGold.withValues(alpha: 0.25)
+                : Colors.white.withValues(alpha: 0.08),
+            border: Border.all(
+              color: isPaused
+                  ? AppColors.amberGold.withValues(alpha: 0.8)
+                  : Colors.white.withValues(alpha: 0.25),
+              width: 1.5,
+            ),
+          ),
+          child: Icon(
+            isPaused ? Icons.play_arrow : Icons.pause,
+            color: isPaused ? AppColors.amberGold : Colors.white.withValues(alpha: 0.75),
+            size: 18,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── 举手按钮 ──────────────────────────────────────────────────────────────────
+/// Raise-hand button shown in top-right of session screen (m).
+class _RaiseHandButton extends StatelessWidget {
+  final bool hasRaisedHand;
+  final bool canInterrupt;
+  final VoidCallback onTap;
+  const _RaiseHandButton({
+    required this.hasRaisedHand,
+    required this.canInterrupt,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final active = hasRaisedHand || canInterrupt;
+    return Tooltip(
+      message: hasRaisedHand ? '已举手' : '举手发言',
+      child: GestureDetector(
+        onTap: (canInterrupt || !hasRaisedHand) ? onTap : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: active
+                ? AppColors.amberGold.withValues(alpha: 0.22)
+                : Colors.white.withValues(alpha: 0.08),
+            border: Border.all(
+              color: active
+                  ? AppColors.amberGold.withValues(alpha: 0.8)
+                  : Colors.white.withValues(alpha: 0.25),
+              width: 1.5,
+            ),
+          ),
+          child: Icon(
+            Icons.back_hand_outlined,
+            color: active ? AppColors.amberGold : Colors.white.withValues(alpha: 0.6),
+            size: 17,
+          ),
         ),
       ),
     );

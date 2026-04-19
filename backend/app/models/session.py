@@ -84,7 +84,7 @@ class CreateSessionRequest(BaseModel):
     topic_id: str
     character_ids: list[str] = Field(default_factory=lambda: ["explorer", "skeptic"])
     thinker_ids: list[str] = Field(default_factory=list)  # 额外的思想家角色
-    human_names: list[str] = Field(default_factory=lambda: ["同学"])
+    human_names: list[str] = Field(default_factory=lambda: ["豆苗"])
     max_turns: int = 30
 
 

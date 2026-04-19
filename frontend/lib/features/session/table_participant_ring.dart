@@ -39,6 +39,24 @@ class TableParticipantRing extends StatelessWidget {
     final total = participants.length;
     if (total == 0) return const SizedBox.shrink();
 
+    // Reorder: moderator at top (index 0 → angle -π/2), human at bottom (index total÷2)
+    final reordered = List<SeatedParticipant>.from(participants);
+    if (total >= 2) {
+      // Put moderator first
+      final modIdx = reordered.indexWhere((p) => p.name == '李老师');
+      if (modIdx > 0) {
+        final mod = reordered.removeAt(modIdx);
+        reordered.insert(0, mod);
+      }
+      // Put human at total÷2 (bottom)
+      final humanIdx = reordered.indexWhere((p) => p.isHuman);
+      if (humanIdx >= 0) {
+        final human = reordered.removeAt(humanIdx);
+        final targetIdx = (reordered.length / 2).round().clamp(1, reordered.length);
+        reordered.insert(targetIdx, human);
+      }
+    }
+
     final avatarRadius = tableRadius + 52;
 
     return LayoutBuilder(
@@ -48,7 +66,7 @@ class TableParticipantRing extends StatelessWidget {
         return Stack(
           clipBehavior: Clip.none,
           children: List.generate(total, (i) {
-            final p = participants[i];
+            final p = reordered[i];
             final angle = (i / total) * 2 * pi - pi / 2;
 
             return Positioned(

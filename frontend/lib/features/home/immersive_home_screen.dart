@@ -45,7 +45,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
   final Set<String> _selectedCharacterIds = {};
   final Set<String> _selectedThinkerIds = {};
   final TextEditingController _nameController =
-      TextEditingController(text: '同学');
+      TextEditingController(text: '豆苗');
 
   late AnimationController _pulseCtrl;
   late AnimationController _entranceCtrl;
@@ -135,7 +135,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           topic: _selectedTopic!,
           characterIds: _selectedCharacterIds.toList(),
           thinkerIds: _selectedThinkerIds.toList(),
-          humanName: _nameController.text.isEmpty ? '同学' : _nameController.text,
+          humanName: _nameController.text.isEmpty ? '豆苗' : _nameController.text,
         ),
         transitionsBuilder: (_, a1, a2, child) => FadeTransition(
           opacity: CurvedAnimation(parent: a1, curve: Curves.easeIn),
@@ -288,13 +288,16 @@ class _TopBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       height: 58,
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
       decoration: const BoxDecoration(
         color: _kSurface,
         border: Border(bottom: BorderSide(color: _kBorder, width: 1)),
       ),
       child: Row(
         children: [
+          // ── Logo ──
+          const _RoundTableLogo(size: 36),
+          const SizedBox(width: 10),
           RichText(
             text: const TextSpan(
               children: [
@@ -332,6 +335,81 @@ class _TopBar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 圆桌思辨 LOGO — 圆桌 + 发光圆环
+class _RoundTableLogo extends StatelessWidget {
+  final double size;
+  const _RoundTableLogo({required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      size: Size(size, size),
+      painter: _LogoPainter(),
+    );
+  }
+}
+
+class _LogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final r = size.width * 0.42;
+
+    // Outer glow ring
+    final glowPaint = Paint()
+      ..color = const Color(0xFF00E5FF).withValues(alpha: 0.25)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+    canvas.drawCircle(Offset(cx, cy), r + 2, glowPaint);
+
+    // Table circle fill
+    final tableFill = Paint()
+      ..color = const Color(0xFF1A1830)
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(Offset(cx, cy), r, tableFill);
+
+    // Table border
+    final tableBorder = Paint()
+      ..color = const Color(0xFFFFCC44)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    canvas.drawCircle(Offset(cx, cy), r, tableBorder);
+
+    // Inner ring
+    final innerRing = Paint()
+      ..color = const Color(0xFFFFCC44).withValues(alpha: 0.3)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.8;
+    canvas.drawCircle(Offset(cx, cy), r * 0.7, innerRing);
+
+    // 5 seats around the table
+    const seatCount = 5;
+    for (int i = 0; i < seatCount; i++) {
+      final angle = (i / seatCount) * 2 * 3.14159 - 3.14159 / 2;
+      final sx = cx + (r + 4) * cos(angle);
+      final sy = cy + (r + 4) * sin(angle);
+      final seatPaint = Paint()
+        ..color = (i == 0)
+            ? const Color(0xFFFFCC44)
+            : const Color(0xFF00E5FF).withValues(alpha: 0.8)
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(Offset(sx, sy), 2.8, seatPaint);
+    }
+
+    // Center dot
+    canvas.drawCircle(
+      Offset(cx, cy),
+      3,
+      Paint()..color = const Color(0xFFFFCC44).withValues(alpha: 0.6),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _GlassField extends StatelessWidget {
@@ -439,9 +517,12 @@ class _WideLayout extends StatefulWidget {
 }
 
 class _WideLayoutState extends State<_WideLayout> {
-  // Resizable panel widths (will be clamped to min/max on build)
-  double _leftPanelWidth = 300; // category+topic combined
-  double _rightPanelWidth = 300; // thinkers
+  // Resizable panel widths
+  double _leftPanelWidth = 340;   // category+topic combined (c: +38px ≈1cm)
+  double _rightPanelWidth = 390;  // thinkers (e: 300*1.3=390)
+
+  // Thinker domain filter (e)
+  String? _selectedThinkerDomain;
 
   static const double _minLeft = 180;
   static const double _maxLeft = 520;
@@ -537,6 +618,8 @@ class _WideLayoutState extends State<_WideLayout> {
             thinkers: widget.thinkers,
             selectedThinkerIds: widget.selectedThinkerIds,
             onThinkerToggled: widget.onThinkerToggled,
+            selectedDomain: _selectedThinkerDomain,
+            onDomainChanged: (d) => setState(() => _selectedThinkerDomain = d),
           ),
         ),
       ],
@@ -726,25 +809,26 @@ class _LeftPanelState extends State<_LeftPanel> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  // Category header — larger font to signal first-level hierarchy
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 14, 10, 8),
+                    padding: const EdgeInsets.fromLTRB(10, 16, 10, 10),
                     child: Row(
                       children: [
                         Container(
                           width: 2,
-                          height: 12,
+                          height: 14,
                           decoration: BoxDecoration(
                             color: _kNeonCyan,
                             borderRadius: BorderRadius.circular(1),
                           ),
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 7),
                         const Text('分类',
                             style: TextStyle(
                               color: _kNeonCyan,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.5,
+                              fontSize: 13,       // larger for first level
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 2,
                             )),
                       ],
                     ),
@@ -792,32 +876,34 @@ class _LeftPanelState extends State<_LeftPanel> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // Topic header — slightly smaller, italic to differentiate second level
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
+                  padding: const EdgeInsets.fromLTRB(14, 16, 14, 10),
                   child: Row(
                     children: [
                       Container(
                         width: 2,
                         height: 12,
                         decoration: BoxDecoration(
-                          color: _kNeonCyan,
+                          color: _kNeonCyan.withValues(alpha: 0.6),
                           borderRadius: BorderRadius.circular(1),
                         ),
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: 7),
                       const Text('话题',
                           style: TextStyle(
-                            color: _kNeonCyan,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 1.5,
+                            color: _kTextSecondary,
+                            fontSize: 11,        // smaller for second level
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 1.8,
+                            fontStyle: FontStyle.italic,
                           )),
                     ],
                   ),
                 ),
                 Expanded(
                   child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
+                    padding: const EdgeInsets.fromLTRB(10, 0, 10, 16),
                     child: Column(
                       children: widget.topics
                           .map((topic) => _TopicRow(
@@ -851,11 +937,61 @@ class _CategoryItem extends StatefulWidget {
   State<_CategoryItem> createState() => _CategoryItemState();
 }
 
+/// Maps category IDs / names to emoji icons
+String _categoryIcon(String label) {
+  final map = {
+    '全部': '🌐',
+    '教育': '📚',
+    'education': '📚',
+    '科技': '🔬',
+    '技术': '🔬',
+    'technology': '🔬',
+    'tech': '🔬',
+    '伦理': '⚖️',
+    'ethics': '⚖️',
+    '健康': '🏥',
+    'health': '🏥',
+    '社会': '🏘️',
+    'society': '🏘️',
+    'social': '🏘️',
+    '文学': '📖',
+    'literature': '📖',
+    '科学': '🔭',
+    'science': '🔭',
+    '生活': '🌱',
+    'life': '🌱',
+    '哲学': '💭',
+    'philosophy': '💭',
+    '经济': '💹',
+    'economics': '💹',
+    '历史': '🏛️',
+    'history': '🏛️',
+    '政治': '🗳️',
+    'politics': '🗳️',
+    '艺术': '🎨',
+    'art': '🎨',
+    '心理': '🧠',
+    'psychology': '🧠',
+    '宗教': '🙏',
+    'religion': '🙏',
+    '战略': '♟️',
+    'strategy': '♟️',
+    '商业': '💼',
+    'business': '💼',
+    '金融': '💰',
+    'finance': '💰',
+    '社会学': '👥',
+    'sociology': '👥',
+  };
+  return map[label] ?? '●';
+}
+
 class _CategoryItemState extends State<_CategoryItem> {
   bool _hovered = false;
 
   @override
   Widget build(BuildContext context) {
+    final icon = _categoryIcon(widget.label);
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
@@ -864,7 +1000,7 @@ class _CategoryItemState extends State<_CategoryItem> {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 140),
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
           decoration: BoxDecoration(
             color: widget.selected
                 ? _kNeonCyan.withValues(alpha: 0.15)
@@ -878,15 +1014,23 @@ class _CategoryItemState extends State<_CategoryItem> {
               ),
             ),
           ),
-          child: Text(
-            widget.label,
-            style: TextStyle(
-              color: widget.selected ? _kNeonCyan : _kTextSecondary,
-              fontSize: 12,
-              fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
-            ),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
+          child: Row(
+            children: [
+              Text(icon, style: const TextStyle(fontSize: 13)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  style: TextStyle(
+                    color: widget.selected ? _kNeonCyan : _kTextSecondary,
+                    fontSize: 12,
+                    fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -899,30 +1043,163 @@ class _RightPanel extends StatelessWidget {
   final List<Map<String, dynamic>> thinkers;
   final Set<String> selectedThinkerIds;
   final ValueChanged<String> onThinkerToggled;
+  final String? selectedDomain;
+  final ValueChanged<String?> onDomainChanged;
 
   const _RightPanel({
     required this.thinkers,
     required this.selectedThinkerIds,
     required this.onThinkerToggled,
+    required this.selectedDomain,
+    required this.onDomainChanged,
   });
+
+  /// Collect unique domains from thinker data
+  List<Map<String, dynamic>> _getDomains() {
+    final seen = <String>{};
+    final domains = <Map<String, dynamic>>[];
+    for (final t in thinkers) {
+      final d = t['domain'] as String?;
+      final dcn = t['domain_cn'] as String?;
+      if (d != null && d.isNotEmpty && !seen.contains(d)) {
+        seen.add(d);
+        domains.add({'id': d, 'name': dcn ?? d});
+      }
+    }
+    return domains;
+  }
+
+  List<Map<String, dynamic>> get _filteredThinkers {
+    if (selectedDomain == null) return thinkers;
+    return thinkers.where((t) => t['domain'] == selectedDomain).toList();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final domains = _getDomains();
     return Container(
       height: double.infinity,
       decoration: const BoxDecoration(
         color: _kSurface,
         border: Border(left: BorderSide(color: _kBorder)),
       ),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: _SectionPanel(
-          title: '思想家',
-          neonColor: _kNeonGold,
-          child: _ThinkerGrid(
-            thinkers: thinkers,
-            selectedIds: selectedThinkerIds,
-            onToggled: onThinkerToggled,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+            child: Row(
+              children: [
+                Container(
+                  width: 3, height: 16,
+                  decoration: BoxDecoration(
+                    color: _kNeonGold,
+                    borderRadius: BorderRadius.circular(2),
+                    boxShadow: [BoxShadow(color: _kNeonGold.withValues(alpha: 0.5), blurRadius: 6)],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text('思想家',
+                    style: TextStyle(
+                      color: _kNeonGold, fontSize: 13,
+                      fontWeight: FontWeight.w700, letterSpacing: 2,
+                    )),
+                const Spacer(),
+                if (selectedThinkerIds.isNotEmpty)
+                  Text('已选 ${selectedThinkerIds.length}',
+                      style: TextStyle(color: _kNeonGold.withValues(alpha: 0.7), fontSize: 11)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          // Domain filter tags
+          if (domains.isNotEmpty) ...[
+            SizedBox(
+              height: 32,
+              child: ScrollConfiguration(
+                behavior: ScrollConfiguration.of(context).copyWith(
+                  dragDevices: {PointerDeviceKind.touch, PointerDeviceKind.mouse, PointerDeviceKind.trackpad},
+                ),
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  children: [
+                    _DomainTag(label: '全部', selected: selectedDomain == null,
+                        onTap: () => onDomainChanged(null)),
+                    ...domains.map((d) => _DomainTag(
+                      label: d['name'] as String,
+                      selected: selectedDomain == d['id'],
+                      onTap: () => onDomainChanged(
+                          selectedDomain == d['id'] ? null : d['id'] as String),
+                    )),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Divider(color: _kBorder, height: 1),
+            const SizedBox(height: 8),
+          ],
+          // Thinker list
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+              child: _ThinkerGrid(
+                thinkers: _filteredThinkers,
+                selectedIds: selectedThinkerIds,
+                onToggled: onThinkerToggled,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DomainTag extends StatefulWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _DomainTag({required this.label, required this.selected, required this.onTap});
+  @override
+  State<_DomainTag> createState() => _DomainTagState();
+}
+
+class _DomainTagState extends State<_DomainTag> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: widget.selected
+                  ? _kNeonGold.withValues(alpha: 0.18)
+                  : _hovered ? _kCard : _kCard.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: widget.selected ? _kNeonGold.withValues(alpha: 0.9) : _kBorder,
+                width: widget.selected ? 1.5 : 1,
+              ),
+              boxShadow: widget.selected
+                  ? [BoxShadow(color: _kNeonGold.withValues(alpha: 0.2), blurRadius: 6)]
+                  : null,
+            ),
+            child: Text(widget.label,
+                style: TextStyle(
+                  color: widget.selected ? _kNeonGold : _kTextSecondary,
+                  fontSize: 11,
+                  fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
+                )),
           ),
         ),
       ),

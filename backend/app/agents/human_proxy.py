@@ -111,7 +111,15 @@ async def put_human_input(name: str, text: str) -> None:
     await queue.put(text)
 
 
-def clear_human_queues() -> None:
-    """清除所有人类输入队列。在会话结束时调用。"""
+def clear_human_queues(names: list[str] | None = None) -> None:
+    """清除人类输入队列。
+
+    Args:
+        names: 要清除的参与者名字列表。若为 None，清除所有队列（仅在服务关闭时使用）。
+    """
     global _human_input_queues
-    _human_input_queues.clear()
+    if names is None:
+        _human_input_queues.clear()
+    else:
+        for name in names:
+            _human_input_queues.pop(name, None)

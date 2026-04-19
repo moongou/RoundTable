@@ -134,6 +134,18 @@ class DiscussionWebSocket {
     }));
   }
 
+  /// 发送暂停信号
+  void sendPause() {
+    if (!_connected || _channel == null) return;
+    _channel!.sink.add(jsonEncode({'type': 'pause'}));
+  }
+
+  /// 发送继续信号
+  void sendResume() {
+    if (!_connected || _channel == null) return;
+    _channel!.sink.add(jsonEncode({'type': 'resume'}));
+  }
+
   /// 发送打断请求（举手）
   void sendInterrupt({required String speaker}) {
     if (!_connected || _channel == null) return;

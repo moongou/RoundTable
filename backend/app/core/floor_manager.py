@@ -252,6 +252,10 @@ class FloorManager:
             source = event.source
             content = event.content
 
+            # 过滤 AutoGen 内部任务注入消息（source="user" 是 AutoGen 框架内部产生的）
+            if source == "user":
+                return None
+
             # 安全过滤 AI 输出
             if source in self.ai_names:
                 content = await self.safety_filter.filter_or_rewrite(content)
