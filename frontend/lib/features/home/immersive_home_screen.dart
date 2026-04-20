@@ -47,6 +47,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
   final Set<String> _selectedThinkerIds = {};
   final TextEditingController _nameController =
       TextEditingController(text: '豆苗');
+  final TextEditingController _freeTopicController = TextEditingController();
+  bool _isFreeTopicMode = false;
 
   late AnimationController _pulseCtrl;
   late AnimationController _entranceCtrl;
@@ -80,6 +82,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     _entranceCtrl.dispose();
     _orbCtrl.dispose();
     _nameController.dispose();
+    _freeTopicController.dispose();
     super.dispose();
   }
 
@@ -119,7 +122,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
   }
 
   bool get _canStart =>
-      _selectedTopic != null &&
+      (_selectedTopic != null ||
+          (_isFreeTopicMode && _freeTopicController.text.trim().isNotEmpty)) &&
       (_selectedCharacterIds.isNotEmpty || _selectedThinkerIds.isNotEmpty);
 
   List<Topic> get _filteredTopics {
@@ -128,7 +132,21 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
   }
 
   Future<void> _startDiscussion() async {
-    if (_selectedTopic == null) return;
+    // 确定话题：预设 or 自由话题
+    final Topic effectiveTopic;
+    if (_isFreeTopicMode) {
+      final freeText = _freeTopicController.text.trim();
+      if (freeText.isEmpty) return;
+      effectiveTopic = Topic(
+        id: 'free_topic',
+        title: freeText,
+        description: '由用户发起的自由讨论话题：$freeText',
+        category: 'free',
+      );
+    } else {
+      if (_selectedTopic == null) return;
+      effectiveTopic = _selectedTopic!;
+    }
     final apiClient = ref.read(apiClientProvider);
     try {
       final validation = await apiClient.validateConfig();
@@ -178,7 +196,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       context,
       PageRouteBuilder(
         pageBuilder: (_, a1, a2) => ImmersiveSessionScreen(
-          topic: _selectedTopic!,
+          topic: effectiveTopic,
           characterIds: _selectedCharacterIds.toList(),
           thinkerIds: _selectedThinkerIds.toList(),
           humanName: _nameController.text.isEmpty ? '豆苗' : _nameController.text,
@@ -307,9 +325,19 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   selectedThinkerIds: _selectedThinkerIds,
                   canStart: _canStart,
                   pulseAnim: _pulseAnim,
+                  isFreeTopicMode: _isFreeTopicMode,
+                  freeTopicController: _freeTopicController,
                   onCategoryChanged: (v) =>
                       setState(() => _selectedCategory = v),
-                  onTopicSelected: (t) => setState(() => _selectedTopic = t),
+                  onTopicSelected: (t) => setState(() {
+                    _selectedTopic = t;
+                    _isFreeTopicMode = false;
+                  }),
+                  onFreeTopicModeToggled: () => setState(() {
+                    _isFreeTopicMode = !_isFreeTopicMode;
+                    if (_isFreeTopicMode) _selectedTopic = null;
+                  }),
+                  onFreeTopicChanged: () => setState(() {}),
                   onCharacterToggled: (id) => setState(() {
                     if (_selectedCharacterIds.contains(id)) {
                       _selectedCharacterIds.remove(id);
@@ -339,9 +367,19 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   selectedThinkerIds: _selectedThinkerIds,
                   canStart: _canStart,
                   pulseAnim: _pulseAnim,
+                  isFreeTopicMode: _isFreeTopicMode,
+                  freeTopicController: _freeTopicController,
                   onCategoryChanged: (v) =>
                       setState(() => _selectedCategory = v),
-                  onTopicSelected: (t) => setState(() => _selectedTopic = t),
+                  onTopicSelected: (t) => setState(() {
+                    _selectedTopic = t;
+                    _isFreeTopicMode = false;
+                  }),
+                  onFreeTopicModeToggled: () => setState(() {
+                    _isFreeTopicMode = !_isFreeTopicMode;
+                    if (_isFreeTopicMode) _selectedTopic = null;
+                  }),
+                  onFreeTopicChanged: () => setState(() {}),
                   onCharacterToggled: (id) => setState(() {
                     if (_selectedCharacterIds.contains(id)) {
                       _selectedCharacterIds.remove(id);
@@ -582,8 +620,12 @@ class _WideLayout extends StatefulWidget {
   final Set<String> selectedThinkerIds;
   final bool canStart;
   final Animation<double> pulseAnim;
+  final bool isFreeTopicMode;
+  final TextEditingController freeTopicController;
   final ValueChanged<String?> onCategoryChanged;
   final ValueChanged<Topic> onTopicSelected;
+  final VoidCallback onFreeTopicModeToggled;
+  final VoidCallback onFreeTopicChanged;
   final ValueChanged<String> onCharacterToggled;
   final ValueChanged<String> onThinkerToggled;
   final VoidCallback onStart;
@@ -599,8 +641,12 @@ class _WideLayout extends StatefulWidget {
     required this.selectedThinkerIds,
     required this.canStart,
     required this.pulseAnim,
+    required this.isFreeTopicMode,
+    required this.freeTopicController,
     required this.onCategoryChanged,
     required this.onTopicSelected,
+    required this.onFreeTopicModeToggled,
+    required this.onFreeTopicChanged,
     required this.onCharacterToggled,
     required this.onThinkerToggled,
     required this.onStart,
@@ -642,13 +688,29 @@ class _WideLayoutState extends State<_WideLayout> {
         // ── Left panel (resizable) ─────────────────────────────────────────
         SizedBox(
           width: _leftPanelWidth,
-          child: _LeftPanel(
-            topics: widget.topics,
-            categories: widget.categories,
-            selectedCategory: widget.selectedCategory,
-            selectedTopicId: widget.selectedTopicId,
-            onCategoryChanged: widget.onCategoryChanged,
-            onTopicSelected: widget.onTopicSelected,
+          child: Column(
+            children: [
+              // 自由话题切换按钮
+              _FreeTopicToggle(
+                isActive: widget.isFreeTopicMode,
+                onToggle: widget.onFreeTopicModeToggled,
+                controller: widget.freeTopicController,
+                onChanged: widget.onFreeTopicChanged,
+              ),
+              // 预设话题列表（非自由话题模式时显示）
+              if (!widget.isFreeTopicMode)
+                Expanded(
+                  child: _LeftPanel(
+                    topics: widget.topics,
+                    categories: widget.categories,
+                    selectedCategory: widget.selectedCategory,
+                    selectedTopicId: widget.selectedTopicId,
+                    onCategoryChanged: widget.onCategoryChanged,
+                    onTopicSelected: widget.onTopicSelected,
+                  ),
+                ),
+              if (widget.isFreeTopicMode) const Expanded(child: SizedBox()),
+            ],
           ),
         ),
 
@@ -779,8 +841,12 @@ class _NarrowLayout extends StatelessWidget {
   final Set<String> selectedThinkerIds;
   final bool canStart;
   final Animation<double> pulseAnim;
+  final bool isFreeTopicMode;
+  final TextEditingController freeTopicController;
   final ValueChanged<String?> onCategoryChanged;
   final ValueChanged<Topic> onTopicSelected;
+  final VoidCallback onFreeTopicModeToggled;
+  final VoidCallback onFreeTopicChanged;
   final ValueChanged<String> onCharacterToggled;
   final ValueChanged<String> onThinkerToggled;
   final VoidCallback onStart;
@@ -796,8 +862,12 @@ class _NarrowLayout extends StatelessWidget {
     required this.selectedThinkerIds,
     required this.canStart,
     required this.pulseAnim,
+    required this.isFreeTopicMode,
+    required this.freeTopicController,
     required this.onCategoryChanged,
     required this.onTopicSelected,
+    required this.onFreeTopicModeToggled,
+    required this.onFreeTopicChanged,
     required this.onCharacterToggled,
     required this.onThinkerToggled,
     required this.onStart,
@@ -817,19 +887,28 @@ class _NarrowLayout extends StatelessWidget {
                 selectedCharacterIds.length + selectedThinkerIds.length,
           ),
           const SizedBox(height: 20),
-          _SectionPanel(
-            title: '话题',
-            neonColor: _kNeonCyan,
-            child: _TopicsContent(
-              topics: topics,
-              categories: categories,
-              selectedCategory: selectedCategory,
-              selectedTopicId: selectedTopicId,
-              onCategoryChanged: onCategoryChanged,
-              onTopicSelected: onTopicSelected,
-            ),
+          // 自由话题切换
+          _FreeTopicToggle(
+            isActive: isFreeTopicMode,
+            onToggle: onFreeTopicModeToggled,
+            controller: freeTopicController,
+            onChanged: onFreeTopicChanged,
           ),
           const SizedBox(height: 14),
+          if (!isFreeTopicMode)
+            _SectionPanel(
+              title: '话题',
+              neonColor: _kNeonCyan,
+              child: _TopicsContent(
+                topics: topics,
+                categories: categories,
+                selectedCategory: selectedCategory,
+                selectedTopicId: selectedTopicId,
+                onCategoryChanged: onCategoryChanged,
+                onTopicSelected: onTopicSelected,
+              ),
+            ),
+          if (!isFreeTopicMode) const SizedBox(height: 14),
           _SectionPanel(
             title: '角色',
             neonColor: _kNeonViolet,
@@ -1014,6 +1093,112 @@ class _LeftPanelState extends State<_LeftPanel> {
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 自由话题切换按钮与输入框
+class _FreeTopicToggle extends StatelessWidget {
+  final bool isActive;
+  final VoidCallback onToggle;
+  final TextEditingController controller;
+  final VoidCallback onChanged;
+
+  const _FreeTopicToggle({
+    required this.isActive,
+    required this.onToggle,
+    required this.controller,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      decoration: const BoxDecoration(
+        color: _kSurface,
+        border: Border(bottom: BorderSide(color: _kBorder, width: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: onToggle,
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: isActive
+                    ? _kNeonGold.withValues(alpha: 0.15)
+                    : _kCard,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: isActive
+                      ? _kNeonGold.withValues(alpha: 0.6)
+                      : _kBorder,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    isActive ? Icons.edit_note : Icons.lightbulb_outline,
+                    color: isActive ? _kNeonGold : _kTextSecondary,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '自由话题',
+                    style: TextStyle(
+                      color: isActive ? _kNeonGold : _kTextSecondary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  Icon(
+                    isActive ? Icons.toggle_on : Icons.toggle_off_outlined,
+                    color: isActive ? _kNeonGold : _kTextSecondary,
+                    size: 22,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (isActive) ...[
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              onChanged: (_) => onChanged(),
+              style: const TextStyle(color: _kTextPrimary, fontSize: 14),
+              maxLines: 3,
+              minLines: 1,
+              decoration: InputDecoration(
+                hintText: '输入你想讨论的话题...',
+                hintStyle: TextStyle(
+                    color: _kTextSecondary.withValues(alpha: 0.6),
+                    fontSize: 13),
+                filled: true,
+                fillColor: _kCard,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide(color: _kBorder),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide(color: _kBorder),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide(color: _kNeonGold),
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+            ),
+          ],
         ],
       ),
     );

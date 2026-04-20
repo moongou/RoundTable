@@ -91,14 +91,19 @@ class ApiClient {
     required List<String> humanNames,
     List<String> thinkerIds = const [],
     int maxTurns = 30,
+    String freeTopic = '',
   }) async {
-    final response = await _dio.post('/api/v1/sessions/', data: {
+    final data = <String, dynamic>{
       'topic_id': topicId,
       'character_ids': characterIds,
       'human_names': humanNames,
       'thinker_ids': thinkerIds,
       'max_turns': maxTurns,
-    });
+    };
+    if (freeTopic.isNotEmpty) {
+      data['free_topic'] = freeTopic;
+    }
+    final response = await _dio.post('/api/v1/sessions/', data: data);
     return Map<String, dynamic>.from(response.data);
   }
 

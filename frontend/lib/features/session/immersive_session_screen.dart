@@ -136,7 +136,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   final List<Future<void> Function()> _bgTaskQueue = [];
   DateTime _lastAsrWarmupAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastPrefetchAt = DateTime.fromMillisecondsSinceEpoch(0);
-  bool _showPerfPanel = true;
+  bool _showPerfPanel = false;
   bool _showPhasePanel = false;
   int _ttsStartupSamples = 0;
   double _ttsStartupTotalMs = 0;
@@ -894,6 +894,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         characterIds: widget.characterIds,
         thinkerIds: widget.thinkerIds,
         humanNames: [widget.humanName],
+        freeTopic: widget.topic.id == 'free_topic' ? widget.topic.title : '',
       );
 
       final sessionId = sessionData['session_id'] as String;
@@ -1109,7 +1110,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               if (!isSystemLike &&
                   !_ttsPlaying &&
                   (!_isMyTurn || source == widget.humanName)) {
-                _centerMessage = content;
+                // 字幕去除表情提示（如"（微笑）"），保持干净显示
+                _centerMessage = _stripStageDirectionsForSpeech(content);
                 _centerSpeaker = source;
               }
             }

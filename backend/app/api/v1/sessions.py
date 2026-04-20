@@ -40,11 +40,36 @@ _floor_managers: dict[str, FloorManager] = {}
 
 @router.post("/", response_model=SessionResponse)
 async def create_session(request: CreateSessionRequest):
-    """创建一个新的讨论会话。"""
-    # 验证话题存在
-    topic = get_topic_by_id(request.topic_id)
-    if not topic:
-        raise HTTPException(status_code=404, detail=f"话题 '{request.topic_id}' 不存在")
+    """创建一个新的讨论会话。
+
+    支持两种模式：
+    1. 预设话题模式：提供 topic_id，使用系统内置话题
+    2. 自由话题模式：提供 free_topic，用户自己发起讨论话题
+    """
+    from app.models.session import Topic as TopicModel
+
+    # 确定话题来源
+    topic: Optional[TopicModel] = None
+    if request.topic_id:
+        topic = get_topic_by_id(request.topic_id)
+        if not topic:
+            raise HTTPException(status_code=404, detail=f"话题 '{request.topic_id}' 不存在")
+    elif request.free_topic:
+        # 用户自由发起的话题
+        topic = TopicModel(
+            id="free_topic",
+            title=request.free_topic,
+            description=f"由用户发起的自由讨论话题：{request.free_topic}",
+            category="free",
+            age_range="8-12",
+            guide_questions=[],
+            tags=["自由话题"],
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="必须提供 topic_id（预设话题）或 free_topic（自由话题）之一",
+        )
 
     # 验证角色存在
     templates = load_all_templates()

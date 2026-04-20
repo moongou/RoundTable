@@ -81,7 +81,8 @@ class CharacterTemplate(BaseModel):
 class CreateSessionRequest(BaseModel):
     """创建讨论会话请求"""
 
-    topic_id: str
+    topic_id: str = ""  # 可选：预设话题ID（为空时使用 free_topic）
+    free_topic: str = ""  # 可选：用户自由发起的话题文本
     character_ids: list[str] = Field(default_factory=lambda: ["explorer", "skeptic"])
     thinker_ids: list[str] = Field(default_factory=list)  # 额外的思想家角色
     human_names: list[str] = Field(default_factory=lambda: ["豆苗"])
