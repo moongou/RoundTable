@@ -94,7 +94,7 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
     if pid == "funasr":
         from app.voice.funasr import FunASRProvider
         return FunASRProvider(
-            base_url=settings.asr_url or "http://localhost:10096",
+            base_url=settings.funasr_url or settings.asr_url or "http://localhost:10096",
         )
     elif pid == "openai_whisper":
         return OpenAIWhisperProvider(

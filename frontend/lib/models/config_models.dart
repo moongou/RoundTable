@@ -122,11 +122,15 @@ class VoiceServiceTestResult {
   final List<String> voices;
   final String? error;
   final String url;
+  final int? statusCode;
+  final double? latencyMs;
 
   const VoiceServiceTestResult({
     required this.success,
     required this.voices,
     required this.url,
+    this.statusCode,
+    this.latencyMs,
     this.error,
   });
 
@@ -135,6 +139,8 @@ class VoiceServiceTestResult {
         success: json['success'] as bool? ?? false,
         voices: List<String>.from(json['voices'] as List? ?? []),
         url: json['url'] as String? ?? '',
+        statusCode: json['status_code'] as int?,
+        latencyMs: (json['latency_ms'] as num?)?.toDouble(),
         error: json['error'] as String?,
       );
 }
@@ -174,12 +180,16 @@ class ServiceHealth {
   final String url;
   final bool reachable;
   final int? statusCode;
+  final double? latencyMs;
+  final String? detail;
 
   const ServiceHealth({
     required this.name,
     required this.url,
     required this.reachable,
     this.statusCode,
+    this.latencyMs,
+    this.detail,
   });
 
   factory ServiceHealth.fromJson(String name, Map<String, dynamic> json) =>
@@ -188,6 +198,33 @@ class ServiceHealth {
         url: json['url'] as String? ?? '',
         reachable: json['reachable'] as bool? ?? false,
         statusCode: json['status_code'] as int?,
+        latencyMs: (json['latency_ms'] as num?)?.toDouble(),
+        detail: json['detail'] as String?,
+      );
+}
+
+class ValidationCheck {
+  final String name;
+  final bool ok;
+  final String detail;
+  final int? statusCode;
+  final double? latencyMs;
+
+  const ValidationCheck({
+    required this.name,
+    required this.ok,
+    required this.detail,
+    this.statusCode,
+    this.latencyMs,
+  });
+
+  factory ValidationCheck.fromJson(Map<String, dynamic> json) =>
+      ValidationCheck(
+        name: json['name'] as String? ?? '未命名项目',
+        ok: json['ok'] as bool? ?? false,
+        detail: json['detail'] as String? ?? '',
+        statusCode: json['status_code'] as int?,
+        latencyMs: (json['latency_ms'] as num?)?.toDouble(),
       );
 }
 
@@ -232,13 +269,22 @@ class CurrentConfig {
 class ConfigValidation {
   final bool valid;
   final String message;
+  final List<ValidationCheck> checks;
 
-  const ConfigValidation({required this.valid, required this.message});
+  const ConfigValidation({
+    required this.valid,
+    required this.message,
+    this.checks = const [],
+  });
 
   factory ConfigValidation.fromJson(Map<String, dynamic> json) =>
       ConfigValidation(
         valid: json['valid'] as bool,
         message: json['message'] as String,
+        checks: (json['checks'] as List<dynamic>? ?? const [])
+            .whereType<Map>()
+            .map((e) => ValidationCheck.fromJson(Map<String, dynamic>.from(e)))
+            .toList(),
       );
 }
 

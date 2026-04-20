@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
+import websockets
 from fastapi import APIRouter
+from websockets.exceptions import InvalidStatus
 
 from app.config import (
     ASR_PROVIDERS,
@@ -25,6 +29,175 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config", tags=["config"])
+
+
+async def _probe_service(url: str, health_path: str, timeout_sec: float = 3.0) -> dict:
+    """探测单个服务，返回可用性、状态码和耗时。"""
+    if url.startswith("ws://") or url.startswith("wss://"):
+        return await _probe_websocket_service(url, timeout_sec=timeout_sec)
+
+    target = f"{url.rstrip('/')}{health_path}"
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            resp = await client.get(target)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            ok = 200 <= resp.status_code < 300
+            return {
+                "url": url,
+                "target": target,
+                "reachable": ok,
+                "status_code": resp.status_code,
+                "latency_ms": latency_ms,
+                "detail": f"HTTP {resp.status_code}, {latency_ms}ms",
+            }
+    except Exception as e:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "url": url,
+            "target": target,
+            "reachable": False,
+            "status_code": None,
+            "latency_ms": latency_ms,
+            "detail": str(e),
+        }
+
+
+async def _semantic_voice_probe(service_id: str, url: str, timeout_sec: float = 4.0) -> dict:
+    """语音服务语义探测：不仅测连通性，也测关键能力是否可用。"""
+    if service_id == "funasr" and (url.startswith("ws://") or url.startswith("wss://")):
+        t0 = time.perf_counter()
+        try:
+            async with websockets.connect(
+                url,
+                subprotocols=["binary"],
+                open_timeout=timeout_sec,
+                close_timeout=timeout_sec,
+            ) as ws:
+                await ws.send('{"chunk_size":[5,10,5],"wav_name":"health","is_speaking":true,"chunk_interval":10,"itn":true,"mode":"2pass","wav_format":"PCM","audio_fs":16000}')
+                latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+                return {
+                    "url": url,
+                    "target": url,
+                    "reachable": True,
+                    "status_code": 101,
+                    "latency_ms": latency_ms,
+                    "probe_type": "semantic",
+                    "category": "asr",
+                    "detail": f"WS protocol OK, {latency_ms}ms",
+                }
+        except Exception as e:
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            return {
+                "url": url,
+                "target": url,
+                "reachable": False,
+                "status_code": None,
+                "latency_ms": latency_ms,
+                "probe_type": "semantic",
+                "category": "asr",
+                "detail": f"WS protocol failed: {e}",
+            }
+
+    # Default semantic probe for HTTP-based services
+    base = await _probe_service(url, VOICE_SERVICE_META.get(service_id, {}).get("health_path", "/"), timeout_sec=timeout_sec)
+    base["probe_type"] = "semantic"
+    base["category"] = "asr" if service_id in ASR_PROVIDERS else "tts"
+
+    if not base.get("reachable"):
+        return base
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            if service_id == "edge_tts":
+                resp = await client.get(f"{url.rstrip('/')}/v1/models")
+                count = len(resp.json()) if resp.status_code == 200 and isinstance(resp.json(), list) else 0
+                base["reachable"] = resp.status_code == 200 and count > 0
+                base["detail"] = f"models={count}, HTTP {resp.status_code}"
+                base["status_code"] = resp.status_code
+            elif service_id == "cosyvoice":
+                resp = await client.get(f"{url.rstrip('/')}/speakers")
+                payload = resp.json() if resp.status_code == 200 else []
+                if isinstance(payload, list):
+                    count = len(payload)
+                elif isinstance(payload, dict):
+                    count = len(payload.get("speakers", []))
+                else:
+                    count = 0
+                base["reachable"] = resp.status_code == 200 and count > 0
+                base["detail"] = f"speakers={count}, HTTP {resp.status_code}"
+                base["status_code"] = resp.status_code
+            elif service_id == "openai_tts":
+                # OpenAI TTS has no dedicated voice-list endpoint; /models probe is a practical semantic check.
+                headers = {}
+                key = settings.openai_api_key
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                resp = await client.get(f"{(settings.openai_base_url or 'https://api.openai.com/v1').rstrip('/')}/models", headers=headers)
+                base["reachable"] = 200 <= resp.status_code < 300
+                base["detail"] = f"OpenAI models HTTP {resp.status_code}"
+                base["status_code"] = resp.status_code
+            elif service_id == "openai_whisper":
+                key = settings.openai_whisper_api_key or settings.openai_api_key
+                if key:
+                    base["detail"] = f"API key configured, {base['detail']}"
+                else:
+                    base["reachable"] = False
+                    base["detail"] = "OpenAI Whisper 缺少 API Key"
+    except Exception as e:
+        base["reachable"] = False
+        base["detail"] = f"semantic probe failed: {e}"
+
+    return base
+
+
+async def _probe_websocket_service(url: str, timeout_sec: float = 3.0) -> dict:
+    """探测 WebSocket 服务可用性。"""
+    t0 = time.perf_counter()
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("无效的 WebSocket URL")
+
+        async with websockets.connect(
+            url,
+            subprotocols=["binary"],
+            open_timeout=timeout_sec,
+            close_timeout=timeout_sec,
+        ):
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            return {
+                "url": url,
+                "target": url,
+                "reachable": True,
+                "status_code": 101,
+                "latency_ms": latency_ms,
+                "detail": f"WS connected, {latency_ms}ms",
+            }
+    except InvalidStatus as e:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        status_code = getattr(e.response, "status_code", None)
+        body = (getattr(e.response, "body", b"") or b"").decode("utf-8", "ignore").strip()
+        # 服务端返回握手错误通常表示服务在线但请求参数不匹配
+        reachable = status_code is not None and status_code < 500
+        return {
+            "url": url,
+            "target": url,
+            "reachable": reachable,
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "detail": body or f"WS handshake HTTP {status_code}",
+        }
+    except Exception as e:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "url": url,
+            "target": url,
+            "reachable": False,
+            "status_code": None,
+            "latency_ms": latency_ms,
+            "detail": str(e),
+        }
 
 
 @router.get("/providers")
@@ -102,21 +275,9 @@ async def list_speech_providers():
 
 @router.get("/health")
 async def check_services_health():
-    """检查本地服务是否可达（使用当前配置的 URL）。"""
-    results = {}
+    """检查本地服务健康度（分类 + 语义探测）。"""
+    results: dict[str, dict] = {}
     tasks = []
-
-    async def check_service(name: str, url: str, health_path: str):
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{url}{health_path}")
-                results[name] = {
-                    "url": url,
-                    "reachable": resp.status_code < 500,
-                    "status_code": resp.status_code,
-                }
-        except Exception:
-            results[name] = {"url": url, "reachable": False, "status_code": None}
 
     # 使用当前配置的实际 URL
     service_urls = {
@@ -125,6 +286,17 @@ async def check_services_health():
         "funasr": (settings.funasr_url, "/"),
         "ollama": (settings.ollama_base_url.replace("/v1", ""), "/api/tags"),
     }
+    async def check_service(name: str, url: str, health_path: str):
+        semantic = await _semantic_voice_probe(name, url)
+        if semantic.get("reachable"):
+            results[name] = semantic
+            return
+        # 回退到基础可达性探测，便于区分“协议失败”和“网络不可达”。
+        basic = await _probe_service(url, health_path)
+        basic["probe_type"] = "basic"
+        basic["category"] = "asr" if name in ASR_PROVIDERS else "tts"
+        results[name] = basic
+
     for name, (url, health) in service_urls.items():
         tasks.append(check_service(name, url, health))
 
@@ -163,8 +335,78 @@ async def get_current_config():
 @router.post("/validate")
 async def validate_current_config():
     """验证当前 LLM 配置是否有效（GET/POST 均支持）。"""
-    is_valid, error_msg = settings.validate_llm_config()
-    return {"valid": is_valid, "message": error_msg if not is_valid else "配置有效"}
+    checks: list[dict] = []
+    provider_id = settings.llm_provider
+    model_name = getattr(settings, f"{provider_id}_model", "")
+    basic_ok, basic_err = settings.validate_llm_config()
+    if not basic_ok:
+        checks.append({
+            "name": f"LLM（{provider_id}）",
+            "ok": False,
+            "detail": basic_err,
+        })
+    else:
+        probe = await test_provider(
+            {
+                "provider_id": provider_id,
+                "model": model_name,
+            }
+        )
+        checks.append({
+            "name": f"LLM 连接（{provider_id}）",
+            "ok": bool(probe.get("success")),
+            "detail": probe.get("error") or "连接可用",
+        })
+        checks.append({
+            "name": f"模型可用性（{model_name or '-'}）",
+            "ok": bool(probe.get("model_valid")),
+            "detail": (
+                f"模型已验证，可用于当前提供商（候选 {len(probe.get('models', []))} 个）"
+                if probe.get("model_valid")
+                else probe.get("error") or "模型不可用，请重新测试连接并选择可用模型"
+            ),
+        })
+
+    service_meta = VOICE_SERVICE_META
+
+    async def validate_voice_item(label: str, sid: str):
+        if sid in ("browser", "disabled"):
+            checks.append({
+                "name": label,
+                "ok": True,
+                "detail": f"{sid} 模式不依赖后端语音服务",
+            })
+            return
+        url = settings.get_voice_service_url(sid) or service_meta.get(sid, {}).get("default_url", "")
+        if not url:
+            checks.append({
+                "name": label,
+                "ok": False,
+                "detail": "未配置服务 URL",
+            })
+            return
+        r = await _semantic_voice_probe(sid, url)
+        checks.append({
+            "name": label,
+            "ok": r["reachable"],
+            "detail": r["detail"],
+            "status_code": r["status_code"],
+            "latency_ms": r["latency_ms"],
+            "probe_type": r.get("probe_type", "semantic"),
+            "category": r.get("category", "asr" if sid in ASR_PROVIDERS else "tts"),
+        })
+
+    await asyncio.gather(
+        validate_voice_item(f"ASR（{settings.asr_provider}）", settings.asr_provider),
+        validate_voice_item(f"TTS（{settings.tts_provider}）", settings.tts_provider),
+    )
+
+    all_ok = all(c.get("ok", False) for c in checks)
+    return {
+        "valid": all_ok,
+        "message": "配置有效" if all_ok else "存在不可用项，请根据红叉提示修复",
+        "checks": checks,
+    }
 
 
 @router.post("/update")
@@ -229,6 +471,22 @@ async def test_provider(body: dict):
     provider_id = body.get("provider_id", "")
     api_key = body.get("api_key", "").strip()
     base_url = body.get("base_url", "").strip()
+    requested_model = body.get("model", "").strip()
+
+    def done(success: bool, models: list[str], error: str | None = None):
+        model_valid = True
+        model_error = error
+        if requested_model:
+            model_valid = requested_model in models
+            if success and not model_valid:
+                model_error = f"指定的模型不存在或不可用: {requested_model}"
+        return {
+            "success": bool(success and model_valid),
+            "models": models,
+            "error": model_error,
+            "requested_model": requested_model,
+            "model_valid": model_valid,
+        }
 
     # 回退到当前配置
     if not api_key:
@@ -239,7 +497,7 @@ async def test_provider(body: dict):
         base_url = PROVIDER_DEFAULTS.get(provider_id, {}).get("base_url", "")
 
     if not base_url:
-        return {"success": False, "models": [], "error": "未配置 Base URL"}
+        return done(False, [], "未配置 Base URL")
 
     # Ollama 本地：使用 /api/tags 获取模型列表
     if provider_id == "ollama":
@@ -250,10 +508,10 @@ async def test_provider(body: dict):
                 if resp.status_code == 200:
                     data = resp.json()
                     models = sorted([m["name"] for m in data.get("models", [])])
-                    return {"success": True, "models": models, "error": None}
-                return {"success": False, "models": [], "error": f"HTTP {resp.status_code}"}
+                    return done(True, models)
+                return done(False, [], f"HTTP {resp.status_code}")
         except Exception as e:
-            return {"success": False, "models": [], "error": str(e)}
+            return done(False, [], str(e))
 
     # Anthropic 特殊处理（不支持标准 /models）
     if provider_id == "anthropic":
@@ -276,11 +534,11 @@ async def test_provider(body: dict):
                           "messages": [{"role": "user", "content": "hi"}]},
                 )
                 if resp.status_code in (200, 201):
-                    return {"success": True, "models": models, "error": None}
+                    return done(True, models)
                 err = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
-                return {"success": False, "models": [], "error": err}
+                return done(False, [], err)
         except Exception as e:
-            return {"success": False, "models": [], "error": str(e)}
+            return done(False, [], str(e))
 
     # Gemini 特殊处理
     if provider_id == "gemini":
@@ -298,10 +556,10 @@ async def test_provider(body: dict):
                         for m in data.get("models", [])
                         if "generateContent" in m.get("supportedGenerationMethods", [])
                     ])
-                    return {"success": True, "models": models, "error": None}
-                return {"success": False, "models": [], "error": f"HTTP {resp.status_code}"}
+                    return done(True, models)
+                return done(False, [], f"HTTP {resp.status_code}")
         except Exception as e:
-            return {"success": False, "models": [], "error": str(e)}
+            return done(False, [], str(e))
 
     # 标准 OpenAI 兼容：GET /models
     headers: dict = {}
@@ -317,16 +575,16 @@ async def test_provider(body: dict):
                 models = sorted(
                     [m.get("id", m) if isinstance(m, dict) else str(m) for m in raw]
                 )
-                return {"success": True, "models": models, "error": None}
+                return done(True, models)
             # Try to extract error message
             try:
                 err_body = resp.json()
                 err_msg = (err_body.get("error", {}) or {}).get("message", f"HTTP {resp.status_code}")
             except Exception:
                 err_msg = f"HTTP {resp.status_code}"
-            return {"success": False, "models": [], "error": err_msg}
+            return done(False, [], err_msg)
     except Exception as e:
-        return {"success": False, "models": [], "error": str(e)}
+        return done(False, [], str(e))
 
 
 @router.post("/test-voice-service")
@@ -357,23 +615,26 @@ async def test_voice_service(body: dict):
 
     # Special handling per service
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            headers: dict = {}
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            elif service in ("openai_whisper", "openai_tts"):
-                key = settings.openai_whisper_api_key or settings.openai_api_key
-                if key:
-                    headers["Authorization"] = f"Bearer {key}"
+        probe = await _semantic_voice_probe(service, url)
+        reachable = bool(probe.get("reachable"))
+        status_code = probe.get("status_code")
+        latency_ms = probe.get("latency_ms")
+        detail = (probe.get("detail") or "").strip()
 
-            resp = await client.get(f"{url.rstrip('/')}{health_path}", headers=headers)
-            reachable = resp.status_code < 500
+        if reachable and (url.startswith("http://") or url.startswith("https://")):
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                headers: dict = {}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                elif service in ("openai_whisper", "openai_tts"):
+                    key = settings.openai_whisper_api_key or settings.openai_api_key
+                    if key:
+                        headers["Authorization"] = f"Bearer {key}"
 
-            # Try to extract voice/model list
-            if reachable:
+                # Try to extract voice/model list
                 if service == "edge_tts":
                     try:
-                        voices_resp = await client.get(f"{url.rstrip('/')}/v1/models")
+                        voices_resp = await client.get(f"{url.rstrip('/')}/v1/models", headers=headers)
                         if voices_resp.status_code == 200:
                             raw = voices_resp.json()
                             if isinstance(raw, list):
@@ -382,7 +643,7 @@ async def test_voice_service(body: dict):
                         pass
                 elif service == "cosyvoice":
                     try:
-                        v_resp = await client.get(f"{url.rstrip('/')}/speakers")
+                        v_resp = await client.get(f"{url.rstrip('/')}/speakers", headers=headers)
                         if v_resp.status_code == 200:
                             raw = v_resp.json()
                             voices = raw if isinstance(raw, list) else list(raw.get("speakers", []))
@@ -393,13 +654,16 @@ async def test_voice_service(body: dict):
                 elif service == "funasr":
                     voices = []  # ASR has no voice list
 
-            return {
-                "success": reachable,
-                "status_code": resp.status_code,
-                "url": url,
-                "voices": voices,
-                "error": None if reachable else f"HTTP {resp.status_code}",
-            }
+        return {
+            "success": reachable,
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "url": url,
+            "voices": voices,
+            "probe_type": probe.get("probe_type", "semantic"),
+            "category": probe.get("category", "asr" if service in ASR_PROVIDERS else "tts"),
+            "error": None if reachable else (detail or (f"HTTP {status_code}" if status_code is not None else "服务不可用")),
+        }
     except Exception as e:
         return {"success": False, "status_code": None, "url": url, "voices": [], "error": str(e)}
 

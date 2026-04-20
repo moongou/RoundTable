@@ -27,8 +27,15 @@ AsrService createWebAsrService(String providerId, {required String serverUrl}) {
     case 'browser':
       return BrowserAsrService();
     case 'vosk':
+      return GatewayStreamingAsrService(
+        service: providerId,
+        gatewayUrl: 'http://localhost:6702',
+      );
     case 'capswriter':
-      return GatewayStreamingAsrService(service: providerId);
+      return GatewayStreamingAsrService(
+        service: providerId,
+        gatewayUrl: 'http://localhost:6701',
+      );
     case 'funasr':
     case 'openai_whisper':
       return ServerAsrService(serverUrl: serverUrl);

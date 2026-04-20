@@ -4,13 +4,11 @@ import 'package:flutter/material.dart';
 
 import '../../theme/app_colors.dart';
 
-/// 半透明毛玻璃控制栏
+/// 半透明毛玻璃控制栏（纯语音模式：仅显示录音提示和跳过按钮）
 class GlassControlBar extends StatefulWidget {
   final bool isMyTurn;
   final bool isPushToTalk;
   final bool isRecording;
-  final TextEditingController inputController;
-  final VoidCallback onSendMessage;
   final VoidCallback onPttStart;
   final VoidCallback onPttEnd;
   final bool canInterrupt;
@@ -23,8 +21,6 @@ class GlassControlBar extends StatefulWidget {
     required this.isMyTurn,
     required this.isPushToTalk,
     required this.isRecording,
-    required this.inputController,
-    required this.onSendMessage,
     required this.onPttStart,
     required this.onPttEnd,
     required this.canInterrupt,
@@ -86,7 +82,7 @@ class _GlassControlBarState extends State<GlassControlBar> {
         const SizedBox(width: 6),
         Flexible(
           child: Text(
-            widget.isRecording ? '正在录音... 双击 Ctrl 或点击结束按钮' : '右侧输入文字 或 点击麦克风说话',
+            widget.isRecording ? '正在录音... 双击 Ctrl 或点击结束按钮' : '按住麦克风讲话',
             style: TextStyle(
               color: widget.isRecording
                   ? const Color(0xFF00FFCC)

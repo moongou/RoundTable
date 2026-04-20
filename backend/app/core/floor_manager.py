@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from enum import Enum
@@ -63,13 +64,15 @@ class FloorManager:
         ai_agents: list[AssistantAgent],
         human_agents: list[UserProxyAgent],
         safety_filter: SafetyFilter,
-        human_timeout: int = 15,
+        human_timeout: int = 120,
+        designated_speaker_setter: Optional[Callable[[Optional[str]], None]] = None,
     ):
         self.team = team
         self.ai_agents = ai_agents
         self.human_agents = human_agents
         self.safety_filter = safety_filter
         self.human_timeout = human_timeout
+        self._set_designated_speaker = designated_speaker_setter or set_designated_speaker
 
         self.ai_names = {agent.name for agent in ai_agents}
         self.human_names = {agent.name for agent in human_agents}
@@ -96,6 +99,88 @@ class FloorManager:
         # display name → agent name 映射（需求4：用于指定发言者解析）
         self._display_name_to_agent: dict[str, str] = {}
         self._agent_to_display_name: dict[str, str] = {}
+        self._speaker_message_count: dict[str, int] = {name: 0 for name in self.all_names}
+        self._recent_display_speakers: list[str] = []
+
+        # Stalled watchdog: detect no-progress windows and auto-recover human wait stalls.
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_stop = asyncio.Event()
+        self._last_progress_ts = time.monotonic()
+        self._last_watchdog_action_ts = 0.0
+        self._stall_check_interval_sec = 2.0
+        self._general_stall_timeout_sec = max(30.0, float(human_timeout) * 2.0)
+        # 给用户语音识别与重试留足窗口，避免“刚说完就被系统判跳过”。
+        self._human_stall_timeout_sec = max(45.0, float(human_timeout) + 15.0)
+        self._min_human_turn_window_sec = 10.0
+        self._human_turn_started_mono = 0.0
+
+    def _sanitize_opening_reference(self, source: str, content: str) -> str:
+        """首轮发言兜底规整：避免开场阶段出现不当引用。"""
+        text = (content or "").strip()
+        if not text:
+            return text
+
+        count = self._speaker_message_count.get(source, 0)
+        is_moderator = source == "moderator"
+        is_first_turn = count == 0
+
+        if is_moderator and is_first_turn:
+            # 老师开场不引用任何人
+            text = re.sub(
+                r"(刚才|前面|上一位|某位同学|有同学).*?(说|提到|讲到)[^。！？!?]*[。！？!?]",
+                "",
+                text,
+            ).strip()
+            if not text:
+                text = "同学们，我们先一起梳理一下这个问题的背景，再逐一发表观点。"
+            return text
+
+        if (source in self.ai_names or source in self.human_names) and is_first_turn:
+            # 同学首轮发言去掉“上一位同学”式互引
+            text = re.sub(r"(上一位同学|刚才.*同学|某位同学)", "这个问题", text)
+            text = re.sub(r"(你说得对|他说得对|她说得对)", "我先说说我的看法", text)
+            text = re.sub(r"^(基于|根据).{0,12}(发言|观点)[，,]", "", text)
+            return text
+
+        return text
+
+    def _sanitize_reference_attribution(self, source: str, content: str) -> str:
+        """修正明显错误的“刚才/上一位”引用归属。
+
+        规则：若文本出现“刚才X/上一位X/前面X”，且 X 不是最近一位实际发言者，
+        则改写为最近一位发言者，避免 A/B 错置。
+        """
+        text = (content or "").strip()
+        if not text or not self._recent_display_speakers:
+            return text
+
+        current_display = self._agent_to_display_name.get(source, source)
+        last_display = ""
+        for name in reversed(self._recent_display_speakers):
+            if name != current_display:
+                last_display = name
+                break
+        if not last_display:
+            return text
+
+        # 构建"已实际发言过"的名字集合
+        spoke_set = set(self._recent_display_speakers)
+
+        display_names = sorted(set(self._agent_to_display_name.values()), key=len, reverse=True)
+        for name in display_names:
+            if name == current_display:
+                continue
+            # 修正"刚才/上一位/前面 + 错误名字" → 替换为真正的上一位
+            if name != last_display:
+                text = re.sub(rf"(刚才|上一位|前面)\s*{re.escape(name)}", rf"\1{last_display}", text)
+            # 检测对从未发言者的引用（"X说/X提到/X认为"） → 替换为中性表述
+            if name not in spoke_set:
+                text = re.sub(
+                    rf"{re.escape(name)}\s*(说得?对?|提到|认为|觉得|讲到|说过)",
+                    r"有同学\1",
+                    text,
+                )
+        return text
 
     def on_message(self, callback: Callable) -> "FloorManager":
         """注册消息回调。callback(source, content, msg_type)"""
@@ -118,7 +203,7 @@ class FloorManager:
         return self
 
     def on_interrupt(self, callback: Callable) -> "FloorManager":
-        """注册打断回调。callback(interrupter, current_speaker)"""
+        """注册打断回调。callback(interrupter, current_speaker, approved_by)"""
         self._on_interrupt = callback
         return self
 
@@ -129,27 +214,107 @@ class FloorManager:
 
     async def _emit_message(self, source: str, content: str, msg_type: str = "text") -> None:
         """发送消息事件。"""
+        self._touch_progress("emit_message")
         if self._on_message:
             await self._on_message(source, content, msg_type)
 
     async def _emit_turn_change(self, speaker: str, is_human: bool) -> None:
         """发送轮次变更事件。"""
         self.current_speaker = speaker
+        self._touch_progress("emit_turn_change")
         if self._on_turn_change:
             await self._on_turn_change(speaker, is_human)
 
-    async def _set_state(self, new_state: FloorState) -> None:
+    async def _set_state(
+        self,
+        new_state: FloorState,
+        *,
+        reason: str = "",
+        recovery: bool = False,
+    ) -> None:
         """更新状态并发送事件。"""
         old_state = self.state
         self.state = new_state
+        if new_state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
+            if old_state not in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
+                self._human_turn_started_mono = time.monotonic()
+        else:
+            self._human_turn_started_mono = 0.0
+        self._touch_progress("set_state")
         if self._on_state_change:
-            await self._on_state_change(old_state, new_state)
+            await self._on_state_change(old_state, new_state, reason, recovery)
 
     async def _emit_error(self, error_msg: str) -> None:
         """发送错误事件。"""
         logger.error(f"FloorManager 错误: {error_msg}")
+        self._touch_progress("emit_error")
         if self._on_error:
             await self._on_error(error_msg)
+
+    def _touch_progress(self, reason: str = "") -> None:
+        self._last_progress_ts = time.monotonic()
+        if reason:
+            logger.debug("[FloorManager] progress touch: %s", reason)
+
+    async def _watchdog_loop(self) -> None:
+        """Watchdog loop: auto-recover stuck human-turn windows and emit diagnostics."""
+        while not self._watchdog_stop.is_set():
+            await asyncio.sleep(self._stall_check_interval_sec)
+            now = time.monotonic()
+            idle_sec = now - self._last_progress_ts
+
+            if self.state in (FloorState.ENDED, FloorState.CLOSING):
+                continue
+
+            # Prefer explicit auto-recovery for human wait stalls.
+            if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
+                if idle_sec >= self._human_stall_timeout_sec and self.current_speaker:
+                    entered = self._human_turn_started_mono
+                    if entered > 0:
+                        elapsed_in_human_turn = now - entered
+                        if elapsed_in_human_turn < self._min_human_turn_window_sec:
+                            continue
+                    # Rate-limit watchdog actions to avoid repeated queue writes.
+                    if now - self._last_watchdog_action_ts < 6.0:
+                        continue
+                    self._last_watchdog_action_ts = now
+                    speaker = self.current_speaker
+                    display = self._agent_to_display_name.get(speaker, speaker)
+                    logger.warning(
+                        "[FloorManager] human turn stalled for %.1fs, auto-skip speaker=%s",
+                        idle_sec,
+                        speaker,
+                    )
+                    await put_human_input(speaker, "（跳过）")
+                    await self._emit_message(
+                        "系统",
+                        f"{display} 同学输入超时，系统已自动跳过并继续讨论。",
+                        "system",
+                    )
+                    await self._set_state(
+                        FloorState.SELECTING_SPEAKER,
+                        reason="watchdog_human_autoskip",
+                        recovery=True,
+                    )
+                    self._touch_progress("watchdog_human_autoskip")
+                continue
+
+            # Non-human hard stalls: publish a diagnostic system message for observability.
+            if idle_sec >= self._general_stall_timeout_sec:
+                if now - self._last_watchdog_action_ts < 12.0:
+                    continue
+                self._last_watchdog_action_ts = now
+                logger.warning(
+                    "[FloorManager] general stall detected state=%s idle=%.1fs",
+                    self.state,
+                    idle_sec,
+                )
+                await self._emit_message(
+                    "系统",
+                    "检测到流程停滞，系统正在自动恢复调度。",
+                    "system",
+                )
+                self._touch_progress("watchdog_general_notice")
 
     async def run(self, topic: str) -> AsyncGenerator[dict, None]:
         """运行讨论，产出事件流。
@@ -160,7 +325,9 @@ class FloorManager:
         Yields:
             事件字典，包含 event_type 和 data。
         """
-        await self._set_state(FloorState.MODERATOR_OPENING)
+        await self._set_state(FloorState.MODERATOR_OPENING, reason="discussion_start")
+        self._watchdog_stop.clear()
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
 
         try:
             stream = self.team.run_stream(task=topic)
@@ -218,8 +385,16 @@ class FloorManager:
                 await self._emit_error(f"讨论运行错误: {error_msg}")
                 yield {"event_type": "error", "data": {"message": f"讨论出现异常: {error_msg}"}}
         finally:
+            self._watchdog_stop.set()
+            if self._watchdog_task:
+                self._watchdog_task.cancel()
+                try:
+                    await self._watchdog_task
+                except asyncio.CancelledError:
+                    pass
+                self._watchdog_task = None
             if self.state != FloorState.ENDED:
-                await self._set_state(FloorState.ENDED)
+                await self._set_state(FloorState.ENDED, reason="discussion_end")
             yield {"event_type": "ended", "data": {"session_id": self.session_id}}
 
     async def _process_event(self, event: Any) -> Optional[dict]:
@@ -233,9 +408,9 @@ class FloorManager:
             logger.info("[FloorManager] 选择发言者: %s (is_human=%s)", speaker, is_human)
 
             if is_human:
-                await self._set_state(FloorState.HUMAN_TURN_WAITING)
+                await self._set_state(FloorState.HUMAN_TURN_WAITING, reason="speaker_selected_human")
             else:
-                await self._set_state(FloorState.AI_SPEAKING)
+                await self._set_state(FloorState.AI_SPEAKING, reason="speaker_selected_ai")
 
             await self._emit_turn_change(speaker, is_human)
             return {
@@ -270,25 +445,39 @@ class FloorManager:
 
             logger.info("[FloorManager] 完整消息: source=%s, content_len=%d", source, len(content))
 
+            # 首轮发言兜底规整：避免不当引用
+            content = self._sanitize_opening_reference(source, content)
+            content = self._sanitize_reference_attribution(source, content)
+
+            # 点名解析应尽量基于原始语义，先于安全改写尝试。
+            designated_pre_filter: Optional[str] = None
+            display_source = self._agent_to_display_name.get(source, source)
+            all_display_names = list(self._display_name_to_agent.keys())
+            if all_display_names and (source in self.ai_names or source in self.human_names):
+                designated_pre_filter = parse_speaker_designation(content, all_display_names)
+
             # 安全过滤 AI 输出
             if source in self.ai_names:
                 content = await self.safety_filter.filter_or_rewrite(content)
 
             # 如果是老师或用户的发言，检查是否指定了下一位发言者（需求4）
-            display_source = self._agent_to_display_name.get(source, source)
-            all_display_names = list(self._display_name_to_agent.keys())
+            designated: Optional[str] = designated_pre_filter
             if all_display_names and (source in self.ai_names or source in self.human_names):
-                designated = parse_speaker_designation(content, all_display_names)
+                designated = designated or parse_speaker_designation(content, all_display_names)
                 if designated:
                     agent_name = self._display_name_to_agent.get(designated, designated)
                     logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
-                    set_designated_speaker(agent_name)
+                    self._set_designated_speaker(agent_name)
 
             # 清空该发言者的流式缓冲
             self._streaming_buffer.pop(source, None)
             self._current_streaming_source = None
 
             await self._emit_message(source, content, "text")
+            self._speaker_message_count[source] = self._speaker_message_count.get(source, 0) + 1
+            self._recent_display_speakers.append(display_source)
+            if len(self._recent_display_speakers) > 16:
+                self._recent_display_speakers = self._recent_display_speakers[-16:]
 
             return {
                 "event_type": "message",
@@ -299,7 +488,7 @@ class FloorManager:
         if isinstance(event, UserInputRequestedEvent):
             # 等待人类输入，带超时
             speaker = self.current_speaker or ""
-            await self._set_state(FloorState.HUMAN_SPEAKING)
+            await self._set_state(FloorState.HUMAN_SPEAKING, reason="human_input_requested")
             return {
                 "event_type": "human_input_requested",
                 "data": {"speaker": speaker},
@@ -326,6 +515,7 @@ class FloorManager:
         """
         normalized_name = (name or "").strip()
         normalized_text = (text or "").strip()
+        self._touch_progress("submit_human_input")
 
         logger.info("[FloorManager] 收到人类输入: name=%s, text_len=%d", normalized_name, len(normalized_text))
 
@@ -357,7 +547,7 @@ class FloorManager:
             logger.info("[FloorManager] 用户 %s 指定下一位发言者: %s", normalized_name, designated)
             # 转换为 agent name
             agent_name = self._display_name_to_agent.get(designated, designated) if hasattr(self, '_display_name_to_agent') else designated
-            set_designated_speaker(agent_name)
+            self._set_designated_speaker(agent_name)
 
         try:
             await put_human_input(normalized_name, normalized_text)
@@ -380,18 +570,29 @@ class FloorManager:
         logger.info(f"打断请求: {speaker} 请求发言 (当前发言者: {self.current_speaker})")
         self._interrupt_queue.append(speaker)
 
-        await self._set_state(FloorState.INTERRUPTED)
+        await self._set_state(FloorState.INTERRUPTED, reason="interrupt_requested")
 
-        # 发送打断通知消息
-        await self._emit_message("系统", f"{speaker} 举手请求发言", "interrupt")
+        moderator_display = self._agent_to_display_name.get("moderator", "李老师")
+        # 让举手者成为下一位优先发言，避免被其他角色插队。
+        self._set_designated_speaker(speaker)
+        # 由老师口吻发布同意插话通知。
+        await self._emit_message(
+            moderator_display,
+            f"{speaker} 同学，我同意你先发言，其他同学稍后继续。",
+            "interrupt",
+        )
 
         # 通知打断事件
         if self._on_interrupt:
-            await self._on_interrupt(speaker, self.current_speaker or "")
+            await self._on_interrupt(speaker, self.current_speaker or "", moderator_display)
 
         # 短暂暂停后恢复到选择发言者状态
         await asyncio.sleep(0.5)
-        await self._set_state(FloorState.SELECTING_SPEAKER)
+        await self._set_state(
+            FloorState.SELECTING_SPEAKER,
+            reason="interrupt_resolved",
+            recovery=True,
+        )
 
     async def handle_push_to_talk_start(self, speaker: str) -> None:
         """处理 Push-to-Talk 开始事件。
@@ -403,7 +604,7 @@ class FloorManager:
         """
         logger.info(f"PTT 开始: {speaker} 开始发言")
         if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
-            await self._set_state(FloorState.HUMAN_SPEAKING)
+            await self._set_state(FloorState.HUMAN_SPEAKING, reason="ptt_start")
             await self._emit_turn_change(speaker, is_human=True)
 
     async def handle_push_to_talk_end(self, speaker: str) -> None:
@@ -414,4 +615,14 @@ class FloorManager:
         Args:
             speaker: 结束发言的参与者名字。
         """
-        logger.info(f"PTT 结束: {speaker} 结束发言")
+        normalized = (speaker or "").strip()
+        logger.info(f"PTT 结束: {normalized or speaker} 结束发言")
+        self._touch_progress("ptt_end")
+
+        # 从“正在讲话”切换回“等待提交文本”，避免状态长期停留 HUMAN_SPEAKING。
+        if self.state == FloorState.HUMAN_SPEAKING:
+            await self._set_state(
+                FloorState.HUMAN_TURN_WAITING,
+                reason="ptt_end_waiting_input",
+                recovery=True,
+            )

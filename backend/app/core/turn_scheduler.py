@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import Callable, Optional
 
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination
@@ -36,6 +36,7 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 
 规则：
 0. 每个新话题开场必须先由老师发言，介绍背景后再点名
+0.1 首轮阶段（老师开场 + 每位同学首次发言）禁止“上一位同学说得对”等互引式表达
 1. 人类学生是讨论的焦点人物，讨论应以人类学生为重心展开
 2. 人类学生每次发言后，老师应立即点评（总结、补充提问或引导深入）
 3. 确保每位参与者发言次数大致均衡
@@ -85,20 +86,27 @@ def parse_speaker_designation(text: str, participant_names: list[str]) -> Option
     Returns:
         被指定的参与者名字，如果无法解析则返回 None。
     """
+    normalized_text = (text or "").strip()
+    if not normalized_text:
+        return None
+
     # 按名字长度降序匹配，避免短名误匹配
     sorted_names = sorted(participant_names, key=len, reverse=True)
     for name in sorted_names:
         # 匹配各种点名模式
         patterns = [
-            rf'请{re.escape(name)}',
-            rf'{re.escape(name)}[，,]?\s*你(怎么看|觉得|认为|来说|来谈)',
-            rf'听听{re.escape(name)}',
-            rf'想听{re.escape(name)}',
-            rf'{re.escape(name)}发言',
-            rf'{re.escape(name)}来谈',
+            rf'请\s*{re.escape(name)}\s*(发言|先说|来谈|谈谈|先来)',
+            rf'接下来\s*请\s*{re.escape(name)}',
+            rf'下一位\s*(请)?\s*{re.escape(name)}',
+            rf'轮到\s*{re.escape(name)}',
+            rf'请\s*{re.escape(name)}\s*同学',
+            rf'{re.escape(name)}[，,]?\s*你(怎么看|觉得|认为|来说|来谈|先说)',
+            rf'(我们)?来?听听\s*{re.escape(name)}',
+            rf'想听听?\s*{re.escape(name)}',
+            rf'由\s*{re.escape(name)}\s*(先)?发言',
         ]
         for pat in patterns:
-            if re.search(pat, text):
+            if re.search(pat, normalized_text):
                 return name
     return None
 
@@ -127,6 +135,8 @@ def create_discussion_team(
     humans: list[UserProxyAgent],
     selector_client: ChatCompletionClient,
     max_turns: int | None = None,
+    consume_designated_speaker: Optional[Callable[[], Optional[str]]] = None,
+    on_designation_lifecycle: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> SelectorGroupChat:
     """创建圆桌讨论团队。"""
     if max_turns is None:
@@ -159,8 +169,16 @@ def create_discussion_team(
         last_source = getattr(participant_msgs[-1], "source", None) if participant_msgs else None
 
         # ── 优先级1：检查全局指定发言者 ──
-        designated = get_designated_speaker()
+        designated = (
+            consume_designated_speaker()
+            if consume_designated_speaker is not None
+            else get_designated_speaker()
+        )
+        if designated and on_designation_lifecycle is not None:
+            on_designation_lifecycle("consumed", designated)
         if designated and designated in all_names:
+            if on_designation_lifecycle is not None:
+                on_designation_lifecycle("executed", designated)
             logger.info("[TurnScheduler] 执行指定发言者: %s", designated)
             return designated
 
@@ -181,20 +199,19 @@ def create_discussion_team(
             logger.info("[TurnScheduler] 用户 %s 刚发言，安排老师点评", last_source)
             return moderator.name
 
-        # ── 优先级3：从最近发言中解析点名（老师或用户） ──
-        for msg in reversed(thread[-5:]):
-            source = getattr(msg, "source", None)
-            content = str(getattr(msg, "content", "") or getattr(msg, "messages", ""))
-            if not content:
-                continue
-            # 老师或用户的发言中可能包含点名
-            if source == moderator.name or source in human_name_set:
-                next_speaker = parse_speaker_designation(content, all_names)
-                if next_speaker and next_speaker != source:
-                    if next_speaker in human_name_set and since_human < human_cooldown:
-                        logger.info("[TurnScheduler] 点名 %s 但人类冷却中，跳过", next_speaker)
-                        break
-                    logger.info("[TurnScheduler] 解析点名: %s → %s", source, next_speaker)
+        # ── 优先级3：只解析“最新一条”老师/用户发言中的点名，避免旧消息误触发 ──
+        latest_msg = participant_msgs[-1] if participant_msgs else None
+        latest_source = getattr(latest_msg, "source", None) if latest_msg else None
+        latest_content = str(
+            getattr(latest_msg, "content", "") or getattr(latest_msg, "messages", "")
+        ) if latest_msg else ""
+        if latest_content and (latest_source == moderator.name or latest_source in human_name_set):
+            next_speaker = parse_speaker_designation(latest_content, all_names)
+            if next_speaker and next_speaker != latest_source:
+                if next_speaker in human_name_set and since_human < human_cooldown:
+                    logger.info("[TurnScheduler] 点名 %s 但人类冷却中，跳过", next_speaker)
+                else:
+                    logger.info("[TurnScheduler] 解析点名: %s → %s", latest_source, next_speaker)
                     return next_speaker
 
         # ── 优先级4：人类发言冷却期 ──

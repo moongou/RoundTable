@@ -11,6 +11,18 @@ class _NoopTtsService implements TtsService {
   bool get isSpeaking => _isSpeaking;
 
   @override
+  TtsPerfSnapshot getPerfSnapshot() => const TtsPerfSnapshot();
+
+  @override
+  Future<void> prefetch(String text, {String? voice}) async {}
+
+  @override
+  Future<void> prefetchBatch(
+    List<({String text, String? voice})> items, {
+    int maxConcurrent = 2,
+  }) async {}
+
+  @override
   Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
     _isSpeaking = true;
     _isSpeaking = false;
@@ -31,6 +43,9 @@ class _NoopAsrService implements AsrService {
   final StreamController<AsrResult> _controller =
       StreamController<AsrResult>.broadcast();
   bool _isListening = false;
+
+  @override
+  Future<void> warmup() async {}
 
   @override
   bool get isListening => _isListening;

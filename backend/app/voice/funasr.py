@@ -6,9 +6,19 @@ FunASR 支持 HTTP 接口接收音频并返回转录文本。
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
+import wave
+from io import BytesIO
 
 import httpx
+import websockets
+from websockets.exceptions import InvalidStatus
 
 from app.voice.base import ASRProvider
 
@@ -22,6 +32,9 @@ class FunASRProvider(ASRProvider):
         self.base_url = base_url.rstrip("/")
 
     async def transcribe(self, audio_data: bytes, format: str = "wav") -> str:
+        if self.base_url.startswith("ws://") or self.base_url.startswith("wss://"):
+            return await self._transcribe_via_websocket(audio_data, format=format)
+
         # FunASR 典型接口: POST /recognize with multipart audio upload
         async with httpx.AsyncClient(timeout=30.0) as client:
             files = {"audio": (f"audio.{format}", audio_data, f"audio/{format}")}
@@ -35,10 +48,159 @@ class FunASRProvider(ASRProvider):
             # FunASR 返回格式通常是 {"text": "识别结果", ...}
             return data.get("text", data.get("result", ""))
 
+    async def _transcribe_via_websocket(self, audio_data: bytes, format: str = "wav") -> str:
+        pcm_data, sample_rate = self._to_pcm_stream(audio_data, format)
+        request = {
+            "chunk_size": [5, 10, 5],
+            "wav_name": "backend",
+            "is_speaking": True,
+            "chunk_interval": 10,
+            "itn": True,
+            "mode": "2pass",
+            "wav_format": "PCM",
+            "audio_fs": sample_rate,
+        }
+
+        texts: list[str] = []
+        async with websockets.connect(
+            self.base_url,
+            subprotocols=["binary"],
+            open_timeout=8.0,
+            close_timeout=2.0,
+        ) as ws:
+            await ws.send(json.dumps(request, ensure_ascii=False))
+
+            chunk_bytes = max(sample_rate // 10 * 2, 1600)
+            for i in range(0, len(pcm_data), chunk_bytes):
+                await ws.send(pcm_data[i : i + chunk_bytes])
+                await asyncio.sleep(0.01)
+
+            await ws.send(json.dumps({"is_speaking": False}))
+
+            deadline = asyncio.get_running_loop().time() + 10.0
+            while asyncio.get_running_loop().time() < deadline:
+                timeout = max(0.2, deadline - asyncio.get_running_loop().time())
+                try:
+                    message = await asyncio.wait_for(ws.recv(), timeout=min(timeout, 1.5))
+                except asyncio.TimeoutError:
+                    continue
+
+                if not isinstance(message, str):
+                    continue
+
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+
+                for key in ("text", "text_offline", "text_online", "result"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        texts.append(value.strip())
+
+                is_final = payload.get("is_final") is True or payload.get("is_speaking") is False
+                if is_final and texts:
+                    break
+
+        if not texts:
+            raise RuntimeError("FunASR WebSocket 未返回识别文本")
+
+        return max(texts, key=len)
+
+    def _to_pcm_stream(self, audio_data: bytes, format: str) -> tuple[bytes, int]:
+        fmt = (format or "").lower().strip()
+        if fmt in ("pcm", "raw"):
+            return audio_data, 16000
+
+        if fmt == "wav":
+            with wave.open(BytesIO(audio_data), "rb") as wav_file:
+                sample_rate = wav_file.getframerate() or 16000
+                sample_width = wav_file.getsampwidth()
+                channels = wav_file.getnchannels()
+                frames = wav_file.readframes(wav_file.getnframes())
+
+            if sample_width != 2:
+                raise ValueError("FunASR WebSocket 仅支持 16-bit PCM WAV")
+            if channels != 1:
+                raise ValueError("FunASR WebSocket 仅支持单声道 WAV")
+            return frames, sample_rate
+
+        # Browser media recorder commonly uploads webm/ogg; convert to mono PCM WAV then feed WS protocol.
+        if fmt in ("webm", "ogg", "mp3", "m4a", "aac", "opus"):
+            if not shutil.which("ffmpeg"):
+                raise ValueError(
+                    "FunASR WebSocket 收到压缩音频，且未安装 ffmpeg，无法转码。"
+                    "请安装 ffmpeg 或切换到可直接输出 WAV/PCM 的录音链路。"
+                )
+            return self._convert_to_pcm_with_ffmpeg(audio_data, fmt)
+
+        raise ValueError(
+            "FunASR WebSocket 模式仅支持 PCM/WAV 输入。"
+            "当前为非 PCM 音频，请改用 HTTP FunASR(10096) 或调整前端录音格式。"
+        )
+
+    def _convert_to_pcm_with_ffmpeg(self, audio_data: bytes, src_format: str) -> tuple[bytes, int]:
+        src_path = ""
+        dst_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=f".{src_format}", delete=False) as src_file:
+                src_file.write(audio_data)
+                src_path = src_file.name
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as dst_file:
+                dst_path = dst_file.name
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                src_path,
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-sample_fmt",
+                "s16",
+                dst_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "ffmpeg conversion failed")
+
+            with open(dst_path, "rb") as f:
+                wav_data = f.read()
+            return self._to_pcm_stream(wav_data, "wav")
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("音频转码超时") from e
+        except Exception as e:
+            raise RuntimeError(f"音频转码失败: {e}") from e
+        finally:
+            for p in (src_path, dst_path):
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
     async def is_available(self) -> bool:
         try:
+            if self.base_url.startswith("ws://") or self.base_url.startswith("wss://"):
+                async with websockets.connect(
+                    self.base_url,
+                    subprotocols=["binary"],
+                    open_timeout=3.0,
+                    close_timeout=1.0,
+                ):
+                    return True
+
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.get(f"{self.base_url}/")
                 return resp.status_code < 500
+        except InvalidStatus as e:
+            status_code = getattr(e.response, "status_code", None)
+            return status_code is not None and status_code < 500
         except Exception:
             return False

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -97,7 +98,20 @@ async def text_to_speech(request: TTSRequest) -> Response:
 
     try:
         provider = create_tts_provider()
-        audio_data = await provider.synthesize(request.text, voice=voice)
+        last_error: Exception | None = None
+        audio_data: bytes | None = None
+        for attempt in range(2):
+            try:
+                audio_data = await provider.synthesize(request.text, voice=voice)
+                break
+            except Exception as e:
+                last_error = e
+                # 仅对瞬时错误做一次快速重试，避免把偶发上游 500 直接暴露给前端。
+                if attempt == 0:
+                    await asyncio.sleep(0.2)
+                    continue
+        if audio_data is None:
+            raise last_error or RuntimeError("unknown tts error")
         return Response(
             content=audio_data,
             media_type="audio/mpeg",

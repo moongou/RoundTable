@@ -269,10 +269,18 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .link-btn:hover{border-color:#d4a017}
   .header-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:24px}
   .header-left{flex:0 0 auto}
-  .header-right{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+  .header-right{flex:1;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+  .action-row{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+  .action-btn{height:34px;display:inline-flex;align-items:center;justify-content:center;padding:0 14px}
   .hw-info{display:flex;gap:12px;align-items:center;font-size:11px;color:#888;background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:6px 12px}
   .hw-info .hw-chip{color:#d4a017;font-weight:600;font-size:12px}
   .hw-info .hw-sep{color:#333}
+  .hw-opt{font-size:11px;color:#80cbc4;max-width:780px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
+  .hw-report{display:none;width:100%;background:#11192f;border:1px solid #1b335f;border-radius:10px;padding:10px 12px;font-size:11px;line-height:1.65;color:#b9c2d6}
+  .hw-report .title{color:#d4a017;font-weight:700;margin-bottom:4px}
+  .hw-report .row{display:flex;gap:8px;flex-wrap:wrap}
+  .hw-report .k{color:#7f90b5}
+  .hw-report .v{color:#dbe4ff}
   .footer{margin-top:24px;color:#444;font-size:12px}
 </style>
 </head>
@@ -283,6 +291,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <p class="subtitle">localhost:8888 — 圆桌思辨讨论平台</p>
   </div>
   <div class="header-right">
+    <div class="action-row">
+      <button class="link-btn action-btn" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer;border:none;background:#0f3460;color:#d4a017;font-size:12px;border-radius:8px">🖥 硬件检测</button>
+      <a class="link-btn action-btn" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
+      <a class="link-btn action-btn" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 原生 ASR 测试页</a>
+      <a class="link-btn action-btn" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API DOCS</a>
+      <a class="link-btn action-btn" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
+      <a class="link-btn action-btn" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+    </div>
+    <span class="hw-opt" id="hw-opt">点击“硬件检测”以生成优化建议</span>
     <div class="hw-info" id="hw-info" style="display:none">
       <span class="hw-chip" id="hw-chip"></span>
       <span class="hw-sep">|</span>
@@ -292,11 +309,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <span class="hw-sep">|</span>
       <span id="hw-gpu"></span>
     </div>
-    <button class="link-btn" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer;border:none;background:#0f3460;color:#d4a017;font-size:12px;padding:6px 12px;border-radius:6px">🖥 硬件检测</button>
-    <a class="link-btn" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
-    <a class="link-btn" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API Docs</a>
-    <a class="link-btn" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
-    <a class="link-btn" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+    <div class="hw-report" id="hw-report">
+      <div class="title">硬件检测报告</div>
+      <div class="row"><span class="k">摘要:</span><span class="v" id="hw-report-summary">-</span></div>
+      <div class="row"><span class="k">推荐:</span><span class="v" id="hw-report-reco">-</span></div>
+      <div class="row"><span class="k">已应用优化:</span><span class="v" id="hw-report-tuning">-</span></div>
+    </div>
   </div>
 </div>
 <div class="grid">
@@ -425,17 +443,37 @@ setTimeout(refreshHealth, 500);
 setInterval(refreshHealth, 30000);
 // Fetch hardware info
 function fetchHardware() {
-  fetch('http://localhost:8001/api/v1/benchmark/hardware')
+  var btn = document.getElementById('btn-hw-detect');
+  btn.disabled = true;
+  btn.textContent = '检测中...';
+  fetch('http://localhost:8001/api/v1/benchmark/hardware?apply_tuning=true')
     .then(function(r){ return r.json(); })
     .then(function(hw) {
       var el = document.getElementById('hw-info');
+      var report = document.getElementById('hw-report');
       el.style.display = 'flex';
+      report.style.display = 'block';
       document.getElementById('hw-chip').textContent = hw.apple_chip || hw.cpu_brand || 'CPU';
       document.getElementById('hw-cpu').textContent = hw.cpu_cores + ' cores / ' + hw.cpu_threads + ' perf';
       document.getElementById('hw-mem').textContent = hw.memory_gb + ' GB RAM';
       document.getElementById('hw-gpu').textContent = hw.mps_available ? 'MPS ✓' + (hw.gpu_cores ? ' ' + hw.gpu_cores + ' cores' : '') : hw.cuda_available ? 'CUDA ✓' : 'CPU only';
+
+      var rt = hw.runtime_tuning || {};
+      var hr = hw.hardware_report || {};
+      var tuningText = 'workers=' + (rt.workers || '-') + ', prefetch=' + (rt.prefetch_batch || '-') + ', ASR预热=' + (rt.asr_warmup_interval_ms || '-') + 'ms, 设备=' + (rt.device || '-');
+      document.getElementById('hw-report-summary').textContent = hr.summary || '-';
+      document.getElementById('hw-report-reco').textContent = hr.recommendation || ('建议并行线程: ' + (hw.recommended_workers || '-'));
+      document.getElementById('hw-report-tuning').textContent = tuningText;
+
+      document.getElementById('hw-opt').textContent = '建议并行线程: ' + (hw.recommended_workers || '-') + ' ｜ 已应用: ' + tuningText;
     })
-    .catch(function() { /* backend not ready yet */ });
+    .catch(function() {
+      document.getElementById('hw-opt').textContent = '硬件检测失败：请确认后端已启动并允许跨域访问';
+    })
+    .finally(function() {
+      btn.disabled = false;
+      btn.textContent = '🖥 硬件检测';
+    });
 }
 setTimeout(fetchHardware, 2000);
 </script>

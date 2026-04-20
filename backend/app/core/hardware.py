@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import subprocess
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -38,6 +39,7 @@ class HardwareProfile:
 
 _profile: HardwareProfile | None = None
 _thread_pool: ThreadPoolExecutor | None = None
+_runtime_tuning: dict[str, object] = {}
 
 
 def detect_hardware() -> HardwareProfile:
@@ -181,6 +183,57 @@ def get_thread_pool() -> ThreadPoolExecutor:
             thread_name_prefix="rt-worker",
         )
     return _thread_pool
+
+
+def get_runtime_tuning() -> dict[str, object]:
+    """返回当前运行时调优参数快照。"""
+    if not _runtime_tuning:
+        return apply_runtime_tuning()
+    return dict(_runtime_tuning)
+
+
+def apply_runtime_tuning(force_recreate_pool: bool = False) -> dict[str, object]:
+    """根据硬件能力应用运行时参数，并返回已应用配置。"""
+    global _thread_pool, _runtime_tuning
+
+    profile = detect_hardware()
+    workers = max(2, int(profile.recommended_workers))
+
+    # 轻量运行时参数：用于并发和预热节奏控制。
+    prefetch_batch = 4 if workers >= 12 else 3 if workers >= 8 else 2
+    queue_target = max(2, min(8, workers // 2))
+    asr_warmup_interval_ms = 900 if workers >= 10 else 1300
+    tts_retry_delay_ms = 120 if workers >= 10 else 180
+
+    # 让底层库可读取到并发建议（新建 worker 进程/线程时生效）。
+    os.environ["RT_WORKERS"] = str(workers)
+    os.environ["RT_TTS_PREFETCH_BATCH"] = str(prefetch_batch)
+    os.environ["RT_ASR_WARMUP_INTERVAL_MS"] = str(asr_warmup_interval_ms)
+    os.environ["RT_TTS_RETRY_DELAY_MS"] = str(tts_retry_delay_ms)
+
+    should_recreate = force_recreate_pool or _thread_pool is None
+    if _thread_pool is not None and not should_recreate:
+        current = getattr(_thread_pool, "_max_workers", workers)
+        should_recreate = int(current) != workers
+
+    if should_recreate:
+        if _thread_pool is not None:
+            _thread_pool.shutdown(wait=False)
+        _thread_pool = ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="rt-worker",
+        )
+
+    _runtime_tuning = {
+        "applied_at": datetime.now().isoformat(),
+        "workers": workers,
+        "prefetch_batch": prefetch_batch,
+        "queue_target": queue_target,
+        "asr_warmup_interval_ms": asr_warmup_interval_ms,
+        "tts_retry_delay_ms": tts_retry_delay_ms,
+        "device": get_optimal_device(),
+    }
+    return dict(_runtime_tuning)
 
 
 def get_optimal_device() -> str:

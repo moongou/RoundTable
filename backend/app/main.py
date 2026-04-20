@@ -20,11 +20,13 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 async def _startup_preload():
     """后台预加载任务：硬件检测、LLM 连接池预热、TTS 常见短语缓存。"""
-    from app.core.hardware import detect_hardware, log_hardware_summary
+    from app.core.hardware import detect_hardware, get_thread_pool, log_hardware_summary
 
     # 1. 硬件检测（≤1s）
     log_hardware_summary()
     profile = detect_hardware()
+    get_thread_pool()
+    logger.info("线程池初始化完成: workers=%d", profile.recommended_workers)
 
     # 2 & 3: 并行执行 LLM 预热和 TTS 缓存（充分利用多核）
     async def _preheat_llm():
@@ -43,10 +45,12 @@ async def _startup_preload():
             tts = create_tts_provider(settings.tts_provider)
             common_phrases = ["好的", "我认为", "但是", "你说得对", "让我想想",
                               "有道理", "我同意", "请继续", "这个问题", "从另一个角度"]
+            sem = asyncio.Semaphore(4)
 
             async def _synth(phrase: str):
                 try:
-                    await tts.synthesize(phrase)
+                    async with sem:
+                        await tts.synthesize(phrase)
                 except Exception:
                     pass
 
@@ -55,7 +59,24 @@ async def _startup_preload():
         except Exception as e:
             logger.debug(f"TTS 预缓存跳过: {e}")
 
-    await asyncio.gather(_preheat_llm(), _preheat_tts())
+    async def _preheat_asr():
+        try:
+            from app.voice.factory import create_asr_provider, create_tts_provider
+
+            asr = create_asr_provider(settings.asr_provider)
+            tts = create_tts_provider(settings.tts_provider)
+            test_texts = ["你好", "请继续", "我有一个想法"]
+
+            async def _one_round(text: str):
+                audio = await tts.synthesize(text)
+                await asr.transcribe(audio)
+
+            await asyncio.gather(*[_one_round(t) for t in test_texts])
+            logger.info("ASR 预热完成（%d 轮）", len(test_texts))
+        except Exception as e:
+            logger.debug(f"ASR 预热跳过: {e}")
+
+    await asyncio.gather(_preheat_llm(), _preheat_tts(), _preheat_asr())
 
     logger.info("预加载任务全部完成")
 

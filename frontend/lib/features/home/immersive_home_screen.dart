@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/discussion_models.dart';
 import '../../painters/candlelight_painter.dart';
 import '../../painters/round_table_painter.dart';
+import '../../services/speech_service.dart';
 import '../../state/settings_provider.dart';
 import '../../utils/open_external_url_stub.dart'
     if (dart.library.html) '../../utils/open_external_url_web.dart';
@@ -126,8 +127,53 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     return _topics.where((t) => t.category == _selectedCategory).toList();
   }
 
-  void _startDiscussion() {
+  Future<void> _startDiscussion() async {
     if (_selectedTopic == null) return;
+    final apiClient = ref.read(apiClientProvider);
+    try {
+      final validation = await apiClient.validateConfig();
+      if (!mounted) return;
+      if (!validation.valid) {
+        _showPreflightFailedDialog(
+          title: '配置未通过会前检测',
+          message: validation.message,
+          details: validation.checks
+              .where((c) => !c.ok)
+              .map((c) => '${c.name}: ${c.detail}')
+              .toList(),
+        );
+        return;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _showPreflightFailedDialog(
+        title: '会前检测失败',
+        message: '无法验证后端配置，请检查服务状态后重试。',
+        details: ['错误: $e'],
+      );
+      return;
+    }
+
+    final local = ref.read(localSettingsProvider).valueOrNull;
+    final asrProvider = local?.asrProvider ?? 'browser';
+    final serverUrl = local?.serverUrl ?? 'http://localhost:8001';
+    if (asrProvider == 'browser') {
+      final asr = createAsrService('browser', serverUrl: serverUrl);
+      try {
+        if (!asr.isAvailable) {
+          if (!mounted) return;
+          _showPreflightFailedDialog(
+            title: '浏览器语音不可用',
+            message: '当前浏览器不支持语音识别（Web Speech API）。',
+            details: const ['请切换 ASR 到 funasr/openai_whisper，或更换支持语音识别的浏览器。'],
+          );
+          return;
+        }
+      } finally {
+        asr.dispose();
+      }
+    }
+
     Navigator.push(
       context,
       PageRouteBuilder(
@@ -142,6 +188,50 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           child: child,
         ),
         transitionDuration: const Duration(milliseconds: 500),
+      ),
+    );
+  }
+
+  void _showPreflightFailedDialog({
+    required String title,
+    required String message,
+    required List<String> details,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _kSurface,
+        title: Text(title, style: const TextStyle(color: _kTextPrimary)),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(message, style: const TextStyle(color: _kTextSecondary)),
+              const SizedBox(height: 10),
+              ...details.map(
+                (item) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text('• $item',
+                      style: const TextStyle(color: _kTextPrimary, fontSize: 12)),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('知道了', style: TextStyle(color: _kNeonGold)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.pushNamed(context, '/settings');
+            },
+            child: const Text('去设置', style: TextStyle(color: _kNeonCyan)),
+          ),
+        ],
       ),
     );
   }
@@ -234,7 +324,9 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                       _selectedThinkerIds.add(id);
                     }
                   }),
-                  onStart: _startDiscussion,
+                  onStart: () {
+                    _startDiscussion();
+                  },
                 )
               : _NarrowLayout(
                   topics: _filteredTopics,
@@ -264,7 +356,9 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                       _selectedThinkerIds.add(id);
                     }
                   }),
-                  onStart: _startDiscussion,
+                  onStart: () {
+                    _startDiscussion();
+                  },
                 ),
         ),
       ],

@@ -173,11 +173,13 @@ class ApiClient {
     required String providerId,
     String? apiKey,
     String? baseUrl,
+    String? model,
   }) async {
     final response = await _dio.post('/api/v1/config/test-provider', data: {
       'provider_id': providerId,
       if (apiKey != null && apiKey.isNotEmpty) 'api_key': apiKey,
       if (baseUrl != null && baseUrl.isNotEmpty) 'base_url': baseUrl,
+      if (model != null && model.isNotEmpty) 'model': model,
     });
     return ProviderTestResult.fromJson(response.data as Map<String, dynamic>);
   }

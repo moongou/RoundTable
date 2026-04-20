@@ -17,6 +17,7 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import 'chat_history_drawer.dart';
 import 'glass_control_bar.dart';
+import 'session_frontend_commander.dart';
 import 'table_participant_ring.dart';
 
 /// 沉浸式讨论界面 - 圆桌围坐体验
@@ -42,9 +43,9 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
 class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     with TickerProviderStateMixin {
   final DiscussionWebSocket _wsClient = DiscussionWebSocket();
-  final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FocusNode _keyboardFocusNode = FocusNode();
+  final SessionFrontendCommander _commander = SessionFrontendCommander();
 
   // 讨论状态
   final List<ChatMessage> _messages = [];
@@ -54,30 +55,55 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _hasRaisedHand = false;
   bool _isPaused = false;
   // TTS 顺序播放队列 (i)
-  final List<({String source, String text, String? voice})> _ttsQueue = [];
+  final List<
+      ({
+        String source,
+        String text,
+        String? voice,
+        String playbackSessionId,
+        DateTime enqueuedAt,
+      })> _ttsQueue = [];
   bool _ttsPlaying = false;
+  ({
+    String source,
+    String text,
+    String? voice,
+    String playbackSessionId,
+    DateTime enqueuedAt,
+  })? _activeTtsItem;
+  int _ttsSessionSeq = 0;
+  String _activeTtsSessionId = '';
+  bool _ttsPumpRunning = false;
   // 错误追踪：如果先收到错误事件，结束时显示错误原因而非"讨论已结束"
   String? _lastErrorMessage;
   // Thinking indicator state (f)
   bool _isThinking = false;
   // Streaming STT text (bug 3)
   String _sttPartialText = '';
+  String _lastNonEmptySttText = '';
   int _ctrlTapCount = 0;
   DateTime? _lastCtrlTapAt;
   Timer? _ctrlTapTimer;
   bool _ctrlHeld = false;
   Timer? _speechFinalizeTimer;
-  bool _pendingHumanTurn = false;
-  String _pendingHumanSpeaker = '';
+  bool get _pendingHumanTurn => _commander.pendingHumanTurn;
+  String get _pendingHumanSpeaker => _commander.pendingHumanSpeaker;
+  bool get _handApprovedToSpeak => _commander.handApprovedToSpeak;
   // User turn countdown timer (bug 3)
   int _turnCountdown = 0;
   // 3分钟最大发言计时器（需求2）
   Timer? _maxSpeechTimer;
   DateTime? _speechStartTime;
-  // 文字输入面板状态（需求2）
-  bool _showTextInputPanel = false;
+  // 保留字段：当前会话已切换为纯语音输入模式
   // 用户发言后字幕保留计时器（需求2）
   Timer? _subtitleRetainTimer;
+  DateTime? _humanSubtitleLockUntil;
+  Timer? _humanSubtitleLockTimer;
+  Timer? _pendingHumanTurnGuardTimer;
+  Timer? _ttsPumpGuardTimer;
+  Timer? _deferredAutoSkipTimer;
+  DateTime? _humanTurnActivatedAt;
+  static const Duration _minHumanTurnAutoSkipWindow = Duration(seconds: 10);
 
   // 参与者
   List<SeatedParticipant> _participants = [];
@@ -87,11 +113,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   String _centerSpeaker = '';
   int _subtitleToken = 0;
   String _subtitleOwner = '';
+  String _subtitleSessionId = '';
+  int _lastEventSeq = 0;
 
   // 语音状态
   bool _isRecording = false;
   late TtsService _ttsService;
   late AsrService _asrService;
+  TtsService? _browserFallbackTts;
 
   // 动画
   late AnimationController _candleController;
@@ -102,6 +131,27 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   List<CandleParticle>? _particles;
   OverlayEntry? _statusToastEntry;
   Timer? _statusToastTimer;
+  bool _disposed = false;
+  int _bgTaskRunning = 0;
+  final List<Future<void> Function()> _bgTaskQueue = [];
+  DateTime _lastAsrWarmupAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastPrefetchAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _showPerfPanel = true;
+  bool _showPhasePanel = false;
+  int _ttsStartupSamples = 0;
+  double _ttsStartupTotalMs = 0;
+  DateTime? _asrListenStartAt;
+  bool _awaitingAsrFirstPacket = false;
+  int _asrFirstPacketSamples = 0;
+  double _asrFirstPacketTotalMs = 0;
+  String _asrProviderId = 'browser';
+  final List<double> _ttsStartupSeries = [];
+  final List<double> _asrFirstPacketSeries = [];
+  final List<double> _prefetchHitRateSeries = [];
+  static const int _maxReportHistory = 12;
+  final List<_PerfReportEntry> _reportHistory = [];
+  static const int _maxPhaseTelemetryHistory = 80;
+  final List<_PhaseTelemetryEntry> _phaseTelemetryHistory = [];
 
   // 角色显示名 → Edge TTS 音色映射
   static const _nameToVoice = <String, String>{
@@ -167,7 +217,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
     // Global hardware keyboard listener for Ctrl gesture PTT.
     HardwareKeyboard.instance.addHandler(_onHardwareKey);
-    _inputController.addListener(_onTextInputChanged);
     _initVoiceServices();
     _startDiscussion();
   }
@@ -179,25 +228,37 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         event.logicalKey == LogicalKeyboardKey.controlRight;
     if (!isCtrl) return false;
 
-    if (_micControlMode == 'hold_ctrl') {
-      if (event is KeyDownEvent && !_ctrlHeld) {
-        _ctrlHeld = true;
-        if (_isMyTurn && !_isRecording) {
-          _onPttStart();
-          return true;
-        }
-      }
-      if (event is KeyUpEvent) {
-        _ctrlHeld = false;
-        if (_isRecording) {
-          _onPttEnd();
-          return true;
-        }
+    if (event is KeyUpEvent) {
+      _ctrlHeld = false;
+      if (_micControlMode == 'hold_ctrl' && _isRecording) {
+        _onPttEnd();
+        return true;
       }
       return false;
     }
 
     if (event is! KeyDownEvent) return false;
+    if (_ctrlHeld) return false;
+    _ctrlHeld = true;
+
+    if (_micControlMode == 'hold_ctrl') {
+      if (_isMyTurn && !_isRecording) {
+        _onPttStart();
+        return true;
+      }
+      return false;
+    }
+
+    // double_ctrl 模式下也允许单击 Ctrl 直接开关录音，降低时序丢失导致的“按了没反应”。
+    if ((_isMyTurn || _handApprovedToSpeak || _pendingHumanTurn) &&
+        !_isRecording) {
+      _onPttStart();
+      return true;
+    }
+    if (_isRecording) {
+      _onPttEnd();
+      return true;
+    }
 
     final now = DateTime.now();
     if (_lastCtrlTapAt == null ||
@@ -231,25 +292,67 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final serverUrl = settings?.serverUrl ?? 'http://localhost:8001';
     final ttsProvider = settings?.ttsProvider ?? 'browser';
     final asrProvider = settings?.asrProvider ?? 'browser';
+    _asrProviderId = asrProvider;
 
     _ttsService = createTtsService(ttsProvider, serverUrl: serverUrl);
     _asrService = createAsrService(asrProvider, serverUrl: serverUrl);
+    if (ttsProvider != 'browser') {
+      _browserFallbackTts = createTtsService('browser', serverUrl: serverUrl);
+    } else {
+      _browserFallbackTts = null;
+    }
+    _reportAsrStatus(
+      'initialized',
+      available: _asrService.isAvailable,
+      listening: _asrService.isListening,
+    );
 
     // 监听 ASR 转录结果：流式写入草稿，最终片段用于收尾。
     _asrService.transcriptionStream.listen((result) {
       final chunk = result.text.trim();
       if (chunk.isEmpty) return;
+      if (_awaitingAsrFirstPacket && _asrListenStartAt != null) {
+        final firstPacketMs =
+            DateTime.now().difference(_asrListenStartAt!).inMilliseconds;
+        _awaitingAsrFirstPacket = false;
+        _asrFirstPacketSamples += 1;
+        _asrFirstPacketTotalMs += firstPacketMs.toDouble();
+        _pushSeriesSample(_asrFirstPacketSeries, firstPacketMs.toDouble());
+        _reportAsrStatus(
+          'first_packet',
+          textLen: chunk.length,
+          isFinal: result.isFinal,
+          listening: _asrService.isListening,
+        );
+      }
+      _reportAsrStatus(
+        result.isFinal ? 'chunk_final' : 'chunk_partial',
+        textLen: chunk.length,
+        isFinal: result.isFinal,
+        listening: _asrService.isListening,
+      );
       setState(() {
         _sttPartialText = result.isFinal
             ? chunk
             : _mergeStreamingDraft(_sttPartialText, chunk);
+        if (_sttPartialText.trim().isNotEmpty) {
+          _lastNonEmptySttText = _sttPartialText.trim();
+        }
         if (_isRecording) {
           _centerSpeaker = widget.humanName;
           _centerMessage = _sttPartialText;
         }
       });
       _debugSubtitleLog(triggerRole: widget.humanName, note: 'stt streaming');
+    }, onError: (error) {
+      _reportAsrStatus(
+        'stream_error',
+        listening: _asrService.isListening,
+        error: error.toString(),
+      );
     });
+
+    _prepareUpcomingPipeline(reason: 'voice-init', includeAsrWarmup: true);
   }
 
   String _mergeStreamingDraft(String current, String incoming) {
@@ -293,8 +396,135 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     return _asrService.refineTranscript(polished);
   }
 
+  void _reportAsrStatus(
+    String status, {
+    bool? available,
+    bool? listening,
+    int? textLen,
+    bool? isFinal,
+    String? error,
+  }) {
+    _wsClient.sendAsrStatus(
+      speaker: widget.humanName,
+      provider: _asrProviderId,
+      status: status,
+      available: available,
+      listening: listening,
+      textLen: textLen,
+      isFinal: isFinal,
+      error: error,
+    );
+    _pushPhaseTelemetry(
+      source: 'frontend_asr',
+      phase: 'human_speaking',
+      reason: 'asr_$status',
+      recovery: false,
+      speaker: widget.humanName,
+    );
+  }
+
   bool _hasOngoingSpeechPlayback() {
     return _ttsPlaying || _ttsService.isSpeaking || _isRecording;
+  }
+
+  bool _hasBlockingPlaybackForHumanTurn() {
+    return _ttsPlaying ||
+        _ttsService.isSpeaking ||
+        _ttsQueue.isNotEmpty ||
+        _isRecording;
+  }
+
+  void _scheduleBackgroundTask(Future<void> Function() task) {
+    if (_disposed) return;
+    _bgTaskQueue.add(task);
+    _pumpBackgroundTaskQueue();
+  }
+
+  void _pumpBackgroundTaskQueue() {
+    if (_disposed) return;
+    const maxConcurrent = 2;
+    while (_bgTaskRunning < maxConcurrent && _bgTaskQueue.isNotEmpty) {
+      final task = _bgTaskQueue.removeAt(0);
+      _bgTaskRunning += 1;
+      Future<void>(() async {
+        try {
+          await task();
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('[RuntimePipeline] background task failed: $e');
+          }
+        } finally {
+          _bgTaskRunning = (_bgTaskRunning - 1).clamp(0, maxConcurrent);
+          _pumpBackgroundTaskQueue();
+        }
+      });
+    }
+  }
+
+  List<({String text, String? voice})> _collectUpcomingTtsItems({
+    int limit = 3,
+  }) {
+    if (_ttsQueue.isEmpty || limit <= 0) return const [];
+    final count = _ttsQueue.length < limit ? _ttsQueue.length : limit;
+    return List.generate(
+      count,
+      (i) => (text: _ttsQueue[i].text, voice: _ttsQueue[i].voice),
+    );
+  }
+
+  void _prepareUpcomingPipeline({
+    required String reason,
+    bool includeAsrWarmup = false,
+  }) {
+    final now = DateTime.now();
+
+    final upcoming = _collectUpcomingTtsItems(limit: 3);
+    if (upcoming.isNotEmpty &&
+        now.difference(_lastPrefetchAt).inMilliseconds >= 120) {
+      _lastPrefetchAt = now;
+      _scheduleBackgroundTask(() async {
+        await _ttsService.prefetchBatch(upcoming, maxConcurrent: 2);
+      });
+    }
+
+    if (includeAsrWarmup &&
+        now.difference(_lastAsrWarmupAt).inMilliseconds >= 1500) {
+      _lastAsrWarmupAt = now;
+      _scheduleBackgroundTask(() async {
+        await _asrService.warmup();
+      });
+    }
+
+    if (kDebugMode) {
+      debugPrint(
+          '[RuntimePipeline] reason=$reason prefetch=${upcoming.length} asrWarmup=$includeAsrWarmup');
+    }
+  }
+
+  double get _avgTtsStartupMs {
+    if (_ttsStartupSamples == 0) return 0;
+    return _ttsStartupTotalMs / _ttsStartupSamples;
+  }
+
+  double get _avgAsrFirstPacketMs {
+    if (_asrFirstPacketSamples == 0) return 0;
+    return _asrFirstPacketTotalMs / _asrFirstPacketSamples;
+  }
+
+  TtsPerfSnapshot get _ttsPerf => _ttsService.getPerfSnapshot();
+
+  double get _prefetchHitRatePercent {
+    final total = _ttsPerf.playbackCount;
+    if (total == 0) return 0;
+    return (_ttsPerf.prefetchHit * 100.0) / total;
+  }
+
+  void _pushSeriesSample(List<double> target, double value) {
+    if (value.isNaN || value.isInfinite) return;
+    target.add(value);
+    if (target.length > 30) {
+      target.removeAt(0);
+    }
   }
 
   bool get _debugSubtitleLogEnabled => kDebugMode;
@@ -307,13 +537,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   void _debugSubtitleLog({required String triggerRole, required String note}) {
     if (!_debugSubtitleLogEnabled) return;
     debugPrint(
-      '[SubtitleSync] trigger=$triggerRole current=$_currentSpeaker owner=$_subtitleOwner token=$_subtitleToken note=$note',
+      '[SubtitleSync] trigger=$triggerRole current=$_currentSpeaker owner=$_subtitleOwner token=$_subtitleToken subtitleSession=$_subtitleSessionId activeTtsSession=$_activeTtsSessionId note=$note',
     );
   }
 
-  void _acquireSubtitleToken(String owner) {
+  void _acquireSubtitleToken(String owner, {String subtitleSessionId = ''}) {
     _subtitleToken += 1;
     _subtitleOwner = owner;
+    _subtitleSessionId = subtitleSessionId;
     _debugSubtitleLog(triggerRole: owner, note: 'acquire');
   }
 
@@ -328,6 +559,71 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     required int token,
   }) {
     return token == _subtitleToken && triggerRole == _currentSpeaker;
+  }
+
+  int _estimateSubtitleLineCount(
+    BuildContext context,
+    String text, {
+    required double maxWidth,
+    required TextStyle style,
+    int maxLines = 2,
+  }) {
+    if (text.trim().isEmpty) return 0;
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: Directionality.of(context),
+      maxLines: maxLines,
+    )..layout(maxWidth: maxWidth);
+    final metrics = tp.computeLineMetrics();
+    if (metrics.isEmpty) return 0;
+    return metrics.length > maxLines ? maxLines : metrics.length;
+  }
+
+  String _nextTtsPlaybackSessionId() {
+    _ttsSessionSeq += 1;
+    return 'tts-$_ttsSessionSeq-${DateTime.now().microsecondsSinceEpoch}';
+  }
+
+  String _extractEventPlaybackSessionId(Map<String, dynamic>? data) {
+    if (data == null) return '';
+    const sessionKeys = [
+      'playback_session_id',
+      'tts_session_id',
+      'session_id',
+      'subtitle_session_id',
+    ];
+    for (final key in sessionKeys) {
+      final v = data[key];
+      if (v == null) continue;
+      final s = v.toString().trim();
+      if (s.isNotEmpty) return s;
+    }
+    return '';
+  }
+
+  bool _isRealtimeSessionMatched({
+    required Map<String, dynamic>? data,
+    required String triggerRole,
+    required String eventType,
+  }) {
+    if (_activeTtsSessionId.isEmpty) return true;
+    final incoming = _extractEventPlaybackSessionId(data);
+    if (incoming.isEmpty) {
+      _debugSubtitleLog(
+        triggerRole: triggerRole,
+        note: '$eventType pass(no-session)',
+      );
+      return true;
+    }
+    final matched = incoming == _activeTtsSessionId;
+    if (!matched) {
+      _debugSubtitleLog(
+        triggerRole: triggerRole,
+        note:
+            '$eventType blocked(session-mismatch incoming=$incoming active=$_activeTtsSessionId)',
+      );
+    }
+    return matched;
   }
 
   void _showStatusToast(String message, {bool isError = false}) {
@@ -381,48 +677,203 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   void _activateHumanTurnNow({String speaker = ''}) {
     _cancelTurnCountdown();
     _cancelMaxSpeechTimer();
+    _cancelPendingHumanTurnGuard();
+    final activateSpeaker = speaker.isEmpty ? widget.humanName : speaker;
+    _commander.markHumanTurnActivated(speaker: activateSpeaker);
+    _deferredAutoSkipTimer?.cancel();
+    _deferredAutoSkipTimer = null;
+    _humanTurnActivatedAt = DateTime.now();
     setState(() {
-      _pendingHumanTurn = false;
-      _pendingHumanSpeaker = '';
       _isMyTurn = true;
       _isThinking = false;
       _thinkingController.stop();
       _sttPartialText = '';
       _clearSubtitleBeforeSpeakerSwitch(
           speaker.isEmpty ? widget.humanName : speaker);
-      _showTextInputPanel = true; // 显示文字输入面板
-      _statusText = '轮到你了：点击麦克风说话，或在右侧输入文字';
+      _statusText = '轮到你了：请按住麦克风讲话';
       _glowController.repeat(reverse: true);
-      if (speaker.isNotEmpty) {
-        _currentSpeaker = speaker;
-      }
+      _currentSpeaker = activateSpeaker;
     });
     _keyboardFocusNode.requestFocus();
     _startTurnCountdown();
+    _prepareUpcomingPipeline(
+        reason: 'activate-human-turn', includeAsrWarmup: true);
   }
 
   void _deferHumanTurn({String speaker = ''}) {
+    _cancelTurnCountdown();
+    _cancelMaxSpeechTimer();
+    _commander.onHumanInputRequested(
+      speaker: speaker,
+      hasOngoingSpeechPlayback: true,
+    );
     setState(() {
-      _pendingHumanTurn = true;
-      _pendingHumanSpeaker = speaker;
       _statusText = '等待上一位发言播放完成，即将轮到你...';
       _isMyTurn = false;
+    });
+    _schedulePendingHumanTurnGuard();
+    _prepareUpcomingPipeline(
+        reason: 'defer-human-turn', includeAsrWarmup: true);
+  }
+
+  Duration _remainingAutoSkipGuard() {
+    final started = _humanTurnActivatedAt;
+    if (started == null) return Duration.zero;
+    final elapsed = DateTime.now().difference(started);
+    if (elapsed >= _minHumanTurnAutoSkipWindow) return Duration.zero;
+    return _minHumanTurnAutoSkipWindow - elapsed;
+  }
+
+  bool _scheduleAutoSkipWhenGuardReady({
+    required String reason,
+    bool addUserMessage = true,
+  }) {
+    final remain = _remainingAutoSkipGuard();
+    if (remain <= Duration.zero) {
+      return false;
+    }
+    _deferredAutoSkipTimer?.cancel();
+    _deferredAutoSkipTimer = Timer(remain, () {
+      if (!mounted) return;
+      if (_isMyTurn && !_isRecording) {
+        _onSkipTurn(
+          reason: '$reason（保底等待后执行）',
+          addUserMessage: addUserMessage,
+          isAuto: false,
+        );
+      }
+    });
+    _showStatusToast('已进入保底发言窗口，${remain.inSeconds}秒后才会自动跳过');
+    return true;
+  }
+
+  void _schedulePendingHumanTurnGuard(
+      {Duration delay = const Duration(seconds: 5)}) {
+    _pendingHumanTurnGuardTimer?.cancel();
+    _pendingHumanTurnGuardTimer = Timer(delay, () {
+      if (!mounted) return;
+
+      if (_commander.shouldForceActivatePending(
+        hasOngoingSpeechPlayback: _hasBlockingPlaybackForHumanTurn(),
+      )) {
+        final speaker = _pendingHumanSpeaker.isEmpty
+            ? widget.humanName
+            : _pendingHumanSpeaker;
+        _pushPhaseTelemetry(
+          source: 'frontend',
+          phase: 'human_speaking',
+          reason: 'pending_human_turn_guard_force_activate',
+          recovery: true,
+          speaker: speaker,
+        );
+        _showStatusToast('检测到发言切换延迟，已自动恢复到你的发言回合');
+        _activateHumanTurnNow(speaker: speaker);
+        return;
+      }
+
+      if (_pendingHumanTurn) {
+        _schedulePendingHumanTurnGuard(delay: const Duration(seconds: 2));
+      }
+    });
+  }
+
+  void _cancelPendingHumanTurnGuard() {
+    _pendingHumanTurnGuardTimer?.cancel();
+    _pendingHumanTurnGuardTimer = null;
+  }
+
+  void _scheduleTtsPumpGuard(
+      {Duration delay = const Duration(milliseconds: 900)}) {
+    _ttsPumpGuardTimer?.cancel();
+    _ttsPumpGuardTimer = Timer(delay, () {
+      if (!mounted) return;
+      final shouldPump = _ttsQueue.isNotEmpty &&
+          !_ttsPlaying &&
+          !_isPaused &&
+          !_isMyTurn &&
+          !_isRecording;
+      if (shouldPump) {
+        _pushPhaseTelemetry(
+          source: 'frontend',
+          phase: 'ai_speaking',
+          reason: 'tts_pump_guard_recover',
+          recovery: true,
+          speaker: _currentSpeaker,
+        );
+        _playNextTts();
+      }
+    });
+  }
+
+  void _pushPhaseTelemetry({
+    required String source,
+    required String phase,
+    required String reason,
+    required bool recovery,
+    String speaker = '',
+    int? eventSeq,
+    String designateStage = '',
+    String designateTarget = '',
+    int sendDropTotal = 0,
+    String sendDropReasons = '',
+    String sendDropLast = '',
+  }) {
+    final entry = _PhaseTelemetryEntry(
+      at: DateTime.now(),
+      source: source,
+      phase: phase,
+      reason: reason,
+      recovery: recovery,
+      speaker: speaker,
+      eventSeq: eventSeq,
+      designateStage: designateStage,
+      designateTarget: designateTarget,
+      sendDropTotal: sendDropTotal,
+      sendDropReasons: sendDropReasons,
+      sendDropLast: sendDropLast,
+    );
+    setState(() {
+      _phaseTelemetryHistory.insert(0, entry);
+      if (_phaseTelemetryHistory.length > _maxPhaseTelemetryHistory) {
+        _phaseTelemetryHistory.removeLast();
+      }
     });
   }
 
   void _tryActivatePendingHumanTurn() {
     if (!_pendingHumanTurn) return;
-    if (_hasOngoingSpeechPlayback()) return;
+    if (_hasBlockingPlaybackForHumanTurn()) return;
     _activateHumanTurnNow(speaker: _pendingHumanSpeaker);
   }
 
   String _friendlyError(String raw) {
     final s = raw.trim();
+    // 空消息或默认"未知错误" → 静默忽略，不打扰用户
+    if (s.isEmpty || s == '未知错误') {
+      return '';
+    }
+    // ASGI 内部消息/连接关闭后的发送尝试 → 静默忽略
+    if (s.contains("Unexpected ASGI message") || s.contains("websocket.send")) {
+      return '';
+    }
+    // WebSocket 解析失败（前端产生的包装错误） → 静默忽略
+    if (s.contains('WebSocket 事件解析失败')) {
+      return '';
+    }
+    // 讨论流程中的队列/输入通道问题 → 友好提示
     if (s.contains('输入队列不存在') || s.contains('Failed to get user input')) {
       return '用户输入通道暂时不可用，系统已自动跳过本轮并继续讨论。';
     }
     if (s.contains('timeout') || s.contains('超时')) {
       return '等待输入超时，系统已自动进入下一位发言。';
+    }
+    // 讨论出现异常 → 简洁提示（避免展示长堆栈）
+    if (s.contains('讨论出现异常')) {
+      return '讨论过程出现短暂异常，系统正在自动恢复。';
+    }
+    // 流程停滞恢复通知 → 忽略（不是真正错误）
+    if (s.contains('自动恢复调度') || s.contains('自动跳过并继续')) {
+      return '';
     }
     return s;
   }
@@ -620,6 +1071,18 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }
 
   void _handleEvent(WsEvent event) {
+    final seq = event.eventSeq;
+    if (seq != null) {
+      if (seq <= _lastEventSeq) {
+        if (kDebugMode) {
+          debugPrint(
+              '[SessionSeq] drop stale event seq=$seq last=$_lastEventSeq type=${event.eventType.name}');
+        }
+        return;
+      }
+      _lastEventSeq = seq;
+    }
+
     switch (event.eventType) {
       case WsEventType.message:
         final data = event.data;
@@ -637,8 +1100,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             // - 需要TTS的消息，不在接收时抢先更新字幕；
             // - 在真正开始播放时再更新中心字幕，确保音字同时出现。
             if (!shouldSpeak) {
-              _centerMessage = content;
-              _centerSpeaker = source;
+              final isSystemLike = msgType == 'system' || source == '系统';
+              // 用户轮次期间，避免其他角色/系统字幕抢占显示。
+              if (!isSystemLike &&
+                  !_ttsPlaying &&
+                  (!_isMyTurn || source == widget.humanName)) {
+                _centerMessage = content;
+                _centerSpeaker = source;
+              }
             }
 
             // Clear thinking state when message arrives (f)
@@ -656,24 +1125,54 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
           _buildParticipants();
         }
+        break;
       case WsEventType.turnChange:
         final data = event.data;
         if (data != null) {
           final speaker = data['speaker'] ?? '';
           final isHuman = data['is_human'] ?? false;
+          final sessionMatched = _isRealtimeSessionMatched(
+              data: data, triggerRole: speaker, eventType: 'turn_change');
+
+          if (!sessionMatched) {
+            setState(() {
+              _statusText = '$speaker 排队发言中...';
+              _isThinking = true;
+              _thinkingController.repeat();
+            });
+            _prepareUpcomingPipeline(
+              reason: 'turn-change-session-blocked:$speaker',
+              includeAsrWarmup: true,
+            );
+            return;
+          }
 
           if (isHuman &&
               speaker == widget.humanName &&
-              _hasOngoingSpeechPlayback()) {
+              _hasBlockingPlaybackForHumanTurn()) {
             _deferHumanTurn(speaker: speaker);
             _buildParticipants();
+            return;
+          }
+
+          // 严格语音/字幕同步：若上一位仍在播报或队列未清空，不提前切换到下一位 AI 的视觉状态。
+          if (!isHuman &&
+              (_hasOngoingSpeechPlayback() || _ttsQueue.isNotEmpty)) {
+            setState(() {
+              _statusText = '$speaker 排队发言中...';
+              _isThinking = true;
+              _thinkingController.repeat();
+            });
+            _prepareUpcomingPipeline(
+              reason: 'turn-change-queued:$speaker',
+              includeAsrWarmup: true,
+            );
             return;
           }
 
           _cancelTurnCountdown();
           _cancelMaxSpeechTimer();
           setState(() {
-            _clearSubtitleBeforeSpeakerSwitch(speaker);
             _currentSpeaker = speaker;
             _isMyTurn = isHuman && speaker == widget.humanName;
             _hasRaisedHand = false;
@@ -681,25 +1180,26 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             if (_isMyTurn) {
               _isThinking = false;
               _thinkingController.stop();
-              _showTextInputPanel = true;
-              _statusText = '轮到你了：点击麦克风说话，或在右侧输入文字';
+              _statusText = '轮到你了：请按住麦克风讲话';
               _glowController.repeat(reverse: true);
               _keyboardFocusNode.requestFocus();
               _startTurnCountdown();
             } else if (isHuman) {
               _isThinking = false;
               _thinkingController.stop();
-              _showTextInputPanel = false;
               _statusText = '$speaker 正在发言...';
               _glowController.stop();
             } else {
-              _showTextInputPanel = false;
               _isThinking = true;
               _thinkingController.repeat();
               _statusText = '$speaker 正在思考...';
               _glowController.stop();
             }
           });
+          _prepareUpcomingPipeline(
+            reason: 'turn-change:$speaker',
+            includeAsrWarmup: !isHuman,
+          );
           _buildParticipants();
           // 确保 TTS 队列在角色切换后继续播放（修复跳过后无声音 bug）
           if (!_ttsPlaying && _ttsQueue.isNotEmpty) {
@@ -710,11 +1210,23 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             });
           }
         }
+        break;
       case WsEventType.stream:
         final data = event.data;
         if (data != null) {
           final source = (data['source'] ?? '').toString();
           final content = (data['content'] ?? '').toString();
+          // 语音与字幕同步：AI 流式文本不提前渲染，统一在 TTS 开始时显示。
+          if (source != widget.humanName) {
+            _isRealtimeSessionMatched(
+              data: data,
+              triggerRole: source,
+              eventType: 'stream',
+            );
+            _debugSubtitleLog(
+                triggerRole: source, note: 'stream blocked for non-human');
+            break;
+          }
           final token = _subtitleToken;
           if (source.isNotEmpty && content.isNotEmpty) {
             if (_canRenderSubtitle(triggerRole: source, token: token)) {
@@ -742,6 +1254,52 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             setState(() => _statusText = '状态: $newState');
           }
         }
+        break;
+      case WsEventType.phaseTelemetry:
+        final data = event.data;
+        if (data != null) {
+          final obs = data['send_observability'];
+          int sendDropTotal = 0;
+          String sendDropReasons = '';
+          String sendDropLast = '';
+          if (obs is Map) {
+            final totalRaw = obs['drop_total'];
+            if (totalRaw is num) {
+              sendDropTotal = totalRaw.toInt();
+            }
+            final reasonsRaw = obs['drop_reasons'];
+            if (reasonsRaw is Map) {
+              final pairs = <String>[];
+              reasonsRaw.forEach((k, v) {
+                pairs.add('$k=$v');
+              });
+              sendDropReasons = pairs.join(', ');
+            }
+            final lastRaw = obs['last_drop'];
+            if (lastRaw is Map) {
+              final lastReason = (lastRaw['reason'] ?? '').toString();
+              final lastType = (lastRaw['event_type'] ?? '').toString();
+              if (lastReason.isNotEmpty || lastType.isNotEmpty) {
+                sendDropLast =
+                    '$lastReason${lastType.isNotEmpty ? ' ($lastType)' : ''}';
+              }
+            }
+          }
+          _pushPhaseTelemetry(
+            source: (data['source'] ?? 'backend').toString(),
+            phase: (data['phase'] ?? '').toString(),
+            reason: (data['reason'] ?? 'phase_transition').toString(),
+            recovery: data['recovery'] == true,
+            speaker: (data['speaker'] ?? '').toString(),
+            eventSeq: event.eventSeq,
+            designateStage: (data['designate_stage'] ?? '').toString(),
+            designateTarget: (data['designate_target'] ?? '').toString(),
+            sendDropTotal: sendDropTotal,
+            sendDropReasons: sendDropReasons,
+            sendDropLast: sendDropLast,
+          );
+        }
+        break;
       case WsEventType.system:
         final data = event.data;
         if (data != null) {
@@ -759,16 +1317,25 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             ));
           });
         }
+        break;
       case WsEventType.humanInputRequested:
-        if (_hasOngoingSpeechPlayback()) {
+        final command = _commander.onHumanInputRequested(
+          speaker: widget.humanName,
+          hasOngoingSpeechPlayback: _hasBlockingPlaybackForHumanTurn(),
+        );
+        if (command == HumanTurnCommand.defer) {
           _deferHumanTurn(speaker: widget.humanName);
-        } else {
+        } else if (command == HumanTurnCommand.activateNow) {
           _activateHumanTurnNow(speaker: widget.humanName);
         }
+        break;
       case WsEventType.apiError:
         final data = event.data;
         final errMsg = data?['message'] ?? data?['original_error'] ?? 'AI 服务错误';
         final friendly = _friendlyError(errMsg.toString());
+        if (friendly.isEmpty) {
+          break;
+        }
         setState(() {
           _lastErrorMessage = friendly;
           _statusText = friendly;
@@ -779,6 +1346,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         final data = event.data;
         final errMsg = data?['message'] ?? data?['original_error'] ?? '未知错误';
         final friendly = _friendlyError(errMsg.toString());
+        if (friendly.isEmpty) {
+          break;
+        }
         setState(() {
           _lastErrorMessage = friendly;
           _statusText = '错误: $_lastErrorMessage';
@@ -798,68 +1368,107 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         final data = event.data;
         if (data != null) {
           final interrupter = data['interrupter'] ?? '';
+          final approvedBy = (data['approved_by'] ?? '李老师').toString();
+          final approved = data['approved'] == true;
+          final mineApproved = approved && interrupter == widget.humanName;
+          final command = _commander.onInterruptApprovedForHuman(
+            mineApproved: mineApproved,
+            speaker: widget.humanName,
+            hasOngoingSpeechPlayback: _hasBlockingPlaybackForHumanTurn(),
+          );
           setState(() {
             _messages.add(ChatMessage(
-              source: '系统',
-              content: '$interrupter 举手请求发言',
+              source: approvedBy,
+              content: '$interrupter 同学，请先发言。',
               type: 'system',
             ));
+            if (mineApproved && command == HumanTurnCommand.defer) {
+              _statusText = '李老师已同意你先发言，请准备讲话';
+            }
           });
+          if (mineApproved && command == HumanTurnCommand.activateNow) {
+            _activateHumanTurnNow(speaker: widget.humanName);
+          } else if (mineApproved && command == HumanTurnCommand.defer) {
+            _schedulePendingHumanTurnGuard();
+          }
           _buildParticipants();
         }
         break;
     }
   }
 
-  // ── 文本输入 ────────────────────────────────────────────────────────────────
-
-  void _sendMessage() {
-    final text = _inputController.text.trim();
-    if (text.isEmpty) {
-      _onSkipTurn(reason: '输入为空，已自动跳过本轮');
-      return;
-    }
-
-    _cancelTurnCountdown();
-    _cancelMaxSpeechTimer();
-    _wsClient.sendHumanInput(speaker: widget.humanName, content: text);
-
-    setState(() {
-      _messages.add(ChatMessage(source: widget.humanName, content: text));
-      _isMyTurn = false;
-      _showTextInputPanel = false;
-      _statusText = '等待其他人发言...';
-      _centerMessage = text;
-      _centerSpeaker = widget.humanName;
-    });
-
-    _inputController.clear();
-
-    // 字幕保留（需求2）：保留时间 = min(2~4秒, 发言时长×0.5)，不少于1秒
-    _startSubtitleRetain(text);
-  }
+  // ── 文本输入已完全移除：本会话为纯语音模式 ─────────────────────────────────
 
   // ── Push-to-Talk ────────────────────────────────────────────────────────────
 
   void _onPttStart() {
+    if (!(_isMyTurn || _handApprovedToSpeak || _pendingHumanTurn)) {
+      _showStatusToast('当前还未轮到你发言');
+      return;
+    }
+    if (!_asrService.isAvailable) {
+      _reportAsrStatus(
+        'not_available',
+        available: false,
+        listening: _asrService.isListening,
+      );
+      setState(() {
+        _statusText = '当前语音识别服务不可用，请在设置中切换可用 ASR';
+      });
+      _showStatusToast('语音识别服务不可用，请先在设置页完成可用性测试');
+      return;
+    }
     _cancelTurnCountdown();
     _speechFinalizeTimer?.cancel();
+    _deferredAutoSkipTimer?.cancel();
+    _deferredAutoSkipTimer = null;
 
-    // 需求2：如果有未提交的文字，切换到语音模式时自动清除
-    if (_inputController.text.trim().isNotEmpty) {
-      _inputController.clear();
-    }
+    // 需求2：纯语音模式，不存在文字输入
 
     setState(() {
       _isRecording = true;
       _centerSpeaker = widget.humanName;
       _centerMessage = '';
-      _showTextInputPanel = false; // 语音模式隐藏文字输入
+      _sttPartialText = '';
+      _lastNonEmptySttText = '';
     });
     _acquireSubtitleToken(widget.humanName);
     _micController.repeat(reverse: true);
     _wsClient.sendPushToTalkStart(speaker: widget.humanName);
-    _asrService.startListening();
+    _reportAsrStatus(
+      'start_requested',
+      available: _asrService.isAvailable,
+      listening: _asrService.isListening,
+    );
+    unawaited(() async {
+      await _asrService.startListening();
+      _reportAsrStatus(
+        'start_result',
+        available: _asrService.isAvailable,
+        listening: _asrService.isListening,
+      );
+      if (!mounted) return;
+      // 若语音识别未真正启动，不要继续假录音状态，提示用户直接重试语音。
+      if (!_asrService.isListening) {
+        _cancelMaxSpeechTimer();
+        _awaitingAsrFirstPacket = false;
+        _wsClient.sendPushToTalkEnd(speaker: widget.humanName);
+        _micController.stop();
+        _micController.reset();
+        _reportAsrStatus(
+          'start_failed',
+          available: _asrService.isAvailable,
+          listening: _asrService.isListening,
+        );
+        setState(() {
+          _isRecording = false;
+          _statusText = '语音识别未成功启动，请重试录音';
+        });
+        _showStatusToast('语音识别启动失败，请重试录音');
+      }
+    }());
+    _asrListenStartAt = DateTime.now();
+    _awaitingAsrFirstPacket = true;
     _speechStartTime = DateTime.now();
     _startMaxSpeechTimer();
   }
@@ -871,45 +1480,103 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _micController.stop();
     _micController.reset();
     _wsClient.sendPushToTalkEnd(speaker: widget.humanName);
+    _reportAsrStatus('stop_requested', listening: _asrService.isListening);
     _asrService.stopListening();
+    _reportAsrStatus('stop_called', listening: _asrService.isListening);
+    _awaitingAsrFirstPacket = false;
 
     _speechFinalizeTimer?.cancel();
     _speechFinalizeTimer = Timer(const Duration(milliseconds: 800), () async {
-      if (!mounted) return;
+      Future<void> finalizeWithRetry() async {
+        if (!mounted) return;
+        String rawText = (_sttPartialText.trim().isNotEmpty
+                ? _sttPartialText.trim()
+                : _lastNonEmptySttText.trim())
+            .trim();
 
-      final rawText = _sttPartialText;
-      final refined = await _refineTranscript(rawText);
-      if (!mounted) return;
-      setState(() => _sttPartialText = '');
+        // 给 ASR 最终包更长等待窗口，避免“录完即判空”导致误跳过。
+        final deadline = DateTime.now().add(const Duration(seconds: 8));
+        while (rawText.isEmpty && DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 350));
+          if (!mounted) return;
+          rawText = (_sttPartialText.trim().isNotEmpty
+                  ? _sttPartialText.trim()
+                  : _lastNonEmptySttText.trim())
+              .trim();
+        }
 
-      // 只要有任何文本（流式草稿或精炼结果），就提交；都为空才跳过
-      if (refined.trim().isEmpty && rawText.trim().isEmpty) {
-        _onSkipTurn(reason: '未识别到有效语音，已自动跳过本轮', addUserMessage: false);
-        return;
+        final refined =
+            rawText.isNotEmpty ? await _refineTranscript(rawText) : '';
+        if (!mounted) return;
+        setState(() => _sttPartialText = '');
+
+        // 若 ASR 仍为空，不自动跳过，保留用户回合并允许继续语音重试。
+        if (refined.trim().isEmpty && rawText.isEmpty) {
+          _reportAsrStatus(
+            'final_empty',
+            listening: _asrService.isListening,
+            textLen: 0,
+          );
+          setState(() {
+            _isMyTurn = true;
+            _statusText = '未识别到语音，请重新录音';
+          });
+          _showStatusToast('未识别到有效语音，请重试录音');
+          _startTurnCountdown();
+          return;
+        }
+        final submitText = refined.trim().isNotEmpty ? refined.trim() : rawText;
+        _reportAsrStatus(
+          'submitted',
+          listening: _asrService.isListening,
+          textLen: submitText.length,
+          isFinal: true,
+        );
+
+        _wsClient.sendHumanInput(
+            speaker: widget.humanName, content: submitText);
+        setState(() {
+          _messages
+              .add(ChatMessage(source: widget.humanName, content: submitText));
+          _isMyTurn = false;
+          _statusText = '等待其他人发言...';
+          _centerMessage = submitText;
+          _centerSpeaker = widget.humanName;
+        });
+        _commander.markHumanTurnCompleted();
+        _cancelPendingHumanTurnGuard();
+
+        // 字幕保留
+        _startSubtitleRetain(submitText);
+        _holdAiUntilHumanSubtitleDone(submitText);
       }
-      final submitText = refined.trim().isNotEmpty ? refined : rawText.trim();
 
-      _wsClient.sendHumanInput(speaker: widget.humanName, content: submitText);
-      setState(() {
-        _messages
-            .add(ChatMessage(source: widget.humanName, content: submitText));
-        _isMyTurn = false;
-        _showTextInputPanel = false;
-        _statusText = '等待其他人发言...';
-        _centerMessage = submitText;
-        _centerSpeaker = widget.humanName;
-      });
-
-      // 字幕保留
-      _startSubtitleRetain(submitText);
+      await finalizeWithRetry();
     });
   }
 
   // ── 跳过本轮发言 ────────────────────────────────────────────────────────────
 
-  void _onSkipTurn({String? reason, bool addUserMessage = true}) {
+  void _onSkipTurn({
+    String? reason,
+    bool addUserMessage = true,
+    bool isAuto = false,
+  }) {
+    if (isAuto) {
+      final blocked = _scheduleAutoSkipWhenGuardReady(
+        reason: reason ?? '自动跳过',
+        addUserMessage: addUserMessage,
+      );
+      if (blocked) {
+        return;
+      }
+    }
     _cancelTurnCountdown();
     _cancelMaxSpeechTimer();
+    _deferredAutoSkipTimer?.cancel();
+    _deferredAutoSkipTimer = null;
+    _activeTtsItem = null;
+    _activeTtsSessionId = '';
     _wsClient.sendHumanInput(speaker: widget.humanName, content: '（跳过）');
     setState(() {
       if (addUserMessage) {
@@ -923,19 +1590,28 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             .add(ChatMessage(source: '系统', content: reason, type: 'system'));
       }
       _isMyTurn = false;
-      _showTextInputPanel = false;
       _statusText = reason ?? '等待其他人发言...';
     });
     if (reason != null && reason.isNotEmpty) {
       _showStatusToast(reason);
     }
+    _humanTurnActivatedAt = null;
+    _humanSubtitleLockUntil = null;
+    _humanSubtitleLockTimer?.cancel();
+    _awaitingAsrFirstPacket = false;
     // 跳过后确保 TTS 队列继续处理（修复跳过后无声音的 bug）
-    if (_ttsQueue.isNotEmpty && !_ttsPlaying) {
+    if (_commander.onAutoSkipShouldPumpTts(
+      hasQueuedTts: _ttsQueue.isNotEmpty,
+      isTtsPlaying: _ttsPlaying,
+    )) {
+      _cancelPendingHumanTurnGuard();
       Future.delayed(const Duration(milliseconds: 500), () {
         if (mounted && _ttsQueue.isNotEmpty && !_ttsPlaying) {
           _playNextTts();
         }
       });
+    } else {
+      _cancelPendingHumanTurnGuard();
     }
   }
 
@@ -943,16 +1619,19 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   void _startTurnCountdown() {
     _cancelTurnCountdown();
-    setState(() => _turnCountdown = 10);
+    setState(() => _turnCountdown = 30);
     _turnTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
         timer.cancel();
         return;
       }
+      if (_isRecording || _sttPartialText.trim().isNotEmpty) {
+        return;
+      }
       setState(() => _turnCountdown--);
       if (_turnCountdown <= 0) {
         timer.cancel();
-        _onSkipTurn(reason: '10秒未开始语音发言，已自动跳过');
+        _onSkipTurn(reason: '30秒未开始语音发言，已自动跳过', isAuto: true);
       }
     });
   }
@@ -976,14 +1655,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           _statusText = '发言超过3分钟，已自动提交';
         });
         _showStatusToast('发言超过3分钟，已自动提交');
-      } else if (_showTextInputPanel &&
-          _inputController.text.trim().isNotEmpty) {
-        // 自动提交文字
-        _sendMessage();
-        setState(() {
-          _statusText = '输入超过3分钟，已自动提交';
-        });
-        _showStatusToast('输入超过3分钟，已自动提交');
       }
     });
   }
@@ -1013,13 +1684,18 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _speechStartTime = null;
   }
 
-  // ── 文字输入开始时取消10秒计时（需求2）────────────────────────────────────────
-
-  void _onTextInputChanged() {
-    if (_inputController.text.trim().isNotEmpty && _turnCountdown > 0) {
-      _cancelTurnCountdown();
-      _startMaxSpeechTimer(); // 开始3分钟倒计时
-    }
+  void _holdAiUntilHumanSubtitleDone(String text) {
+    final chars = text.trim().runes.length;
+    final holdMs = (chars * 45).clamp(1000, 3000).toInt();
+    _humanSubtitleLockUntil =
+        DateTime.now().add(Duration(milliseconds: holdMs));
+    _humanSubtitleLockTimer?.cancel();
+    _humanSubtitleLockTimer = Timer(Duration(milliseconds: holdMs), () {
+      if (!mounted) return;
+      if (!_isMyTurn && !_isRecording && !_ttsPlaying && _ttsQueue.isNotEmpty) {
+        _playNextTts();
+      }
+    });
   }
 
   // ── TTS 顺序播放队列 (i) ────────────────────────────────────────────────────
@@ -1027,18 +1703,28 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   /// Add text to the TTS queue and start playback if not already playing.
   void _enqueueTts(
       {required String source, required String text, String? voice}) {
-    _ttsQueue.add((source: source, text: text, voice: voice));
+    final speechText = _stripStageDirectionsForSpeech(text);
+    if (speechText.isEmpty) return;
+    final playbackSessionId = _nextTtsPlaybackSessionId();
+    _ttsQueue.add((
+      source: source,
+      text: speechText,
+      voice: voice,
+      playbackSessionId: playbackSessionId,
+      enqueuedAt: DateTime.now(),
+    ));
+    _prepareUpcomingPipeline(reason: 'enqueue-tts:$source:$playbackSessionId');
+    _scheduleTtsPumpGuard();
     if (!_ttsPlaying) _playNextTts();
   }
 
-  /// TTS 预加载：提前合成下一段文本，减少播放间隔（Req4）
-  void _prefetchTts(String text, {String? voice}) {
-    // GatewayTtsService supports prefetch; other TTS services don't.
-    try {
-      (_ttsService as dynamic).prefetch(text, voice: voice);
-    } catch (_) {
-      // Not supported by this TTS service
-    }
+  String _stripStageDirectionsForSpeech(String text) {
+    var v = text.trim();
+    if (v.isEmpty) return '';
+    // 去掉舞台提示，如（微笑）或(轻声)
+    v = v.replaceAll(RegExp(r'[（(][^）)]{1,40}[）)]'), ' ');
+    v = v.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return v;
   }
 
   /// Simple emotion-based speech rate (h): calm/sad → slower, excited/angry → faster.
@@ -1070,68 +1756,167 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   /// Play next item in queue; called recursively until queue is empty.
   Future<void> _playNextTts() async {
-    if (_ttsQueue.isEmpty || _isPaused) {
-      _ttsPlaying = false;
-      _tryActivatePendingHumanTurn();
-      return;
-    }
-    _ttsPlaying = true;
-    final item = _ttsQueue.removeAt(0);
-    _acquireSubtitleToken(item.source);
-
-    // TTS 预加载：在播放当前条目时，提前合成下一条和再下一条（Req5 优化）
-    if (_ttsQueue.isNotEmpty) {
-      final next = _ttsQueue.first;
-      _prefetchTts(next.text, voice: next.voice);
-      if (_ttsQueue.length > 1) {
-        final nextNext = _ttsQueue[1];
-        _prefetchTts(nextNext.text, voice: nextNext.voice);
-      }
-    }
-
-    // 字幕与语音严格同步：TTS 播放时强制显示对应发言者的字幕。
-    if (mounted) {
-      setState(() {
-        _currentSpeaker = item.source;
-        _centerSpeaker = item.source;
-        _centerMessage = item.text;
-        _isThinking = false;
-        _thinkingController.stop();
-      });
-      _debugSubtitleLog(triggerRole: item.source, note: 'tts render start');
-      _buildParticipants();
-    }
-
-    final speed = _emotionSpeed(item.text);
+    if (_ttsPumpRunning) return;
+    _ttsPumpRunning = true;
     try {
-      // 超时保护：按文字长度动态计算，每个字约0.3秒，最少20秒，最多120秒
-      final timeoutSec = (item.text.length * 0.3).clamp(20, 120).toInt();
-      await _ttsService
-          .speak(item.text, voice: item.voice, rate: speed)
-          .timeout(Duration(seconds: timeoutSec));
-    } catch (e) {
-      // TTS 失败或超时，跳过并提示，但不中断队列
+      if (_ttsQueue.isEmpty || _isPaused) {
+        _ttsPlaying = false;
+        _activeTtsItem = null;
+        _activeTtsSessionId = '';
+        _tryActivatePendingHumanTurn();
+        return;
+      }
+      if (_isMyTurn || _isRecording) {
+        _ttsPlaying = false;
+        _activeTtsItem = null;
+        _activeTtsSessionId = '';
+        Future.delayed(const Duration(milliseconds: 180), () {
+          if (!mounted) return;
+          if (_ttsQueue.isNotEmpty &&
+              !_ttsPlaying &&
+              !_isMyTurn &&
+              !_isRecording) {
+            _playNextTts();
+          }
+        });
+        return;
+      }
+      final lockUntil = _humanSubtitleLockUntil;
+      if (lockUntil != null && DateTime.now().isBefore(lockUntil)) {
+        _ttsPlaying = false;
+        _activeTtsItem = null;
+        _activeTtsSessionId = '';
+        final waitMs = lockUntil.difference(DateTime.now()).inMilliseconds;
+        Future.delayed(Duration(milliseconds: waitMs.clamp(80, 3000)), () {
+          if (mounted && !_ttsPlaying && _ttsQueue.isNotEmpty && !_isMyTurn) {
+            _playNextTts();
+          }
+        });
+        return;
+      }
+      _ttsPlaying = true;
+      final item = _ttsQueue.removeAt(0);
+      _activeTtsItem = item;
+      _activeTtsSessionId = item.playbackSessionId;
+      final startupWaitMs =
+          DateTime.now().difference(item.enqueuedAt).inMilliseconds;
+      _ttsStartupSamples += 1;
+      _ttsStartupTotalMs += startupWaitMs.toDouble();
+      _pushSeriesSample(_ttsStartupSeries, startupWaitMs.toDouble());
+      _acquireSubtitleToken(
+        item.source,
+        subtitleSessionId: item.playbackSessionId,
+      );
+
+      // 发言进行中并行准备后续环节：预合成后续语音 + 预热人类输入链路。
+      _prepareUpcomingPipeline(
+        reason: 'during-tts:${item.source}',
+        includeAsrWarmup: _pendingHumanTurn || item.source != widget.humanName,
+      );
+
+      // 字幕与语音严格同步：TTS 播放时强制显示对应发言者的字幕。
       if (mounted) {
         setState(() {
-          _messages.add(ChatMessage(
-            source: '系统',
-            content: '${item.source} 语音播放异常，已跳过',
-            type: 'system',
-          ));
+          _currentSpeaker = item.source;
+          _centerSpeaker = item.source;
+          _centerMessage = item.text;
+          _isThinking = false;
+          _thinkingController.stop();
         });
+        _debugSubtitleLog(triggerRole: item.source, note: 'tts render start');
+        _buildParticipants();
+      }
+
+      final speed = _emotionSpeed(item.text);
+      bool played = false;
+      try {
+        // 超时保护：按文字长度动态计算，每个字约0.3秒，最少20秒，最多120秒
+        final timeoutSec = (item.text.length * 0.3).clamp(20, 120).toInt();
+        Object? lastErr;
+        for (var attempt = 0; attempt < 2 && !played; attempt++) {
+          try {
+            await _ttsService
+                .speak(item.text, voice: item.voice, rate: speed)
+                .timeout(Duration(seconds: timeoutSec));
+            played = true;
+          } catch (e) {
+            lastErr = e;
+            if (attempt == 0) {
+              await Future<void>.delayed(const Duration(milliseconds: 200));
+            }
+          }
+        }
+        if (!played && lastErr != null) {
+          final fallback = _browserFallbackTts;
+          if (fallback != null) {
+            await fallback
+                .speak(item.text, voice: item.voice, rate: speed)
+                .timeout(Duration(seconds: timeoutSec));
+            played = true;
+            if (mounted) {
+              _showStatusToast('主 TTS 异常，已切换浏览器语音兜底');
+            }
+          } else {
+            throw lastErr;
+          }
+        }
+      } catch (e) {
+        // TTS 失败时暂停队列并保留当前文本，避免“字幕闪过+语音缺失”。
+        _ttsQueue.insert(0, item);
+        _activeTtsItem = null;
+        _activeTtsSessionId = '';
+        _ttsPlaying = false;
+        if (mounted) {
+          setState(() {
+            _isPaused = true;
+            _statusText = '语音播报失败，已暂停自动轮播，请检查 TTS 配置后继续';
+            _messages.add(ChatMessage(
+              source: '系统',
+              content: '${item.source} 语音播放异常，已暂停等待修复后重试',
+              type: 'system',
+            ));
+          });
+          _showStatusToast('语音播报失败：$e', isError: true);
+        }
+        return;
+      }
+      if (!played) {
+        return;
+      }
+      if (_isPaused) {
+        _ttsPlaying = false;
+        return;
+      }
+      _activeTtsItem = null;
+      _activeTtsSessionId = '';
+      // After speak() resolves, record current prefetch hit rate and play next.
+      _pushSeriesSample(_prefetchHitRateSeries, _prefetchHitRatePercent);
+      if (!mounted) return;
+      // 确保 TTS 完全停止后再播放下一条
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (_ttsQueue.isEmpty) {
+        _ttsPlaying = false;
+        _buildParticipants();
+        if (mounted && _showPerfPanel) {
+          setState(() {});
+        }
+        _tryActivatePendingHumanTurn();
+        return;
+      }
+      _ttsPlaying = false;
+    } finally {
+      _ttsPumpRunning = false;
+      final shouldContinue = mounted &&
+          !_isPaused &&
+          !_ttsPlaying &&
+          _ttsQueue.isNotEmpty &&
+          !_isMyTurn &&
+          !_isRecording;
+      if (shouldContinue) {
+        _scheduleTtsPumpGuard(delay: const Duration(milliseconds: 600));
+        Future.microtask(_playNextTts);
       }
     }
-    // After speak() resolves, play the next item (if any)
-    if (!mounted) return;
-    // 确保 TTS 完全停止后再播放下一条
-    await Future.delayed(const Duration(milliseconds: 300));
-    if (_ttsQueue.isEmpty) {
-      _ttsPlaying = false;
-      _buildParticipants();
-      _tryActivatePendingHumanTurn();
-      return;
-    }
-    _playNextTts();
   }
 
   // ── 暂停 / 继续 ─────────────────────────────────────────────────────────────
@@ -1146,11 +1931,29 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       // Resume TTS queue
       if (_ttsQueue.isNotEmpty && !_ttsPlaying) _playNextTts();
     } else {
+      final active = _activeTtsItem;
       setState(() {
         _isPaused = true;
-        _statusText = '已暂停';
+        _statusText = '已暂停（已冻结语音与轮次）';
+        _isThinking = false;
       });
+      _commander.markHumanTurnCompleted();
+      _cancelPendingHumanTurnGuard();
+      _cancelTurnCountdown();
+      _cancelMaxSpeechTimer();
+      _speechFinalizeTimer?.cancel();
+      if (_isRecording) {
+        _asrService.stopListening();
+        _isRecording = false;
+      }
+      if (active != null) {
+        _ttsQueue.insert(0, active);
+      }
+      _activeTtsItem = null;
+      _activeTtsSessionId = '';
+      _ttsPlaying = false;
       _ttsService.stop();
+      _wsClient.sendInterrupt(speaker: widget.humanName);
       _wsClient.sendPause();
     }
   }
@@ -1175,20 +1978,26 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   @override
   void dispose() {
+    _disposed = true;
+    _bgTaskQueue.clear();
     _turnTimer?.cancel();
     _ctrlTapTimer?.cancel();
     _speechFinalizeTimer?.cancel();
     _maxSpeechTimer?.cancel();
     _subtitleRetainTimer?.cancel();
+    _humanSubtitleLockTimer?.cancel();
+    _pendingHumanTurnGuardTimer?.cancel();
+    _ttsPumpGuardTimer?.cancel();
+    _deferredAutoSkipTimer?.cancel();
     _statusToastTimer?.cancel();
     _statusToastEntry?.remove();
     _ctrlHeld = false;
-    _inputController.removeListener(_onTextInputChanged);
+    _awaitingAsrFirstPacket = false;
     HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     _ttsService.dispose();
+    _browserFallbackTts?.dispose();
     _asrService.dispose();
     _wsClient.dispose();
-    _inputController.dispose();
     _scrollController.dispose();
     _keyboardFocusNode.dispose();
     _candleController.dispose();
@@ -1220,10 +2029,545 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
   }
 
+  double _averageOf(List<double> values) {
+    if (values.isEmpty) return 0;
+    var total = 0.0;
+    for (final v in values) {
+      total += v;
+    }
+    return total / values.length;
+  }
+
+  String _buildPerfCompareReport() {
+    const baselineCount = 10;
+    const recentCount = 10;
+
+    List<double> head(List<double> src) => src.length <= baselineCount
+        ? List<double>.from(src)
+        : src.sublist(0, baselineCount);
+    List<double> tail(List<double> src) => src.length <= recentCount
+        ? List<double>.from(src)
+        : src.sublist(src.length - recentCount);
+
+    final startupBase = _averageOf(head(_ttsStartupSeries));
+    final startupNow = _averageOf(tail(_ttsStartupSeries));
+    final asrBase = _averageOf(head(_asrFirstPacketSeries));
+    final asrNow = _averageOf(tail(_asrFirstPacketSeries));
+    final hitBase = _averageOf(head(_prefetchHitRateSeries));
+    final hitNow = _averageOf(tail(_prefetchHitRateSeries));
+
+    String delta(double before, double after, {bool lowerIsBetter = true}) {
+      if (before == 0) return 'N/A';
+      final pct = ((after - before) / before) * 100;
+      if (lowerIsBetter) {
+        final improved = -pct;
+        return '${improved >= 0 ? '+' : ''}${improved.toStringAsFixed(1)}%';
+      }
+      return '${pct >= 0 ? '+' : ''}${pct.toStringAsFixed(1)}%';
+    }
+
+    final now = DateTime.now().toIso8601String();
+    return '''# RoundTable 并行调度优化对比报告
+
+导出时间: $now
+样本窗口: 最近30次（基线=最早10次，当前=最近10次）
+
+## 核心指标
+- 预取命中率: 基线 ${hitBase.toStringAsFixed(1)}% -> 当前 ${hitNow.toStringAsFixed(1)}% (变化 ${delta(hitBase, hitNow, lowerIsBetter: false)})
+- 平均开播等待: 基线 ${startupBase.toStringAsFixed(1)}ms -> 当前 ${startupNow.toStringAsFixed(1)}ms (优化 ${delta(startupBase, startupNow)})
+- ASR首包延迟: 基线 ${asrBase.toStringAsFixed(1)}ms -> 当前 ${asrNow.toStringAsFixed(1)}ms (优化 ${delta(asrBase, asrNow)})
+
+## 运行状态
+- 预取请求: ${_ttsPerf.prefetchRequested}
+- 预取命中: ${_ttsPerf.prefetchHit}
+- 回源次数: ${_ttsPerf.prefetchMiss}
+- 开播样本数: $_ttsStartupSamples
+- ASR首包样本数: $_asrFirstPacketSamples
+
+## 说明
+- 命中率越高越好，开播等待与ASR首包延迟越低越好。
+- 若基线样本不足，变化百分比会显示为 N/A。
+''';
+  }
+
+  void _saveReportHistory(String report) {
+    final entry = _PerfReportEntry(
+      exportedAt: DateTime.now(),
+      report: report,
+      hitRate: _prefetchHitRatePercent,
+      startupMs: _avgTtsStartupMs,
+      asrFirstPacketMs: _avgAsrFirstPacketMs,
+    );
+    _reportHistory.insert(0, entry);
+    if (_reportHistory.length > _maxReportHistory) {
+      _reportHistory.removeLast();
+    }
+  }
+
+  Future<void> _copyReport(_PerfReportEntry entry, {bool toast = true}) async {
+    await Clipboard.setData(ClipboardData(text: entry.report));
+    if (toast) {
+      _showStatusToast('已复制报告：${entry.shortTimeLabel}');
+    }
+  }
+
+  void _openReportHistoryPanel() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.studyWall.withValues(alpha: 0.96),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (context) {
+        final records = List<_PerfReportEntry>.from(_reportHistory);
+        return SizedBox(
+          height: MediaQuery.of(context).size.height * 0.68,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.history_toggle_off,
+                        color: Color(0xFF80DEEA), size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        '优化报告历史',
+                        style: TextStyle(
+                          color: AppColors.warmWhite,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '最近${records.length}条',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                if (records.isEmpty)
+                  Expanded(
+                    child: Center(
+                      child: Text(
+                        '暂无导出记录，先点击“导出优化对比报告”生成。',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.65),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  )
+                else
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: records.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final e = records[index];
+                        return Container(
+                          padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.05),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.12),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      e.shortTimeLabel,
+                                      style: const TextStyle(
+                                        color: AppColors.warmWhite,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      '命中率 ${e.hitRate.toStringAsFixed(1)}% · 开播 ${e.startupMs.toStringAsFixed(1)}ms · 首包 ${e.asrFirstPacketMs.toStringAsFixed(1)}ms',
+                                      style: TextStyle(
+                                        color: Colors.white
+                                            .withValues(alpha: 0.75),
+                                        fontSize: 10,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              IconButton(
+                                onPressed: () => _copyReport(e),
+                                icon: const Icon(Icons.copy_rounded,
+                                    color: Color(0xFF80DEEA), size: 16),
+                                tooltip: '一键再复制',
+                                constraints: const BoxConstraints(
+                                    minWidth: 28, minHeight: 28),
+                                padding: EdgeInsets.zero,
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _exportPerfReport() async {
+    final report = _buildPerfCompareReport();
+    setState(() => _saveReportHistory(report));
+    await Clipboard.setData(ClipboardData(text: report));
+    _showStatusToast('优化对比报告已导出（已复制到剪贴板）');
+  }
+
+  Widget _buildPerfPanel(Size size) {
+    final hitRate = _prefetchHitRatePercent;
+    final hitProgress = (hitRate / 100).clamp(0.0, 1.0);
+    final perf = _ttsPerf;
+    final totalBg = _bgTaskRunning + _bgTaskQueue.length;
+
+    return Container(
+      width: min(360, size.width * 0.36),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xCC0F131D),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: const Color(0xFF26C6DA).withValues(alpha: 0.45),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF26C6DA).withValues(alpha: 0.14),
+            blurRadius: 20,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            '并行调度性能面板',
+            style: TextStyle(
+              color: Color(0xFF80DEEA),
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '预取命中率 ${hitRate.toStringAsFixed(1)}%',
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+          ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              minHeight: 8,
+              value: hitProgress,
+              backgroundColor: Colors.white.withValues(alpha: 0.12),
+              valueColor: const AlwaysStoppedAnimation(Color(0xFF00E5A8)),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '平均开播等待\n${_avgTtsStartupMs.toStringAsFixed(1)} ms',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  'ASR首包延迟\n${_avgAsrFirstPacketMs.toStringAsFixed(1)} ms',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '预取请求 ${perf.prefetchRequested}  命中 ${perf.prefetchHit}  回源 ${perf.prefetchMiss}',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.78),
+              fontSize: 10,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '队列深度 ${_ttsQueue.length}  后台任务 $_bgTaskRunning/$totalBg',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.78),
+              fontSize: 10,
+            ),
+          ),
+          const SizedBox(height: 10),
+          _PerfSparkline(
+            title: '预取命中率走势（30次）',
+            unit: '%',
+            data: _prefetchHitRateSeries,
+            lineColor: const Color(0xFF00E5A8),
+            preferLower: false,
+          ),
+          const SizedBox(height: 8),
+          _PerfSparkline(
+            title: '开播等待走势（30次）',
+            unit: 'ms',
+            data: _ttsStartupSeries,
+            lineColor: const Color(0xFFFFD54F),
+          ),
+          const SizedBox(height: 8),
+          _PerfSparkline(
+            title: 'ASR首包走势（30次）',
+            unit: 'ms',
+            data: _asrFirstPacketSeries,
+            lineColor: const Color(0xFF81D4FA),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '历史记录 ${_reportHistory.length}/$_maxReportHistory',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.62),
+                  fontSize: 10,
+                ),
+              ),
+              Wrap(
+                spacing: 2,
+                children: [
+                  TextButton.icon(
+                    onPressed: _openReportHistoryPanel,
+                    icon: const Icon(Icons.history,
+                        color: Color(0xFF80DEEA), size: 16),
+                    label: const Text(
+                      '历史',
+                      style: TextStyle(color: Color(0xFF80DEEA), fontSize: 11),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _exportPerfReport,
+                    icon: const Icon(Icons.file_download_outlined,
+                        color: Color(0xFF80DEEA), size: 16),
+                    label: const Text(
+                      '导出',
+                      style: TextStyle(color: Color(0xFF80DEEA), fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhasePanel(Size size) {
+    final records = _phaseTelemetryHistory;
+    return Container(
+      width: min(400, size.width * 0.42),
+      height: min(420, size.height * 0.52),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: const Color(0xCC131826),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: const Color(0xFF42A5F5).withValues(alpha: 0.45),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Phase Telemetry',
+            style: TextStyle(
+              color: Color(0xFF90CAF9),
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '最近 ${records.length} 条 · 前后端统一阶段与恢复原因',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.68),
+              fontSize: 10,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: records.isEmpty
+                ? Center(
+                    child: Text(
+                      '暂无阶段事件',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontSize: 11,
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: records.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (context, index) {
+                      final r = records[index];
+                      final accent = r.recovery
+                          ? const Color(0xFFFFB74D)
+                          : const Color(0xFF64B5F6);
+                      return Container(
+                        padding: const EdgeInsets.fromLTRB(8, 7, 8, 7),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.04),
+                          borderRadius: BorderRadius.circular(8),
+                          border:
+                              Border.all(color: accent.withValues(alpha: 0.45)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Text(
+                                  r.shortTime,
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.72),
+                                    fontSize: 10,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  r.source,
+                                  style: TextStyle(color: accent, fontSize: 10),
+                                ),
+                                const Spacer(),
+                                if (r.eventSeq != null)
+                                  Text(
+                                    'seq ${r.eventSeq}',
+                                    style: TextStyle(
+                                      color:
+                                          Colors.white.withValues(alpha: 0.55),
+                                      fontSize: 10,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${r.phase}${r.speaker.isNotEmpty ? ' · ${r.speaker}' : ''}',
+                              style: const TextStyle(
+                                color: AppColors.warmWhite,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            if (r.designateStage.isNotEmpty)
+                              Container(
+                                margin: const EdgeInsets.only(bottom: 4),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF90CAF9)
+                                      .withValues(alpha: 0.16),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: const Color(0xFF90CAF9)
+                                        .withValues(alpha: 0.55),
+                                  ),
+                                ),
+                                child: Text(
+                                  'DESIGNATE ${r.designateStage.toUpperCase()}${r.designateTarget.isNotEmpty ? ' -> ${r.designateTarget}' : ''}',
+                                  style: const TextStyle(
+                                    color: Color(0xFFBBDEFB),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            if (r.sendDropTotal > 0)
+                              Container(
+                                margin: const EdgeInsets.only(bottom: 4),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFB74D)
+                                      .withValues(alpha: 0.14),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: const Color(0xFFFFB74D)
+                                        .withValues(alpha: 0.45),
+                                  ),
+                                ),
+                                child: Text(
+                                  'SEND_DROP total=${r.sendDropTotal}${r.sendDropLast.isNotEmpty ? ' · last=${r.sendDropLast}' : ''}${r.sendDropReasons.isNotEmpty ? ' · ${r.sendDropReasons}' : ''}',
+                                  style: const TextStyle(
+                                    color: Color(0xFFFFE0B2),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            Text(
+                              r.reason,
+                              style: TextStyle(
+                                color: r.recovery
+                                    ? const Color(0xFFFFCC80)
+                                    : Colors.white.withValues(alpha: 0.72),
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
     final tableRadius = min(size.width, size.height) * 0.18;
+    final subtitleWidth = size.width * 0.70;
 
     // 圆桌圆心位于屏幕水平 1/3 处（需求3.2）
     final tableCenterX = size.width / 3;
@@ -1235,8 +2579,20 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       count: 20,
     );
 
-    final canInterrupt =
-        !_isMyTurn && _currentSpeaker.isNotEmpty && !_hasRaisedHand;
+    final canInterrupt = !_isMyTurn &&
+        _currentSpeaker.isNotEmpty &&
+        !_hasRaisedHand &&
+        !_handApprovedToSpeak;
+    final canSpeakNow =
+        _isMyTurn || _handApprovedToSpeak || _pendingHumanTurn || _isRecording;
+    final subtitleLineCount = _estimateSubtitleLineCount(
+      context,
+      '$_centerSpeaker：$_centerMessage',
+      maxWidth: subtitleWidth - 80,
+      style: const TextStyle(fontSize: 20, height: 1.7),
+      maxLines: 2,
+    );
+    final subtitleBottom = subtitleLineCount <= 1 ? 86.0 : 70.0;
 
     return KeyboardListener(
       focusNode: _keyboardFocusNode,
@@ -1396,7 +2752,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               ),
 
             // ── 操作提示：圆桌下方 ──
-            if (_isMyTurn && !_isRecording && !_showTextInputPanel)
+            if (_isMyTurn && !_isRecording)
               Positioned(
                 top: tableCenterY + tableRadius + 16,
                 left: tableCenterX - 180,
@@ -1434,8 +2790,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                             const SizedBox(width: 8),
                             Text(
                               _turnCountdown > 0
-                                  ? '轮到你了，点击麦克风或右侧输入文字 ($_turnCountdown s)'
-                                  : '轮到你了，点击麦克风或右侧输入文字',
+                                  ? '轮到你了，按住麦克风讲话 ($_turnCountdown s)'
+                                  : '轮到你了，按住麦克风讲话',
                               style: TextStyle(
                                 color: AppColors.amberGold,
                                 fontSize: 13,
@@ -1451,7 +2807,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               ),
 
             // ── 中间竖排按钮：麦克风 + 跳过 + 举手（圆桌与输入面板之间）──
-            if (_isMyTurn || canInterrupt || _hasRaisedHand)
+            if (_isMyTurn ||
+                canInterrupt ||
+                _hasRaisedHand ||
+                _handApprovedToSpeak)
               Positioned(
                 left: tableCenterX + tableRadius + 148,
                 top: tableCenterY - tableRadius,
@@ -1459,7 +2818,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   opacity: 1.0,
                   duration: const Duration(milliseconds: 300),
                   child: _RightActionColumn(
-                    showMic: _isMyTurn,
+                    showMic: canSpeakNow,
                     isRecording: _isRecording,
                     onStart: _onPttStart,
                     onEnd: _onPttEnd,
@@ -1473,35 +2832,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 ),
               ),
 
-            // ── 右侧文字输入面板 ──
-            if (_isMyTurn && !_isRecording)
-              Positioned(
-                right: 116,
-                top: tableCenterY - tableRadius,
-                child: AnimatedOpacity(
-                  opacity: _showTextInputPanel ? 1.0 : 0.0,
-                  duration: const Duration(milliseconds: 350),
-                  child: IgnorePointer(
-                    ignoring: !_showTextInputPanel,
-                    child: _TextInputPanel(
-                      controller: _inputController,
-                      onSend: _sendMessage,
-                      onClose: () =>
-                          setState(() => _showTextInputPanel = false),
-                      turnCountdown: _turnCountdown,
-                      tableHeight: tableRadius * 2,
-                    ),
-                  ),
-                ),
-              ),
-
             // ── 底部字幕区（电影风格，20号字，确保完整显示）──
             if (_centerSpeaker.isNotEmpty && _centerMessage.isNotEmpty)
               Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: size.height * 0.22,
+                bottom: subtitleBottom,
+                left: (size.width - subtitleWidth) / 2,
+                width: subtitleWidth,
+                height: size.height * 0.2,
                 child: IgnorePointer(
                   child: Container(
                     decoration: BoxDecoration(
@@ -1516,12 +2853,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         stops: const [0.0, 0.3, 1.0],
                       ),
                     ),
-                    padding: const EdgeInsets.fromLTRB(48, 24, 48, 24),
+                    padding: const EdgeInsets.fromLTRB(40, 18, 40, 16),
                     child: Align(
                       alignment: Alignment.bottomCenter,
                       child: RichText(
                         textAlign: TextAlign.center,
-                        maxLines: 5,
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         text: TextSpan(
                           children: [
@@ -1531,7 +2868,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                                 color: Color(0xFF4FC3F7),
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
-                                height: 1.6,
+                                height: 1.7,
                                 shadows: [
                                   Shadow(color: Colors.black, blurRadius: 8),
                                   Shadow(color: Colors.black, blurRadius: 16),
@@ -1543,7 +2880,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 20,
-                                height: 1.6,
+                                height: 1.7,
                                 shadows: [
                                   Shadow(color: Colors.black, blurRadius: 8),
                                   Shadow(color: Colors.black, blurRadius: 16),
@@ -1622,6 +2959,35 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         onToggle: _onTogglePause,
                       ),
                       const Spacer(),
+                      IconButton(
+                        icon: Icon(
+                          _showPerfPanel ? Icons.speed : Icons.speed_outlined,
+                          color: _showPerfPanel
+                              ? const Color(0xFF80DEEA)
+                              : AppColors.warmGray,
+                        ),
+                        onPressed: () {
+                          setState(() => _showPerfPanel = !_showPerfPanel);
+                        },
+                        padding: EdgeInsets.zero,
+                        constraints:
+                            const BoxConstraints(minWidth: 36, minHeight: 36),
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          _showPhasePanel ? Icons.route : Icons.route_outlined,
+                          color: _showPhasePanel
+                              ? const Color(0xFF90CAF9)
+                              : AppColors.warmGray,
+                        ),
+                        onPressed: () {
+                          setState(() => _showPhasePanel = !_showPhasePanel);
+                        },
+                        padding: EdgeInsets.zero,
+                        constraints:
+                            const BoxConstraints(minWidth: 36, minHeight: 36),
+                      ),
+                      const SizedBox(width: 2),
                       // ── 右上：历史 ──
                       IconButton(
                         icon: const Icon(Icons.history,
@@ -1663,6 +3029,20 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               ),
             ),
 
+            if (_showPerfPanel)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 62,
+                right: 16,
+                child: _buildPerfPanel(size),
+              ),
+
+            if (_showPhasePanel)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 62,
+                right: _showPerfPanel ? min(400, size.width * 0.42) + 24 : 16,
+                child: _buildPhasePanel(size),
+              ),
+
             // ── 底部控制栏 ──
             Positioned(
               bottom: 0,
@@ -1672,8 +3052,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 isMyTurn: _isMyTurn,
                 isPushToTalk: _isPushToTalk,
                 isRecording: _isRecording,
-                inputController: _inputController,
-                onSendMessage: _sendMessage,
                 onPttStart: _onPttStart,
                 onPttEnd: _onPttEnd,
                 canInterrupt: canInterrupt,
@@ -1797,6 +3175,218 @@ class _AnimatedMicOnTableState extends State<_AnimatedMicOnTable>
         ),
       ]);
     });
+  }
+}
+
+class _PerfReportEntry {
+  final DateTime exportedAt;
+  final String report;
+  final double hitRate;
+  final double startupMs;
+  final double asrFirstPacketMs;
+
+  const _PerfReportEntry({
+    required this.exportedAt,
+    required this.report,
+    required this.hitRate,
+    required this.startupMs,
+    required this.asrFirstPacketMs,
+  });
+
+  String get shortTimeLabel {
+    String pad(int n) => n.toString().padLeft(2, '0');
+    return '${pad(exportedAt.month)}-${pad(exportedAt.day)} '
+        '${pad(exportedAt.hour)}:${pad(exportedAt.minute)}:${pad(exportedAt.second)}';
+  }
+}
+
+class _PhaseTelemetryEntry {
+  final DateTime at;
+  final String source;
+  final String phase;
+  final String reason;
+  final bool recovery;
+  final String speaker;
+  final int? eventSeq;
+  final String designateStage;
+  final String designateTarget;
+  final int sendDropTotal;
+  final String sendDropReasons;
+  final String sendDropLast;
+
+  const _PhaseTelemetryEntry({
+    required this.at,
+    required this.source,
+    required this.phase,
+    required this.reason,
+    required this.recovery,
+    required this.speaker,
+    required this.eventSeq,
+    required this.designateStage,
+    required this.designateTarget,
+    required this.sendDropTotal,
+    required this.sendDropReasons,
+    required this.sendDropLast,
+  });
+
+  String get shortTime {
+    String pad(int n) => n.toString().padLeft(2, '0');
+    return '${pad(at.hour)}:${pad(at.minute)}:${pad(at.second)}';
+  }
+}
+
+class _PerfSparkline extends StatelessWidget {
+  final String title;
+  final String unit;
+  final List<double> data;
+  final Color lineColor;
+  final bool preferLower;
+
+  const _PerfSparkline({
+    required this.title,
+    required this.unit,
+    required this.data,
+    required this.lineColor,
+    this.preferLower = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final latest = data.isNotEmpty ? data.last : 0.0;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(color: Colors.white70, fontSize: 10),
+                ),
+              ),
+              Text(
+                '${latest.toStringAsFixed(1)}$unit',
+                style: TextStyle(
+                  color: lineColor,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          SizedBox(
+            height: 36,
+            child: CustomPaint(
+              painter: _SparklinePainter(
+                values: data,
+                lineColor: lineColor,
+                preferLower: preferLower,
+              ),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SparklinePainter extends CustomPainter {
+  final List<double> values;
+  final Color lineColor;
+  final bool preferLower;
+
+  _SparklinePainter({
+    required this.values,
+    required this.lineColor,
+    required this.preferLower,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final axisPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.12)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+
+    canvas.drawLine(
+      Offset(0, size.height - 1),
+      Offset(size.width, size.height - 1),
+      axisPaint,
+    );
+
+    if (values.length < 2) return;
+
+    final minVal = values.reduce(min);
+    final maxVal = values.reduce(max);
+    final span = (maxVal - minVal).abs() < 0.001 ? 1.0 : (maxVal - minVal);
+    final dx = size.width / (values.length - 1);
+
+    final path = Path();
+    for (var i = 0; i < values.length; i++) {
+      final x = dx * i;
+      final normalized = (values[i] - minVal) / span;
+      final y = size.height - (normalized * (size.height - 4)) - 2;
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+
+    final gradient = LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [
+        lineColor.withValues(alpha: 0.26),
+        lineColor.withValues(alpha: 0.02),
+      ],
+    ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
+
+    final fillPath = Path.from(path)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(
+      fillPath,
+      Paint()..shader = gradient,
+    );
+
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = lineColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.7,
+    );
+
+    final latest = values.last;
+    final prev = values.length > 1 ? values[values.length - 2] : latest;
+    final improved = preferLower ? latest <= prev : latest >= prev;
+    final markerColor =
+        improved ? const Color(0xFF00E676) : const Color(0xFFFF5252);
+    final latestNormalized = (latest - minVal) / span;
+    final latestY = size.height - (latestNormalized * (size.height - 4)) - 2;
+    canvas.drawCircle(
+      Offset(size.width, latestY),
+      2.6,
+      Paint()..color = markerColor,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _SparklinePainter oldDelegate) {
+    return oldDelegate.values != values ||
+        oldDelegate.lineColor != lineColor ||
+        oldDelegate.preferLower != preferLower;
   }
 }
 
@@ -2117,135 +3707,6 @@ class _FloatingRaiseHandButtonState extends State<_FloatingRaiseHandButton>
   }
 }
 
-// ─── 左侧文字输入面板（需求2）──────────────────────────────────────────────────
-/// 圆桌左侧的大面积文字输入面板，宽高比 3:2，面积接近圆桌一半。
-class _TextInputPanel extends StatelessWidget {
-  final TextEditingController controller;
-  final VoidCallback onSend;
-  final VoidCallback onClose;
-  final int turnCountdown;
-  final double tableHeight;
-
-  const _TextInputPanel({
-    required this.controller,
-    required this.onSend,
-    required this.onClose,
-    required this.turnCountdown,
-    required this.tableHeight,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // 宽度为屏幕 25%，高度等于圆桌直径
-    final panelWidth = MediaQuery.of(context).size.width * 0.25;
-    final panelHeight = tableHeight;
-
-    return Container(
-      width: panelWidth,
-      height: panelHeight,
-      decoration: BoxDecoration(
-        color: AppColors.studyWall.withValues(alpha: 0.95),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: AppColors.amberGold.withValues(alpha: 0.4),
-          width: 1.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.4),
-            blurRadius: 20,
-            spreadRadius: 4,
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // 标题栏
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: AppColors.amberGold.withValues(alpha: 0.2),
-                ),
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.edit, color: AppColors.amberGold, size: 16),
-                const SizedBox(width: 6),
-                Text(
-                  turnCountdown > 0 ? '输入你的发言 ($turnCountdown s)' : '输入你的发言',
-                  style: TextStyle(
-                    color: AppColors.amberGold,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                GestureDetector(
-                  onTap: onClose,
-                  child: Icon(Icons.close, color: AppColors.warmGray, size: 18),
-                ),
-              ],
-            ),
-          ),
-          // 文字输入区
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: TextField(
-                controller: controller,
-                maxLines: null,
-                expands: true,
-                textAlignVertical: TextAlignVertical.top,
-                style: const TextStyle(
-                  color: AppColors.warmWhite,
-                  fontSize: 14,
-                  height: 1.5,
-                ),
-                decoration: InputDecoration(
-                  hintText: '在这里输入你的想法...\n输入完成后点击下方"发送"',
-                  hintStyle: TextStyle(
-                    color: AppColors.warmGray.withValues(alpha: 0.6),
-                    fontSize: 13,
-                  ),
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-            ),
-          ),
-          // 发送按钮
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            child: Row(
-              children: [
-                const Spacer(),
-                SizedBox(
-                  width: 60,
-                  height: 48,
-                  child: FilledButton(
-                    onPressed: onSend,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.amberGold,
-                      foregroundColor: AppColors.scrollTitle,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
-                    child: const Icon(Icons.send, size: 18),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 // ─── 右侧讲话/结束按钮（需求5 - 鼠标点击启动麦克风）─────────────────────────────
 /// 明显的大按钮，仅在轮到用户时淡出显示。
 class _SpeakButton extends StatefulWidget {
@@ -2278,7 +3739,7 @@ class _SpeakButtonState extends State<_SpeakButton>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     );
-    if (!widget.isRecording) {
+    if (!widget.isRecording && widget.enabled) {
       _pulseCtrl.repeat(reverse: true);
     }
   }
@@ -2289,6 +3750,9 @@ class _SpeakButtonState extends State<_SpeakButton>
     if (widget.isRecording) {
       _pulseCtrl.stop();
       _pulseCtrl.value = 1.0;
+    } else if (!widget.enabled) {
+      _pulseCtrl.stop();
+      _pulseCtrl.value = 0.0;
     } else {
       if (!_pulseCtrl.isAnimating) _pulseCtrl.repeat(reverse: true);
     }
@@ -2305,7 +3769,9 @@ class _SpeakButtonState extends State<_SpeakButton>
     return AnimatedBuilder(
       animation: _pulseCtrl,
       builder: (context, _) {
-        final pulse = widget.isRecording ? 1.0 : 0.85 + _pulseCtrl.value * 0.15;
+        final pulse = widget.isRecording || !widget.enabled
+            ? 1.0
+            : 0.85 + _pulseCtrl.value * 0.15;
         return GestureDetector(
           onTap: !widget.enabled
               ? null

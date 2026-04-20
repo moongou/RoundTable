@@ -1,0 +1,32 @@
+[project]
+name = "capswriter-offline"
+version = "0.1.0"
+description = "Offline CapsWriter-compatible ASR service powered by sherpa-onnx over WebSocket"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.1",
+    "sherpa-onnx>=1.10.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.9.0",
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

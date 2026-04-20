@@ -195,10 +195,19 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           _statusText =
               '错误: ${apiData?['message'] ?? apiData?['original_error'] ?? 'AI 服务异常'}';
         });
+      case WsEventType.phaseTelemetry:
+        break;
       case WsEventType.error:
         final data = event.data;
+        final errMsg = (data?['message'] ?? '').toString().trim();
+        // 过滤 ASGI 内部噪声错误，不显示给用户
+        if (errMsg.isEmpty ||
+            errMsg.contains('Unexpected ASGI message') ||
+            errMsg.contains('websocket.send')) {
+          break;
+        }
         setState(() {
-          _statusText = '错误: ${data?['message'] ?? '未知错误'}';
+          _statusText = '错误: $errMsg';
         });
       case WsEventType.ended:
         setState(() {

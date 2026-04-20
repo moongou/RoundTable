@@ -243,11 +243,14 @@ async def benchmark_tts(rounds: int = 3, services: list[str] | None = None):
 @router.post("/asr")
 async def benchmark_asr(rounds: int = 3, services: list[str] | None = None):
     """基准测试所有或指定的 ASR 服务。"""
-    target_services = services or ["capswriter", "vosk", "funasr"]
+    target_services = services or ["browser", "capswriter", "vosk", "funasr"]
     results = await asyncio.gather(
         *[_benchmark_one_asr(svc, LOCAL_SERVICE_DEFAULTS.get(svc, {}).get("url", ""), rounds) for svc in target_services]
     )
     results = list(results)
+    for item in results:
+        if item.get("service") == "browser":
+            item.setdefault("note", "browser 为前端原生 ASR，后端基准用于服务可达性与统一对比展示")
     ok_results = [r for r in results if r.get("status") == "ok"]
     ok_results.sort(key=lambda r: r.get("latency", {}).get("avg_ms", 99999))
     recommended = ok_results[0]["service"] if ok_results else None
@@ -292,11 +295,40 @@ async def benchmark_llm(rounds: int = 2, providers: list[str] | None = None):
 
 
 @router.get("/hardware")
-async def get_hardware_info():
-    """获取硬件检测结果。"""
-    from app.core.hardware import detect_hardware
+async def get_hardware_info(apply_tuning: bool = True):
+    """获取硬件检测结果，并可选应用运行时优化参数。"""
+    from app.core.hardware import apply_runtime_tuning, detect_hardware, get_runtime_tuning
     profile = detect_hardware()
-    return asdict(profile)
+    runtime_tuning = apply_runtime_tuning() if apply_tuning else get_runtime_tuning()
+
+    report = {
+        "summary": f"{profile.os_name} {profile.arch} · {profile.cpu_cores}C/{profile.cpu_threads}T · {profile.memory_gb}GB",
+        "chip": profile.apple_chip or profile.cpu_brand,
+        "gpu": "MPS" if profile.mps_available else "CUDA" if profile.cuda_available else "CPU",
+        "recommendation": f"建议线程池 workers={profile.recommended_workers}",
+        "notes": profile.optimization_notes,
+    }
+
+    data = asdict(profile)
+    data["runtime_tuning"] = runtime_tuning
+    data["hardware_report"] = report
+    return data
+
+
+@router.post("/hardware/optimize")
+async def optimize_hardware_runtime():
+    """按当前硬件重新应用运行时优化参数。"""
+    from app.core.hardware import apply_runtime_tuning, detect_hardware
+
+    profile = detect_hardware()
+    runtime_tuning = apply_runtime_tuning(force_recreate_pool=True)
+    return {
+        "ok": True,
+        "message": "已按当前硬件重新应用优化参数",
+        "recommended_workers": profile.recommended_workers,
+        "runtime_tuning": runtime_tuning,
+        "optimization_notes": profile.optimization_notes,
+    }
 
 
 @router.post("/voice/test")
@@ -350,3 +382,74 @@ async def test_voice_service(service_id: str, service_type: str, text: str = _TE
             result["error"] = str(e)
 
     return result
+
+
+@router.post("/voice/deep-test")
+async def deep_test_voice_service(service_id: str, service_type: str):
+    """深度测试语音服务，返回可人工确认的示例结果。"""
+    if service_type == "asr":
+        sample_text = "今天我们讨论的是如何培养批判性思维。"
+        result: dict = {
+            "service": service_id,
+            "type": "asr",
+            "expected_text": sample_text,
+        }
+        try:
+            from app.voice.factory import create_tts_provider, create_asr_provider
+
+            tts = create_tts_provider("edge_tts")
+            audio = await tts.synthesize(sample_text)
+
+            asr = create_asr_provider(service_id)
+            t0 = time.perf_counter()
+            recognized = await asr.transcribe(audio)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+
+            normalized_expected = sample_text.replace("。", "").replace("，", "")
+            normalized_recognized = (recognized or "").replace("。", "").replace("，", "")
+            match = 0.0
+            if normalized_expected:
+                same = sum(1 for c in normalized_expected if c in normalized_recognized)
+                match = round(same / max(len(normalized_expected), 1) * 100, 1)
+
+            result.update({
+                "status": "ok",
+                "recognized_text": recognized,
+                "latency_ms": round(elapsed_ms, 1),
+                "match_percent": match,
+            })
+        except Exception as e:
+            result.update({"status": "error", "error": str(e)})
+        return result
+
+    if service_type == "tts":
+        sample_text = "同学们好，欢迎来到今天的圆桌思辨课堂。"
+        result: dict = {
+            "service": service_id,
+            "type": "tts",
+            "preview_text": sample_text,
+        }
+        try:
+            from app.voice.factory import create_tts_provider_with_url
+
+            svc_url = LOCAL_SERVICE_DEFAULTS.get(service_id, {}).get("url", "")
+            provider = create_tts_provider_with_url(service_id, base_url=svc_url)
+            t0 = time.perf_counter()
+            audio = await provider.synthesize(sample_text)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+
+            result.update({
+                "status": "ok",
+                "synth_ms": round(elapsed_ms, 1),
+                "audio_size": len(audio),
+            })
+        except Exception as e:
+            result.update({"status": "error", "error": str(e)})
+        return result
+
+    return {
+        "service": service_id,
+        "type": service_type,
+        "status": "error",
+        "error": "service_type 必须是 asr 或 tts",
+    }

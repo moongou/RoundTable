@@ -66,7 +66,7 @@ def safe_agent_name(name: str) -> str:
     return safe if safe else "human"
 
 
-def make_human_input_func(name: str, timeout: float = 45.0) -> Callable[[str, Optional[CancellationToken]], Awaitable[str]]:
+def make_human_input_func(name: str, timeout: float = 120.0) -> Callable[[str, Optional[CancellationToken]], Awaitable[str]]:
     """为指定的人类参与者创建 input_func。
 
     该函数会阻塞等待 STT/WebSocket 将转录文本放入队列。
@@ -74,7 +74,7 @@ def make_human_input_func(name: str, timeout: float = 45.0) -> Callable[[str, Op
 
     Args:
         name: 参与者名字。
-        timeout: 等待超时秒数（默认 45 秒）。
+        timeout: 等待超时秒数（默认 120 秒）。
 
     Returns:
         异步 input_func，供 UserProxyAgent 使用。

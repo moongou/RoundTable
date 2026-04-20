@@ -21,6 +21,18 @@ class BrowserTtsService implements TtsService {
   bool get isSpeaking => _isSpeaking;
 
   @override
+  TtsPerfSnapshot getPerfSnapshot() => const TtsPerfSnapshot();
+
+  @override
+  Future<void> prefetch(String text, {String? voice}) async {}
+
+  @override
+  Future<void> prefetchBatch(
+    List<({String text, String? voice})> items, {
+    int maxConcurrent = 2,
+  }) async {}
+
+  @override
   Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
     await stop();
 
@@ -51,6 +63,7 @@ class BrowserTtsService implements TtsService {
       await completer.future;
     } catch (e) {
       _isSpeaking = false;
+      rethrow;
     }
   }
 
@@ -89,6 +102,9 @@ class BrowserAsrService implements AsrService {
       _isAvailable = false;
     }
   }
+
+  @override
+  Future<void> warmup() async {}
 
   @override
   bool get isAvailable => _isAvailable;
@@ -137,8 +153,12 @@ class BrowserAsrService implements AsrService {
         _isListening = false;
       };
 
-      _recognition!['onerror'] = () {
+      _recognition!['onerror'] = (dynamic event) {
         _isListening = false;
+        if (!_controller.isClosed) {
+          final err = event != null ? event.toString() : 'browser_asr_error';
+          _controller.addError('浏览器语音识别错误: $err');
+        }
       };
 
       _recognition!.callMethod('start');

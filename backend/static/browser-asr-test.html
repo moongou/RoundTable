@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Native ASR Test</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-0: #0b0e13;
+      --bg-1: #111826;
+      --bg-2: #19243a;
+      --ink-0: #e7ecff;
+      --ink-1: #9fb1d3;
+      --line: #2d3c5e;
+      --ok: #0de1a0;
+      --warn: #f5c451;
+      --err: #ff6d6d;
+      --accent: #41c5ff;
+      --accent-2: #7af0ff;
+      --ring: 0 0 0 2px rgba(65, 197, 255, 0.2);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink-0);
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      background:
+        radial-gradient(1200px 700px at -10% -10%, rgba(65, 197, 255, 0.22), transparent 48%),
+        radial-gradient(900px 480px at 105% 105%, rgba(122, 240, 255, 0.16), transparent 52%),
+        linear-gradient(165deg, var(--bg-0), var(--bg-1) 46%, var(--bg-2));
+      padding: 24px;
+    }
+
+    .shell {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 16px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(13, 20, 33, 0.75);
+      -webkit-backdrop-filter: blur(7px);
+      backdrop-filter: blur(7px);
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+    }
+
+    .sidebar {
+      padding: 16px;
+      position: sticky;
+      top: 18px;
+      height: fit-content;
+    }
+
+    .title {
+      margin: 0;
+      font-family: "Bebas Neue", sans-serif;
+      font-size: 44px;
+      letter-spacing: 1.5px;
+      line-height: 0.95;
+      color: var(--accent-2);
+    }
+
+    .subtitle {
+      margin: 8px 0 18px;
+      color: var(--ink-1);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .row {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    label {
+      font-size: 11px;
+      color: var(--ink-1);
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+    }
+
+    select, button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0e1626;
+      color: var(--ink-0);
+      font-family: inherit;
+      font-size: 12px;
+      padding: 10px 11px;
+      outline: none;
+    }
+
+    select:focus, button:focus {
+      box-shadow: var(--ring);
+      border-color: var(--accent);
+    }
+
+    .btn-primary {
+      border-color: #2a88ad;
+      background: linear-gradient(120deg, #1e5873, #1f7ba0);
+      cursor: pointer;
+    }
+
+    .btn-stop {
+      border-color: #966532;
+      background: linear-gradient(120deg, #5a3f22, #7e5626);
+      cursor: pointer;
+    }
+
+    .btn-ghost {
+      border-color: var(--line);
+      background: rgba(15, 24, 39, 0.8);
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .status {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+      padding: 12px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      background: rgba(12, 18, 30, 0.55);
+    }
+
+    .state-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #657592;
+      display: inline-block;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+
+    .state-dot.live {
+      background: var(--ok);
+      box-shadow: 0 0 12px rgba(13, 225, 160, 0.8);
+      animation: pulse 1.2s infinite;
+    }
+
+    .meta {
+      color: var(--ink-1);
+      font-size: 11px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.12); }
+      100% { transform: scale(1); }
+    }
+
+    .main {
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(11, 17, 29, 0.66);
+      padding: 12px;
+      min-height: 180px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 8px;
+    }
+
+    .panel h2 {
+      margin: 0;
+      font-size: 12px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .scroll {
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid #24304b;
+      border-radius: 10px;
+      padding: 10px;
+      background: rgba(9, 14, 24, 0.8);
+      line-height: 1.58;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+
+    .transcript-item {
+      margin-bottom: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px dotted #2a3550;
+    }
+
+    .transcript-item:last-child {
+      margin-bottom: 0;
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .tag {
+      display: inline-block;
+      margin-right: 6px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      border: 1px solid #32547b;
+      font-size: 10px;
+      color: var(--accent-2);
+      background: rgba(65, 197, 255, 0.09);
+    }
+
+    .final-text {
+      color: var(--ink-0);
+    }
+
+    .interim-text {
+      color: #b4c6e8;
+      opacity: 0.9;
+    }
+
+    .err {
+      color: var(--err);
+    }
+
+    .warn {
+      color: var(--warn);
+    }
+
+    .ok {
+      color: var(--ok);
+    }
+
+    .foot {
+      margin-top: 4px;
+      color: var(--ink-1);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    @media (max-width: 980px) {
+      body { padding: 12px; }
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { position: static; }
+      .toolbar { grid-template-columns: 1fr; }
+      .title { font-size: 36px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="card sidebar">
+      <h1 class="title">Native Browser ASR</h1>
+      <p class="subtitle">Standalone test page for Web Speech API recognition in local browsers. This verifies browser-native ASR without any backend ASR service.</p>
+
+      <div class="row">
+        <label for="lang">Language</label>
+        <select id="lang">
+          <option value="zh-CN" selected>zh-CN</option>
+          <option value="en-US">en-US</option>
+          <option value="ja-JP">ja-JP</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="mode">Mode</label>
+        <select id="mode">
+          <option value="continuous" selected>Continuous</option>
+          <option value="single">Single Utterance</option>
+        </select>
+      </div>
+
+      <div class="toolbar">
+        <button id="btnStart" class="btn-primary">Start</button>
+        <button id="btnStop" class="btn-stop" disabled>Stop</button>
+        <button id="btnClear" class="btn-ghost">Clear</button>
+      </div>
+
+      <div class="status">
+        <div><span id="dot" class="state-dot"></span><strong id="stateText">Idle</strong></div>
+        <div class="meta" id="engineInfo"></div>
+        <div class="meta" id="counterInfo">Final chunks: 0</div>
+      </div>
+
+      <p class="foot">Tip: use HTTPS or localhost for microphone permission. Safari and Chromium differ in support and event behavior.</p>
+    </aside>
+
+    <main class="card main">
+      <section class="panel">
+        <h2>Interim Transcript</h2>
+        <div id="interim" class="scroll"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Final Transcript</h2>
+        <div id="final" class="scroll"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Event Log</h2>
+        <div id="log" class="scroll"></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      var btnStart = document.getElementById('btnStart');
+      var btnStop = document.getElementById('btnStop');
+      var btnClear = document.getElementById('btnClear');
+      var langSel = document.getElementById('lang');
+      var modeSel = document.getElementById('mode');
+      var stateText = document.getElementById('stateText');
+      var dot = document.getElementById('dot');
+      var interimBox = document.getElementById('interim');
+      var finalBox = document.getElementById('final');
+      var logBox = document.getElementById('log');
+      var engineInfo = document.getElementById('engineInfo');
+      var counterInfo = document.getElementById('counterInfo');
+
+      var recognizer = null;
+      var finalCount = 0;
+      var running = false;
+
+      function appendLog(text, cls) {
+        var t = new Date();
+        var stamp = t.toLocaleTimeString();
+        var line = document.createElement('div');
+        if (cls) line.className = cls;
+        line.textContent = '[' + stamp + '] ' + text;
+        logBox.appendChild(line);
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      function appendFinal(text, confidence) {
+        var wrap = document.createElement('div');
+        wrap.className = 'transcript-item';
+
+        var tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = 'final';
+        wrap.appendChild(tag);
+
+        var body = document.createElement('span');
+        body.className = 'final-text';
+        var conf = typeof confidence === 'number' ? ' (conf=' + confidence.toFixed(3) + ')' : '';
+        body.textContent = text + conf;
+        wrap.appendChild(body);
+
+        finalBox.appendChild(wrap);
+        finalBox.scrollTop = finalBox.scrollHeight;
+      }
+
+      function setRunning(isRunning) {
+        running = isRunning;
+        btnStart.disabled = isRunning || !SpeechRecognition;
+        btnStop.disabled = !isRunning || !SpeechRecognition;
+        dot.className = 'state-dot' + (isRunning ? ' live' : '');
+        stateText.textContent = isRunning ? 'Listening' : 'Idle';
+      }
+
+      function resetText() {
+        interimBox.textContent = '';
+        finalBox.textContent = '';
+        logBox.textContent = '';
+        finalCount = 0;
+        counterInfo.textContent = 'Final chunks: 0';
+      }
+
+      if (!SpeechRecognition) {
+        engineInfo.textContent = 'Web Speech API unavailable in this browser.';
+        appendLog('SpeechRecognition API not detected.', 'err');
+        btnStart.disabled = true;
+        btnStop.disabled = true;
+        return;
+      }
+
+      engineInfo.textContent = 'Engine: ' + (window.webkitSpeechRecognition ? 'webkitSpeechRecognition' : 'SpeechRecognition');
+
+      recognizer = new SpeechRecognition();
+      recognizer.lang = langSel.value;
+      recognizer.interimResults = true;
+      recognizer.maxAlternatives = 1;
+      recognizer.continuous = true;
+
+      langSel.addEventListener('change', function () {
+        recognizer.lang = langSel.value;
+        appendLog('Language set to ' + recognizer.lang, 'ok');
+      });
+
+      modeSel.addEventListener('change', function () {
+        recognizer.continuous = modeSel.value === 'continuous';
+        appendLog('Mode set to ' + modeSel.value, 'ok');
+      });
+
+      recognizer.onstart = function () {
+        setRunning(true);
+        appendLog('Recognition started.', 'ok');
+      };
+
+      recognizer.onresult = function (event) {
+        var interimText = '';
+        for (var i = event.resultIndex; i < event.results.length; i++) {
+          var result = event.results[i];
+          var text = result[0] ? result[0].transcript.trim() : '';
+          if (!text) continue;
+          if (result.isFinal) {
+            finalCount += 1;
+            appendFinal(text, result[0] ? result[0].confidence : null);
+            counterInfo.textContent = 'Final chunks: ' + finalCount;
+          } else {
+            interimText += (interimText ? ' ' : '') + text;
+          }
+        }
+        interimBox.textContent = interimText;
+      };
+
+      recognizer.onerror = function (event) {
+        var msg = 'Error: ' + event.error;
+        appendLog(msg, 'err');
+        if (event.message) appendLog('Detail: ' + event.message, 'warn');
+      };
+
+      recognizer.onend = function () {
+        setRunning(false);
+        appendLog('Recognition ended.', 'warn');
+      };
+
+      btnStart.addEventListener('click', function () {
+        try {
+          recognizer.lang = langSel.value;
+          recognizer.continuous = modeSel.value === 'continuous';
+          recognizer.start();
+        } catch (e) {
+          appendLog('Start failed: ' + e, 'err');
+        }
+      });
+
+      btnStop.addEventListener('click', function () {
+        try {
+          recognizer.stop();
+          appendLog('Stop requested.', 'warn');
+        } catch (e) {
+          appendLog('Stop failed: ' + e, 'err');
+        }
+      });
+
+      btnClear.addEventListener('click', function () {
+        resetText();
+      });
+
+      appendLog('Page ready.', 'ok');
+    })();
+  </script>
+</body>
+</html>

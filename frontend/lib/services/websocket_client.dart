@@ -9,6 +9,7 @@ enum WsEventType {
   turnChange,
   stream,
   stateChange,
+  phaseTelemetry,
   system,
   humanInputRequested,
   apiError,
@@ -38,13 +39,23 @@ enum WsEventType {
 class WsEvent {
   final WsEventType eventType;
   final Map<String, dynamic>? data;
+  final int? eventSeq;
 
-  const WsEvent({required this.eventType, this.data});
+  const WsEvent({required this.eventType, this.data, this.eventSeq});
 
-  factory WsEvent.fromJson(Map<String, dynamic> json) => WsEvent(
-        eventType: WsEventType.fromString(json['event_type'] as String),
-        data: json['data'] as Map<String, dynamic>?,
-      );
+  factory WsEvent.fromJson(Map<String, dynamic> json) {
+    final eventTypeRaw = json['event_type']?.toString() ?? 'error';
+    final dataRaw = json['data'];
+    final dataMap = dataRaw is Map
+      ? Map<String, dynamic>.from(dataRaw)
+        : <String, dynamic>{};
+
+    return WsEvent(
+      eventType: WsEventType.fromString(eventTypeRaw),
+      data: dataMap,
+      eventSeq: (json['event_seq'] as num?)?.toInt(),
+    );
+  }
 }
 
 /// WebSocket 客户端，用于接收讨论事件和发送人类输入
@@ -85,11 +96,20 @@ class DiscussionWebSocket {
     _channel!.stream.listen(
       (message) {
         try {
-          final json = jsonDecode(message as String) as Map<String, dynamic>;
+          final decoded = jsonDecode(message as String);
+          if (decoded is! Map) {
+            throw FormatException('WebSocket payload is not a JSON object');
+          }
+          final json = Map<String, dynamic>.from(decoded);
           final event = WsEvent.fromJson(json);
           _eventController.add(event);
         } catch (e) {
-          // 忽略解析错误
+          _eventController.add(WsEvent(
+            eventType: WsEventType.error,
+            data: {
+              'message': 'WebSocket 事件解析失败: $e',
+            },
+          ));
         }
       },
       onDone: () {
@@ -134,6 +154,32 @@ class DiscussionWebSocket {
     _channel!.sink.add(jsonEncode({
       'type': 'push_to_talk_end',
       'speaker': speaker,
+    }));
+  }
+
+  /// 上报前端 ASR 引擎工作状态，便于后端日志与时序观测。
+  void sendAsrStatus({
+    required String speaker,
+    required String provider,
+    required String status,
+    bool? available,
+    bool? listening,
+    int? textLen,
+    bool? isFinal,
+    String? error,
+  }) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'asr_status',
+      'speaker': speaker,
+      'provider': provider,
+      'status': status,
+      if (available != null) 'available': available,
+      if (listening != null) 'listening': listening,
+      if (textLen != null) 'text_len': textLen,
+      if (isFinal != null) 'is_final': isFinal,
+      if (error != null && error.isNotEmpty) 'error': error,
     }));
   }
 

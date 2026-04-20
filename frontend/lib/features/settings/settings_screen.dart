@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/config_models.dart';
+import '../../services/speech_service.dart';
 import '../../state/settings_provider.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
@@ -70,6 +71,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   // Voice service test state
   bool _testingVoiceService = false;
   Map<String, dynamic>? _voiceServiceTestResult;
+  bool _runningDeepVoiceTest = false;
+  Map<String, dynamic>? _deepVoiceTestResult;
 
   String _interactionModeLabel(LocalSettings s) {
     if (!s.pushToTalk) return '自由对话';
@@ -143,6 +146,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             providerId: p.id,
             apiKey: _apiKeyCtrl[p.id]?.text.trim(),
             baseUrl: _baseUrlCtrl[p.id]?.text.trim(),
+            model: _modelCtrl[p.id]?.text.trim(),
           );
       setState(() => _providerTestResult[p.id] = result);
       if (result.success && result.models.isNotEmpty) {
@@ -166,6 +170,17 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       final key = _apiKeyCtrl[p.id]?.text.trim() ?? '';
       final url = _baseUrlCtrl[p.id]?.text.trim() ?? '';
       final mdl = _modelCtrl[p.id]?.text.trim() ?? '';
+      final tested = _providerTestResult[p.id];
+
+      if (tested == null || !tested.success || tested.models.isEmpty) {
+        _snackErr('请先点击“测试连接”，并确保返回可用模型后再保存。');
+        return;
+      }
+      if (mdl.isEmpty || !tested.models.contains(mdl)) {
+        _snackErr('当前模型不可用，请从下拉中选择已验证模型。');
+        return;
+      }
+
       if (key.isNotEmpty) updates['${p.id}_api_key'] = key;
       if (url.isNotEmpty) updates['${p.id}_base_url'] = url;
       if (mdl.isNotEmpty) updates['${p.id}_model'] = mdl;
@@ -260,6 +275,52 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                       currentConfig.webSearchEnabled ? 'Tavily 已启用' : '未启用'),
                 _DialogRow('交互方式', _interactionModeLabel(s)),
                 _DialogRow('服务器', s.serverUrl),
+                const SizedBox(height: 12),
+                const Text('可用性检测',
+                    style: TextStyle(
+                        color: AppColors.amberGold,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                if ((r?.checks ?? const []).isEmpty)
+                  const Text('暂无详细检测项',
+                      style: TextStyle(color: AppColors.warmGray, fontSize: 11))
+                else
+                  ...r!.checks.map(
+                    (c) => Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            c.ok ? Icons.check_circle : Icons.cancel,
+                            color: c.ok ? Colors.green : Colors.red,
+                            size: 14,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  c.name,
+                                  style: const TextStyle(
+                                      color: AppColors.warmWhite,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600),
+                                ),
+                                Text(
+                                  c.detail,
+                                  style: const TextStyle(
+                                      color: AppColors.warmGray, fontSize: 11),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -697,6 +758,61 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                 ),
               ),
             ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _OutBtn(
+                _runningDeepVoiceTest
+                    ? '深度测试中…'
+                    : (type == 'asr' ? '🧪 ASR 示例识别' : '🧪 TTS 示例合成'),
+                onTap:
+                    (_runningDeepVoiceTest || _voiceServiceTestResult == null)
+                        ? null
+                        : () => _runDeepVoiceTest(
+                              (_voiceServiceTestResult!['service'] ?? '')
+                                  .toString(),
+                              type,
+                            ),
+                loading: _runningDeepVoiceTest,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                type == 'asr' ? '生成示例识别文本供你确认' : '返回合成延迟与音频大小',
+                style: const TextStyle(color: AppColors.warmGray, fontSize: 11),
+              ),
+            ],
+          ),
+          if (_deepVoiceTestResult != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.25),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: AppColors.warmGray.withValues(alpha: 0.2)),
+                ),
+                child: _deepVoiceTestResult!['status'] == 'ok'
+                    ? (type == 'asr'
+                        ? Text(
+                            '原文：${_deepVoiceTestResult!['expected_text']} ｜ 识别：${_deepVoiceTestResult!['recognized_text']} ｜ 匹配度：${_deepVoiceTestResult!['match_percent']}%',
+                            style: const TextStyle(
+                                color: AppColors.warmWhite, fontSize: 11),
+                          )
+                        : Text(
+                            '文本：${_deepVoiceTestResult!['preview_text']} ｜ 延迟：${_deepVoiceTestResult!['synth_ms']}ms ｜ 音频：${_deepVoiceTestResult!['audio_size']}B',
+                            style: const TextStyle(
+                                color: AppColors.warmWhite, fontSize: 11),
+                          ))
+                    : Text(
+                        '深度测试失败：${_deepVoiceTestResult!['error'] ?? '未知错误'}',
+                        style: const TextStyle(
+                            color: Colors.redAccent, fontSize: 11),
+                      ),
+              ),
+            ),
         ],
       );
 
@@ -728,6 +844,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                 '平均: ${m['avg_ms']}ms  最小: ${m['min_ms']}ms  最大: ${m['max_ms']}ms';
           } else if (m.containsKey('error')) {
             detail = m['error'] as String;
+          }
+          final note = (m['note'] ?? '').toString().trim();
+          if (note.isNotEmpty) {
+            detail = detail.isEmpty ? note : '$detail  ｜  $note';
           }
           return Padding(
             padding: const EdgeInsets.only(bottom: 4),
@@ -770,11 +890,90 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       final client = ref.read(apiClientProvider);
       final resp = await client.dio
           .post('/api/v1/benchmark/asr', queryParameters: {'rounds': 3});
-      setState(() => _asrBenchmark = resp.data as Map<String, dynamic>);
+      final merged =
+          Map<String, dynamic>.from(resp.data as Map<String, dynamic>);
+      final results = ((merged['results'] as List<dynamic>?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+
+      final browserResult = await _runBrowserAsrBenchmarkLocal(rounds: 3);
+      results.removeWhere((r) => (r['service'] ?? '').toString() == 'browser');
+      results.add(browserResult);
+
+      final ok = results
+          .where((r) => r['status'] == 'ok' && r['latency'] is Map)
+          .toList()
+        ..sort((a, b) {
+          final av =
+              ((a['latency'] as Map)['avg_ms'] as num?)?.toDouble() ?? 999999;
+          final bv =
+              ((b['latency'] as Map)['avg_ms'] as num?)?.toDouble() ?? 999999;
+          return av.compareTo(bv);
+        });
+
+      merged['results'] = results;
+      merged['recommended'] =
+          ok.isNotEmpty ? ok.first['service'] : merged['recommended'];
+      setState(() => _asrBenchmark = merged);
     } catch (e) {
       _snackErr('ASR 测试失败: $e');
     } finally {
       setState(() => _benchmarkingAsr = false);
+    }
+  }
+
+  Future<Map<String, dynamic>> _runBrowserAsrBenchmarkLocal(
+      {int rounds = 3}) async {
+    final serverUrl = _serverUrlCtrl.text.trim().isNotEmpty
+        ? _serverUrlCtrl.text.trim()
+        : 'http://localhost:8001';
+    final asr = createAsrService('browser', serverUrl: serverUrl);
+    try {
+      if (!asr.isAvailable) {
+        return {
+          'service': 'browser',
+          'status': 'unavailable',
+          'error': '浏览器原生 ASR 当前不可用',
+          'note': '受浏览器实现与权限策略影响',
+        };
+      }
+
+      final latencies = <double>[];
+      for (var i = 0; i < rounds; i++) {
+        final sw = Stopwatch()..start();
+        await asr.startListening();
+        sw.stop();
+        latencies.add(sw.elapsedMilliseconds.toDouble());
+        await Future.delayed(const Duration(milliseconds: 180));
+        await asr.stopListening();
+        await Future.delayed(const Duration(milliseconds: 120));
+      }
+
+      final avg = latencies.reduce((a, b) => a + b) / latencies.length;
+      final minV = latencies.reduce((a, b) => a < b ? a : b);
+      final maxV = latencies.reduce((a, b) => a > b ? a : b);
+
+      return {
+        'service': 'browser',
+        'status': 'ok',
+        'latency': {
+          'avg_ms': double.parse(avg.toStringAsFixed(1)),
+          'min_ms': double.parse(minV.toStringAsFixed(1)),
+          'max_ms': double.parse(maxV.toStringAsFixed(1)),
+          'rounds': latencies.length,
+          'errors': 0,
+        },
+        'note': '本地浏览器 ASR 启动延迟（不含口述识别耗时）',
+      };
+    } catch (e) {
+      return {
+        'service': 'browser',
+        'status': 'error',
+        'error': '$e',
+        'note': '请允许麦克风权限后重试',
+      };
+    } finally {
+      asr.dispose();
     }
   }
 
@@ -830,6 +1029,26 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       _snackErr('服务测试失败: $e');
     } finally {
       setState(() => _testingVoiceService = false);
+    }
+  }
+
+  Future<void> _runDeepVoiceTest(String serviceId, String type) async {
+    setState(() {
+      _runningDeepVoiceTest = true;
+      _deepVoiceTestResult = null;
+    });
+    try {
+      final client = ref.read(apiClientProvider);
+      final resp = await client.dio
+          .post('/api/v1/benchmark/voice/deep-test', queryParameters: {
+        'service_id': serviceId,
+        'service_type': type,
+      });
+      setState(() => _deepVoiceTestResult = resp.data as Map<String, dynamic>);
+    } catch (e) {
+      _snackErr('深度测试失败: $e');
+    } finally {
+      setState(() => _runningDeepVoiceTest = false);
     }
   }
 
@@ -1173,159 +1392,90 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         p.id == ref.read(localSettingsProvider).valueOrNull?.llmProvider;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Divider(color: AppColors.warmGray, height: 18),
-      // API Key + 操作按钮同行
       if (p.needsApiKey) ...[
-        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const _Label('API Key'),
-              _Field(
-                  ctrl: _pk(p),
-                  hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
-                  obscure: true),
-            ]),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    alignment: WrapAlignment.end,
-                    children: [
-                      _OutBtn('应用\n（本次有效）',
-                          onTap: saving ? null : () => _saveProvider(p),
-                          height: 48,
-                          padding: 12),
-                      _GoldBtn('💾 写入\n.env',
-                          onTap: saving
-                              ? null
-                              : () => _saveProvider(p, persist: true),
-                          height: 48,
-                          padding: 12),
-                      _OutBtn(testing ? '测试中…' : '🔌 测试\n连接',
-                          onTap: testing ? null : () => _testProvider(p),
-                          loading: testing,
-                          height: 48,
-                          padding: 12),
-                    ],
-                  ),
-                  if (result != null) ...[
-                    const SizedBox(width: 12),
-                    Icon(result.success ? Icons.check_circle : Icons.cancel,
-                        color: result.success ? Colors.green : Colors.red,
-                        size: 14),
-                    const SizedBox(width: 4),
-                    Flexible(
-                        child: Text(
-                      result.success
-                          ? '✓ ${result.models.length} 个模型'
-                          : result.error ?? '失败',
-                      style: TextStyle(
-                          fontSize: 10,
-                          color: result.success ? Colors.green : Colors.red),
-                      overflow: TextOverflow.ellipsis,
-                    )),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ]),
+        const _Label('API Key'),
+        _Field(
+          ctrl: _pk(p),
+          hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
+          obscure: true,
+        ),
         const SizedBox(height: 8),
       ],
-      // Base URL + 测试结果
+      const _Label('请求地址（Base URL）'),
+      _Field(ctrl: _bu(p), hint: p.baseUrl),
+      const SizedBox(height: 8),
       Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
         Expanded(
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const _Label('请求地址（Base URL）'),
-            _Field(ctrl: _bu(p), hint: p.baseUrl),
-          ]),
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              if (!p.needsApiKey) ...[
-                _OutBtn('应用\n（本次有效）',
-                    onTap: saving ? null : () => _saveProvider(p),
-                    height: 48,
-                    padding: 12),
-                const SizedBox(width: 8),
-                _GoldBtn('💾 写入\n.env',
-                    onTap:
-                        saving ? null : () => _saveProvider(p, persist: true),
-                    height: 48,
-                    padding: 12),
-                const SizedBox(width: 8),
-                _OutBtn(testing ? '测试中…' : '🔌 测试\n连接',
-                    onTap: testing ? null : () => _testProvider(p),
-                    loading: testing,
-                    height: 48,
-                    padding: 12),
-              ],
-              if (result != null) ...[
-                const SizedBox(width: 12),
-                Icon(result.success ? Icons.check_circle : Icons.cancel,
-                    color: result.success ? Colors.green : Colors.red,
-                    size: 14),
-                const SizedBox(width: 4),
-                Flexible(
-                    child: Text(
-                  result.success
-                      ? '✓ ${result.models.length} 个模型可用'
-                      : result.error ?? '失败',
-                  style: TextStyle(
-                      fontSize: 10,
-                      color: result.success ? Colors.green : Colors.red),
-                  overflow: TextOverflow.ellipsis,
-                )),
-              ],
-            ]),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const _Label('模型'),
+              result != null && result.success && result.models.isNotEmpty
+                  ? _DropField(items: result.models, ctrl: _mc(p))
+                  : _Field(ctrl: _mc(p), hint: p.model),
+            ],
           ),
         ),
+        if (!active) ...[
+          const SizedBox(width: 10),
+          OutlinedButton.icon(
+            onPressed: () => _selectProvider(p),
+            icon: const Icon(Icons.check_circle_outline, size: 14),
+            label: const Text('设为当前'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.amberGold,
+              side: const BorderSide(color: AppColors.amberGold),
+              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+              textStyle: const TextStyle(fontSize: 11),
+            ),
+          ),
+        ],
       ]),
-      const SizedBox(height: 8),
-      // 模型选择
-      Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-        Expanded(
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const _Label('模型'),
-            result != null && result.success && result.models.isNotEmpty
-                ? _DropField(items: result.models, ctrl: _mc(p))
-                : _Field(ctrl: _mc(p), hint: p.model),
-          ]),
-        ),
-        const SizedBox(width: 16),
-        if (!active)
-          Expanded(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: OutlinedButton.icon(
-                onPressed: () => _selectProvider(p),
-                icon: const Icon(Icons.check_circle_outline, size: 14),
-                label: const Text('使用此提供商'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.amberGold,
-                  side: const BorderSide(color: AppColors.amberGold),
-                  padding:
-                      const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-                  textStyle: const TextStyle(fontSize: 12),
+      const SizedBox(height: 10),
+      _ProviderActionBar(
+        testing: testing,
+        saving: saving,
+        onApply: () => _saveProvider(p),
+        onPersist: () => _saveProvider(p, persist: true),
+        onTest: () => _testProvider(p),
+      ),
+      if (result != null) ...[
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            color: Colors.black.withValues(alpha: 0.22),
+            border: Border.all(
+              color: (result.success ? Colors.green : Colors.red)
+                  .withValues(alpha: 0.4),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                result.success ? Icons.check_circle : Icons.cancel,
+                color: result.success ? Colors.green : Colors.red,
+                size: 14,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  result.success
+                      ? '连接成功，可用模型 ${result.models.length} 个'
+                      : (result.error ?? '连接失败'),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: result.success ? Colors.green : Colors.red,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-            ),
-          )
-        else
-          const Expanded(child: SizedBox.shrink()),
-      ]),
+            ],
+          ),
+        ),
+      ],
     ]);
   }
 
@@ -1459,6 +1609,19 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           )),
         ],
       ]),
+      if (result != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            result.success
+                ? 'HTTP ${result.statusCode ?? '-'} · ${result.latencyMs?.toStringAsFixed(1) ?? '-'}ms'
+                : 'HTTP ${result.statusCode ?? '-'} · ${result.error ?? '连接失败'}',
+            style: TextStyle(
+              fontSize: 10,
+              color: result.success ? AppColors.warmGray : Colors.redAccent,
+            ),
+          ),
+        ),
       if (result != null && result.success && voices.isNotEmpty) ...[
         const SizedBox(height: 8),
         const _Label('选择音色'),
@@ -1588,6 +1751,75 @@ class _Label extends StatelessWidget {
         child: Text(text,
             style: const TextStyle(color: AppColors.warmGray, fontSize: 11)),
       );
+}
+
+class _ProviderActionBar extends StatelessWidget {
+  final bool testing;
+  final bool saving;
+  final VoidCallback onApply;
+  final VoidCallback onPersist;
+  final VoidCallback onTest;
+
+  const _ProviderActionBar({
+    required this.testing,
+    required this.saving,
+    required this.onApply,
+    required this.onPersist,
+    required this.onTest,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isCompact = constraints.maxWidth < 520;
+        final buttons = [
+          Expanded(
+            child: _OutBtn(
+              '应用（本次）',
+              onTap: saving ? null : onApply,
+              height: 40,
+            ),
+          ),
+          Expanded(
+            child: _GoldBtn(
+              '写入 .env',
+              onTap: saving ? null : onPersist,
+              height: 40,
+            ),
+          ),
+          Expanded(
+            child: _OutBtn(
+              testing ? '测试中…' : '测试连接',
+              onTap: testing ? null : onTest,
+              loading: testing,
+              height: 40,
+            ),
+          ),
+        ];
+
+        if (isCompact) {
+          return Column(
+            children: [
+              Row(children: [buttons[0], const SizedBox(width: 8), buttons[1]]),
+              const SizedBox(height: 8),
+              Row(children: [buttons[2]]),
+            ],
+          );
+        }
+
+        return Row(
+          children: [
+            buttons[0],
+            const SizedBox(width: 8),
+            buttons[1],
+            const SizedBox(width: 8),
+            buttons[2],
+          ],
+        );
+      },
+    );
+  }
 }
 
 class _GoldBtn extends StatelessWidget {
@@ -1794,9 +2026,22 @@ class _HealthTile extends StatelessWidget {
           color: ok ? Colors.green : Colors.red, size: 16),
       title: Text(nameMap[health.name] ?? health.name,
           style: const TextStyle(color: AppColors.warmWhite, fontSize: 12)),
-      subtitle: Text(health.url,
-          style: const TextStyle(color: AppColors.warmGray, fontSize: 10)),
-      trailing: Text(ok ? '在线' : '离线',
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(health.url,
+              style: const TextStyle(color: AppColors.warmGray, fontSize: 10)),
+          Text(
+            health.detail ??
+                'HTTP ${health.statusCode?.toString() ?? '-'} · ${health.latencyMs?.toStringAsFixed(1) ?? '-'}ms',
+            style: TextStyle(
+                color: ok ? AppColors.warmGray : Colors.redAccent,
+                fontSize: 10),
+          ),
+        ],
+      ),
+      trailing: Text(ok ? '可用' : '不可用',
           style: TextStyle(
               color: ok ? Colors.green : Colors.red,
               fontWeight: FontWeight.bold,

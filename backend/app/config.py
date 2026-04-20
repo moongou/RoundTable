@@ -128,10 +128,10 @@ VOICE_SERVICE_META = {
     },
     "vosk": {
         "name": "Vosk 本地语音识别（流式）",
-        "default_url": "http://localhost:6666",
+        "default_url": "http://localhost:6702",
         "type": "asr",
         "needs_api_key": False,
-        "health_path": "/health/vosk",
+        "health_path": "/health",
     },
     "funasr": {
         "name": "FunASR 本地语音识别",

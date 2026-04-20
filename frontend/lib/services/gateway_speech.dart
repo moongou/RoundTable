@@ -63,6 +63,11 @@ class GatewayStreamingAsrService implements AsrService {
   /// 预热 WebSocket 连接，减少首次录音延迟
   void _preWarmConnection() {
     if (_disposed) return;
+    if (_warmWs != null &&
+        (_warmWs!.readyState == html.WebSocket.OPEN ||
+            _warmWs!.readyState == html.WebSocket.CONNECTING)) {
+      return;
+    }
     try {
       final wsUrl = gatewayUrl.replaceFirst('http', 'ws');
       _warmWs = html.WebSocket('$wsUrl/asr/stream');
@@ -73,6 +78,11 @@ class GatewayStreamingAsrService implements AsrService {
         _warmWs = null;
       });
     } catch (_) {}
+  }
+
+  @override
+  Future<void> warmup() async {
+    _preWarmConnection();
   }
 
   @override
@@ -298,7 +308,11 @@ class GatewayTtsService implements TtsService {
 
   // TTS 预加载缓存
   final Map<String, Uint8List> _prefetchCache = {};
+  final Map<String, Future<void>> _prefetchInFlight = {};
   static const int _maxCacheSize = 5;
+  int _prefetchRequested = 0;
+  int _prefetchHit = 0;
+  int _prefetchMiss = 0;
 
   GatewayTtsService({
     this.gatewayUrl = _defaultGatewayUrl,
@@ -313,19 +327,70 @@ class GatewayTtsService implements TtsService {
   @override
   bool get isSpeaking => _isSpeaking;
 
+  @override
+  TtsPerfSnapshot getPerfSnapshot() {
+    return TtsPerfSnapshot(
+      prefetchHit: _prefetchHit,
+      prefetchMiss: _prefetchMiss,
+      prefetchRequested: _prefetchRequested,
+    );
+  }
+
+  String _cacheKey(String text, {String? voice}) {
+    return '${voice ?? 'default'}::$text';
+  }
+
   /// 预加载一段文本的 TTS（后台合成，缓存结果）
+  @override
   Future<void> prefetch(String text, {String? voice}) async {
-    if (_prefetchCache.containsKey(text)) return;
-    try {
-      final audioBytes = await _synthesize(text, voice: voice);
-      if (audioBytes.isNotEmpty) {
-        // 限制缓存大小
-        if (_prefetchCache.length >= _maxCacheSize) {
-          _prefetchCache.remove(_prefetchCache.keys.first);
+    _prefetchRequested += 1;
+    final key = _cacheKey(text, voice: voice);
+    if (_prefetchCache.containsKey(key)) return;
+    final existing = _prefetchInFlight[key];
+    if (existing != null) {
+      await existing;
+      return;
+    }
+
+    final job = () async {
+      try {
+        final audioBytes = await _synthesize(text, voice: voice);
+        if (audioBytes.isNotEmpty) {
+          // 限制缓存大小
+          if (_prefetchCache.length >= _maxCacheSize) {
+            _prefetchCache.remove(_prefetchCache.keys.first);
+          }
+          _prefetchCache[key] = audioBytes;
         }
-        _prefetchCache[text] = audioBytes;
+      } catch (_) {
+        // Ignore prefetch failures; playback path will retry on demand.
+      } finally {
+        _prefetchInFlight.remove(key);
       }
-    } catch (_) {}
+    }();
+
+    _prefetchInFlight[key] = job;
+    await job;
+  }
+
+  @override
+  Future<void> prefetchBatch(
+    List<({String text, String? voice})> items, {
+    int maxConcurrent = 2,
+  }) async {
+    if (items.isEmpty) return;
+
+    final queue = List<({String text, String? voice})>.from(items);
+    final workers = maxConcurrent.clamp(1, 4);
+
+    Future<void> worker() async {
+      while (queue.isNotEmpty) {
+        final item = queue.removeLast();
+        await prefetch(item.text, voice: item.voice);
+      }
+    }
+
+    await Future.wait(List.generate(workers, (_) => worker()));
   }
 
   Future<Uint8List> _synthesize(String text, {String? voice}) async {
@@ -349,9 +414,12 @@ class GatewayTtsService implements TtsService {
 
       // 优先使用预加载缓存
       Uint8List audioBytes;
-      if (_prefetchCache.containsKey(text)) {
-        audioBytes = _prefetchCache.remove(text)!;
+      final key = _cacheKey(text, voice: voice);
+      if (_prefetchCache.containsKey(key)) {
+        _prefetchHit += 1;
+        audioBytes = _prefetchCache.remove(key)!;
       } else {
+        _prefetchMiss += 1;
         audioBytes = await _synthesize(text, voice: voice);
       }
 
