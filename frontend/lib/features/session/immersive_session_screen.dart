@@ -430,8 +430,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _hasBlockingPlaybackForHumanTurn() {
     return _ttsPlaying ||
         _ttsService.isSpeaking ||
-        _ttsQueue.isNotEmpty ||
-        _isRecording;
+        _ttsQueue.isNotEmpty;
   }
 
   void _scheduleBackgroundTask(Future<void> Function() task) {
@@ -753,6 +752,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _pendingHumanTurnGuardTimer = Timer(delay, () {
       if (!mounted) return;
 
+      // Already in user's turn or actively recording — no recovery needed
+      if (_isMyTurn || _isRecording) {
+        _cancelPendingHumanTurnGuard();
+        return;
+      }
+
       if (_commander.shouldForceActivatePending(
         hasOngoingSpeechPlayback: _hasBlockingPlaybackForHumanTurn(),
       )) {
@@ -766,7 +771,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           recovery: true,
           speaker: speaker,
         );
-        _showStatusToast('检测到发言切换延迟，已自动恢复到你的发言回合');
         _activateHumanTurnNow(speaker: speaker);
         return;
       }
@@ -1319,6 +1323,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
         break;
       case WsEventType.humanInputRequested:
+        // If already in user's turn or actively recording, ignore duplicate requests
+        if (_isMyTurn || _isRecording) {
+          break;
+        }
         final command = _commander.onHumanInputRequested(
           speaker: widget.humanName,
           hasOngoingSpeechPlayback: _hasBlockingPlaybackForHumanTurn(),
