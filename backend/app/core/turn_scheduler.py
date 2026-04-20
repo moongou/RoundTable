@@ -2,10 +2,17 @@
 
 管理圆桌讨论的轮次调度，使用自定义的 selector_func
 实现主持人主导的点名机制。
+
+核心规则：
+- 老师开场
+- 用户发言后，老师优先点评
+- 老师/用户可指定下一个发言角色
+- 发言队列严格顺序执行
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional
 
@@ -15,6 +22,8 @@ from autogen_agentchat.teams import SelectorGroupChat
 from autogen_core.models import ChatCompletionClient
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # 主持人选择器提示词
 MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参与者中选择下一位发言者。
@@ -26,36 +35,71 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 {history}
 
 规则：
-1. 确保每位参与者发言次数大致均衡
-2. 不要让同一个人连续发言两次（除老师外）
-3. 优先让还没发言的人先说
-4. 只输出参与者名字，不要其他内容
+0. 每个新话题开场必须先由老师发言，介绍背景后再点名
+1. 人类学生是讨论的焦点人物，讨论应以人类学生为重心展开
+2. 人类学生每次发言后，老师应立即点评（总结、补充提问或引导深入）
+3. 确保每位参与者发言次数大致均衡
+4. 不要让同一个人连续发言两次（除老师外）
+5. 优先让还没发言的人先说
+6. 不要过于频繁让人类学生发言，通常至少间隔2位非人类发言者
+7. 如果有人被指定发言（如"请XX发言"），优先安排该角色
+8. 只输出参与者名字，不要其他内容
 """
 
 # 结束讨论的关键词
 TERMINATION_KEYWORDS = ["讨论结束", "END_DISCUSSION", "今天讨论到这里"]
 
+# 全局指定发言者请求（由 floor_manager / websocket 设置）
+_designated_next_speaker: Optional[str] = None
 
-def parse_moderator_direction(text: str, participant_names: list[str]) -> Optional[str]:
-    """从主持人的发言中解析点名信息。
 
-    例如:
-    - "请小探发言" → "小探"
-    - "小明，你怎么看？" → "小明"
-    - "我们来听听小说的想法" → "小说"
+def set_designated_speaker(name: Optional[str]) -> None:
+    """设置被指定的下一个发言者。"""
+    global _designated_next_speaker
+    _designated_next_speaker = name
+    if name:
+        logger.info("[TurnScheduler] 指定下一位发言者: %s", name)
+
+
+def get_designated_speaker() -> Optional[str]:
+    """获取并清除被指定的下一个发言者。"""
+    global _designated_next_speaker
+    name = _designated_next_speaker
+    _designated_next_speaker = None
+    return name
+
+
+def parse_speaker_designation(text: str, participant_names: list[str]) -> Optional[str]:
+    """从发言内容中解析指定发言者。
+
+    支持模式：
+    - "请小探发言" / "请小探来谈谈"
+    - "小明，你怎么看？" / "小明你觉得呢"
+    - "我们来听听小说的想法"
+    - "我想听听小理的观点"
 
     Args:
-        text: 主持人的发言文本。
+        text: 发言文本。
         participant_names: 所有参与者名字列表。
 
     Returns:
-        被点名的参与者名字，如果无法解析则返回 None。
+        被指定的参与者名字，如果无法解析则返回 None。
     """
-    # 直接检查主持人是否提到了某位参与者的名字
-    for name in participant_names:
-        # 匹配 "请XXX发言"、"XXX你怎么看"、"听听XXX的想法" 等模式
-        if name in text:
-            return name
+    # 按名字长度降序匹配，避免短名误匹配
+    sorted_names = sorted(participant_names, key=len, reverse=True)
+    for name in sorted_names:
+        # 匹配各种点名模式
+        patterns = [
+            rf'请{re.escape(name)}',
+            rf'{re.escape(name)}[，,]?\s*你(怎么看|觉得|认为|来说|来谈)',
+            rf'听听{re.escape(name)}',
+            rf'想听{re.escape(name)}',
+            rf'{re.escape(name)}发言',
+            rf'{re.escape(name)}来谈',
+        ]
+        for pat in patterns:
+            if re.search(pat, text):
+                return name
     return None
 
 
@@ -64,10 +108,7 @@ def _exclude_recent_speakers(
     all_participant_names: list[str],
     moderator_name: str = "老师",
 ) -> list[str]:
-    """排除最近发言的参与者，避免连续发言。
-
-    主持人不受此限制，随时可以被选中来引导讨论。
-    """
+    """排除最近发言的参与者，避免连续发言。"""
     recent_speakers = set()
     for msg in list(reversed(thread))[-3:]:
         source = getattr(msg, "source", None)
@@ -87,43 +128,91 @@ def create_discussion_team(
     selector_client: ChatCompletionClient,
     max_turns: int | None = None,
 ) -> SelectorGroupChat:
-    """创建圆桌讨论团队。
-
-    Args:
-        moderator: 主持人 Agent。
-        characters: 虚拟角色 Agent 列表。
-        humans: 人类参与者 UserProxyAgent 列表。
-        selector_client: 用于选择发言者的模型客户端。
-        max_turns: 最大讨论轮次。
-
-    Returns:
-        配置好的 SelectorGroupChat 团队。
-    """
+    """创建圆桌讨论团队。"""
     if max_turns is None:
         max_turns = settings.max_turns
 
     all_participants = [moderator] + characters + humans
     all_names = [p.name for p in all_participants]
 
-    # 终止条件：达到最大消息数 或 主持人说出结束关键词
     termination = MaxMessageTermination(max_turns) | TextMentionTermination(
         "讨论结束"
     )
 
-    # 创建 selector_func，尝试从主持人发言中解析点名
+    human_name_set = {h.name for h in humans}
+
     def moderator_led_selector(thread: list) -> Optional[str]:
         """自定义发言者选择函数。
 
-        优先使用主持人发言中的点名信息，如果无法解析则交由 LLM 选择。
+        优先级：
+        1. 全局指定发言者（老师/用户点名）
+        2. 用户刚发言 → 老师点评
+        3. 主持人发言中的点名
+        4. 人类冷却期控制
+        5. 交由 LLM 选择
         """
-        for msg in reversed(thread):
+        participant_msgs = [m for m in thread if getattr(m, "source", None) in all_names]
+        if not participant_msgs:
+            logger.info("[TurnScheduler] 首轮：选择老师开场")
+            return moderator.name
+
+        last_source = getattr(participant_msgs[-1], "source", None) if participant_msgs else None
+
+        # ── 优先级1：检查全局指定发言者 ──
+        designated = get_designated_speaker()
+        if designated and designated in all_names:
+            logger.info("[TurnScheduler] 执行指定发言者: %s", designated)
+            return designated
+
+        def turns_since_last_human() -> int:
+            turns = 0
+            for m in reversed(participant_msgs):
+                src = getattr(m, "source", None)
+                if src in human_name_set:
+                    return turns
+                turns += 1
+            return turns
+
+        human_cooldown = 2
+        since_human = turns_since_last_human()
+
+        # ── 优先级2：用户刚发言 → 老师点评 ──
+        if last_source in human_name_set:
+            logger.info("[TurnScheduler] 用户 %s 刚发言，安排老师点评", last_source)
+            return moderator.name
+
+        # ── 优先级3：从最近发言中解析点名（老师或用户） ──
+        for msg in reversed(thread[-5:]):
             source = getattr(msg, "source", None)
-            content = getattr(msg, "content", "") or getattr(msg, "messages", "")
-            if source == moderator.name and content:
-                next_speaker = parse_moderator_direction(str(content), all_names)
-                if next_speaker:
+            content = str(getattr(msg, "content", "") or getattr(msg, "messages", ""))
+            if not content:
+                continue
+            # 老师或用户的发言中可能包含点名
+            if source == moderator.name or source in human_name_set:
+                next_speaker = parse_speaker_designation(content, all_names)
+                if next_speaker and next_speaker != source:
+                    if next_speaker in human_name_set and since_human < human_cooldown:
+                        logger.info("[TurnScheduler] 点名 %s 但人类冷却中，跳过", next_speaker)
+                        break
+                    logger.info("[TurnScheduler] 解析点名: %s → %s", source, next_speaker)
                     return next_speaker
-        return None  # 交给 LLM 选择
+
+        # ── 优先级4：人类发言冷却期 ──
+        if since_human < human_cooldown:
+            recent_speaker = getattr(thread[-1], "source", None) if thread else None
+            non_human_candidates = [
+                n for n in all_names if n not in human_name_set and n != recent_speaker
+            ]
+            if non_human_candidates:
+                if moderator.name in non_human_candidates:
+                    return moderator.name
+                selected = non_human_candidates[0]
+                logger.info("[TurnScheduler] 人类冷却中，选择: %s", selected)
+                return selected
+
+        # ── 优先级5：交给 LLM 选择 ──
+        logger.info("[TurnScheduler] 交由 LLM 选择下一位发言者")
+        return None
 
     team = SelectorGroupChat(
         participants=all_participants,

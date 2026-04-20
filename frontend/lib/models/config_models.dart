@@ -249,6 +249,7 @@ class LocalSettings {
   final String asrProvider;
   final String ttsProvider;
   final bool pushToTalk;
+  final String micControlMode;
 
   const LocalSettings({
     this.serverUrl = 'http://localhost:8001',
@@ -256,6 +257,7 @@ class LocalSettings {
     this.asrProvider = 'browser',
     this.ttsProvider = 'browser',
     this.pushToTalk = true,
+    this.micControlMode = 'double_ctrl',
   });
 
   LocalSettings copyWith({
@@ -264,6 +266,7 @@ class LocalSettings {
     String? asrProvider,
     String? ttsProvider,
     bool? pushToTalk,
+    String? micControlMode,
   }) =>
       LocalSettings(
         serverUrl: serverUrl ?? this.serverUrl,
@@ -271,6 +274,7 @@ class LocalSettings {
         asrProvider: asrProvider ?? this.asrProvider,
         ttsProvider: ttsProvider ?? this.ttsProvider,
         pushToTalk: pushToTalk ?? this.pushToTalk,
+        micControlMode: micControlMode ?? this.micControlMode,
       );
 }
 
@@ -296,4 +300,3 @@ class WebSearchConfig {
         baseUrl: json['base_url'] as String? ?? 'https://api.tavily.com',
       );
 }
-

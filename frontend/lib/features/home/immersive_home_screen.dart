@@ -3,13 +3,13 @@ import 'dart:math';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-// ignore: avoid_web_libraries_in_flutter
-import 'dart:html' as html;
 
 import '../../models/discussion_models.dart';
 import '../../painters/candlelight_painter.dart';
 import '../../painters/round_table_painter.dart';
 import '../../state/settings_provider.dart';
+import '../../utils/open_external_url_stub.dart'
+    if (dart.library.html) '../../utils/open_external_url_web.dart';
 import '../session/immersive_session_screen.dart';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 
   void _openDevPanel(BuildContext context) {
     final host = Uri.base.host;
-    html.window.open('http://$host:8888', '_blank');
+    openExternalUrl('http://$host:8888');
   }
 
   bool get _canStart =>

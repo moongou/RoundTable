@@ -12,7 +12,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.agents.character_templates import load_all_templates
-from app.agents.human_proxy import clear_human_queues, create_human_proxy, put_human_input, safe_agent_name
+from app.agents.human_proxy import clear_human_queues, create_human_proxy, normalize_display_name, safe_agent_name
 from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
@@ -21,7 +21,7 @@ from app.core.llm_factory import create_character_client, create_moderator_clien
 from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker
 from app.core.topics import get_topic_by_id
-from app.core.turn_scheduler import create_discussion_team
+from app.core.turn_scheduler import create_discussion_team, set_designated_speaker, parse_speaker_designation
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +186,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             safety_filter=safety_filter,
         )
 
+        # 设置 display name 映射（需求4：用于指定发言者解析）
+        floor_manager.set_display_name_map(agent_display_map)
+
         # 注册回调，将事件推送到 WebSocket
         async def on_message(source, content, msg_type):
             display_source = agent_display_map.get(source, source)
@@ -254,20 +257,31 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     msg = json.loads(data)
 
                     if msg.get("type") == "human_input":
-                        speaker = msg.get("speaker", "")
-                        content = msg.get("content", "")
+                        speaker = normalize_display_name(msg.get("speaker", ""))
+                        content = (msg.get("content", "") or "").strip()
+                        if not content:
+                            content = "（跳过）"
                         await floor_manager.submit_human_input(speaker, content)
+                    elif msg.get("type") == "designate_speaker":
+                        # 用户通过 UI 指定下一位发言者
+                        target = msg.get("target", "")
+                        if target:
+                            # 反查 agent name
+                            reverse_map = {v: k for k, v in agent_display_map.items()}
+                            agent_name = reverse_map.get(target, target)
+                            set_designated_speaker(agent_name)
+                            logger.info("用户指定下一位发言者: %s (agent: %s)", target, agent_name)
                     elif msg.get("type") == "interrupt":
                         # 打断请求 - 通知主持人并切换状态
-                        speaker = msg.get("speaker", "")
+                        speaker = normalize_display_name(msg.get("speaker", ""))
                         await floor_manager.request_interrupt(speaker)
                     elif msg.get("type") == "push_to_talk_start":
                         # PTT 开始 - 标记用户开始发言
-                        speaker = msg.get("speaker", "")
+                        speaker = normalize_display_name(msg.get("speaker", ""))
                         await floor_manager.handle_push_to_talk_start(speaker)
                     elif msg.get("type") == "push_to_talk_end":
                         # PTT 结束 - 标记用户结束发言
-                        speaker = msg.get("speaker", "")
+                        speaker = normalize_display_name(msg.get("speaker", ""))
                         await floor_manager.handle_push_to_talk_end(speaker)
 
             except WebSocketDisconnect:

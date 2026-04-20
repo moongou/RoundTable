@@ -3,7 +3,6 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 
 import '../../theme/app_colors.dart';
-import 'push_to_talk_button.dart';
 
 /// 半透明毛玻璃控制栏
 class GlassControlBar extends StatefulWidget {
@@ -41,8 +40,10 @@ class GlassControlBar extends StatefulWidget {
 class _GlassControlBarState extends State<GlassControlBar> {
   @override
   Widget build(BuildContext context) {
-    if (!widget.isMyTurn && !widget.canInterrupt)
+    // 会话页主交互改为左右两侧按钮，底栏仅在我的回合显示提示和跳过。
+    if (!widget.isMyTurn) {
       return const SizedBox.shrink();
+    }
 
     return Container(
       margin: const EdgeInsets.all(12),
@@ -70,147 +71,44 @@ class _GlassControlBarState extends State<GlassControlBar> {
         borderRadius: BorderRadius.circular(20),
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: SafeArea(
-            child: widget.isMyTurn ? _buildMyTurnRow() : _buildInterruptOnly(),
-          ),
+          child: SafeArea(child: _buildMyTurnRow()),
         ),
       ),
     );
   }
 
-  /// 轮到我发言时：显示提示 + PTT 按钮 + 文字输入 + 跳过
+  /// 轮到我发言时：简化底栏，仅显示提示和跳过按钮
   Widget _buildMyTurnRow() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        // 提示文字
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.record_voice_over,
-                  color: AppColors.amberGold, size: 14),
-              const SizedBox(width: 6),
-              Text(
-                widget.isRecording ? '正在录音... 松开空格键结束' : '轮到你了！按住空格键发言，或直接输入文字',
-                style: TextStyle(
-                  color: widget.isRecording
-                      ? const Color(0xFF00FFCC)
-                      : AppColors.amberGold,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
+        Icon(Icons.record_voice_over, color: AppColors.amberGold, size: 14),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            widget.isRecording ? '正在录音... 双击 Ctrl 或点击结束按钮' : '右侧输入文字 或 点击麦克风说话',
+            style: TextStyle(
+              color: widget.isRecording
+                  ? const Color(0xFF00FFCC)
+                  : AppColors.amberGold,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+            overflow: TextOverflow.ellipsis,
           ),
         ),
-        // 操作行：PTT + 文字框 + 发送 + 跳过
-        Row(
-          children: [
-            // PTT 按钮
-            if (widget.isPushToTalk)
-              GestureDetector(
-                onTapDown: (_) => widget.onPttStart(),
-                onTapUp: (_) => widget.onPttEnd(),
-                onTapCancel: widget.onPttEnd,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: widget.isRecording
-                        ? const Color(0xFF00FFCC).withValues(alpha: 0.2)
-                        : AppColors.amberGold.withValues(alpha: 0.15),
-                    border: Border.all(
-                      color: widget.isRecording
-                          ? const Color(0xFF00FFCC)
-                          : AppColors.amberGold,
-                      width: 2,
-                    ),
-                  ),
-                  child: Icon(
-                    widget.isRecording ? Icons.mic : Icons.mic_none,
-                    color: widget.isRecording
-                        ? const Color(0xFF00FFCC)
-                        : AppColors.amberGold,
-                    size: 22,
-                  ),
-                ),
-              ),
-            if (widget.isPushToTalk) const SizedBox(width: 10),
-            // 文字输入框
-            Expanded(
-              child: TextField(
-                controller: widget.inputController,
-                style:
-                    const TextStyle(color: AppColors.warmWhite, fontSize: 14),
-                decoration: InputDecoration(
-                  hintText: '或直接输入文字...',
-                  hintStyle:
-                      const TextStyle(color: AppColors.warmGray, fontSize: 13),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide(
-                        color: AppColors.warmGray.withValues(alpha: 0.3)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide(
-                        color: AppColors.warmGray.withValues(alpha: 0.3)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: const BorderSide(
-                        color: AppColors.amberGold, width: 1.5),
-                  ),
-                  filled: true,
-                  fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  isDense: true,
-                ),
-                onSubmitted: (_) => widget.onSendMessage(),
-              ),
-            ),
-            const SizedBox(width: 6),
-            // 发送按钮
-            FilledButton(
-              onPressed: widget.onSendMessage,
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.amberGold,
-                foregroundColor: AppColors.scrollTitle,
-                shape: const CircleBorder(),
-                padding: const EdgeInsets.all(10),
-                minimumSize: const Size(40, 40),
-              ),
-              child: const Icon(Icons.send, size: 18),
-            ),
-            const SizedBox(width: 4),
-            // 跳过按钮
-            IconButton(
-              onPressed: widget.onSkipTurn,
-              icon: const Icon(Icons.skip_next, size: 18),
-              tooltip: '跳过本轮发言',
-              style: IconButton.styleFrom(
-                foregroundColor: AppColors.warmGray,
-                minimumSize: const Size(36, 36),
-              ),
-            ),
-          ],
+        const SizedBox(width: 10),
+        // 跳过按钮
+        IconButton(
+          onPressed: widget.onSkipTurn,
+          icon: const Icon(Icons.skip_next, size: 18),
+          tooltip: '跳过本轮发言',
+          style: IconButton.styleFrom(
+            foregroundColor: AppColors.warmGray,
+            minimumSize: const Size(36, 36),
+          ),
         ),
       ],
-    );
-  }
-
-  Widget _buildInterruptOnly() {
-    return Center(
-      child: InterruptButton(
-        isVisible: widget.canInterrupt,
-        onPressed: widget.onInterrupt,
-        hasRaisedHand: widget.hasRaisedHand,
-      ),
     );
   }
 }

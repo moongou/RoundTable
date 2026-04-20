@@ -21,6 +21,31 @@ logger = logging.getLogger(__name__)
 # 存储每个人类参与者的输入队列
 # 键: 显示名字 (display_name), 值: asyncio.Queue[str]
 _human_input_queues: dict[str, asyncio.Queue[str]] = {}
+_human_name_aliases: dict[str, str] = {}
+
+
+def normalize_display_name(name: str) -> str:
+    """归一化显示名，避免前后空白导致队列查找失败。"""
+    return (name or "").strip()
+
+
+def _resolve_queue_name(name: str) -> str | None:
+    normalized = normalize_display_name(name)
+    if normalized in _human_input_queues:
+        return normalized
+    if name in _human_input_queues:
+        return name
+
+    alias = _human_name_aliases.get(normalized) or _human_name_aliases.get(name)
+    if alias:
+        return alias
+
+    if normalized:
+        normalized_no_space = normalized.replace(" ", "")
+        for key in _human_input_queues:
+            if key.replace(" ", "") == normalized_no_space:
+                return key
+    return None
 
 
 def safe_agent_name(name: str) -> str:
@@ -56,11 +81,20 @@ def make_human_input_func(name: str, timeout: float = 45.0) -> Callable[[str, Op
     """
 
     async def input_func(prompt: str, cancellation_token: Optional[CancellationToken] = None) -> str:
-        queue = _human_input_queues.get(name)
+        queue_name = _resolve_queue_name(name)
+        if queue_name is None:
+            queue_name = normalize_display_name(name) or name or "同学"
+            logger.warning("参与者 '%s' 的输入队列不存在，已自动创建并回退", name)
+            _human_input_queues[queue_name] = asyncio.Queue()
+
+        queue = _human_input_queues.get(queue_name)
         if queue is None:
-            raise RuntimeError(f"参与者 '{name}' 的输入队列不存在")
+            logger.warning("参与者 '%s' 的输入队列获取失败，自动跳过本轮", name)
+            return "（我先听听大家的意见）"
         try:
-            return await asyncio.wait_for(queue.get(), timeout=timeout)
+            text = await asyncio.wait_for(queue.get(), timeout=timeout)
+            normalized = (text or "").strip()
+            return normalized if normalized else "（我先听听大家的意见）"
         except asyncio.TimeoutError:
             logger.warning(f"参与者 '{name}' 等待超时（{timeout}s），自动跳过本轮")
             return "（我先听听大家的意见）"
@@ -79,12 +113,14 @@ def create_human_proxy(display_name: str, description: str = "") -> UserProxyAge
         配置好的 UserProxyAgent，其 input_func 从 asyncio.Queue 读取。
         Agent 内部 name 为 AutoGen 兼容的 ASCII 格式；显示名保存在 description 中。
     """
+    display_name = normalize_display_name(display_name) or "同学"
     agent_name = safe_agent_name(display_name)
     if not description:
         description = f"学生{display_name}，真人参与者"
 
     # 输入队列以显示名为键，方便 put_human_input 按原始名称写入
     _human_input_queues[display_name] = asyncio.Queue()
+    _human_name_aliases[display_name] = display_name
 
     return UserProxyAgent(
         name=agent_name,
@@ -95,9 +131,11 @@ def create_human_proxy(display_name: str, description: str = "") -> UserProxyAge
 
 def get_human_queue(name: str) -> asyncio.Queue[str]:
     """获取指定参与者的输入队列，用于从 WebSocket/STT 推送文本。"""
-    if name not in _human_input_queues:
-        raise KeyError(f"参与者 '{name}' 的输入队列不存在。请先调用 create_human_proxy。")
-    return _human_input_queues[name]
+    queue_name = _resolve_queue_name(name)
+    if queue_name is None:
+        normalized = normalize_display_name(name)
+        raise KeyError(f"参与者 '{normalized or name}' 的输入队列不存在。请先调用 create_human_proxy。")
+    return _human_input_queues[queue_name]
 
 
 async def put_human_input(name: str, text: str) -> None:
@@ -105,10 +143,18 @@ async def put_human_input(name: str, text: str) -> None:
 
     当 WebSocket 收到人类消息时调用此函数。
     """
-    queue = _human_input_queues.get(name)
+    normalized_name = normalize_display_name(name)
+    queue_name = _resolve_queue_name(normalized_name)
+    if queue_name is None:
+        queue_name = normalized_name or name or "同学"
+        logger.warning("参与者 '%s' 的输入队列不存在，已自动创建", name)
+        _human_input_queues[queue_name] = asyncio.Queue()
+        _human_name_aliases[queue_name] = queue_name
+
+    queue = _human_input_queues.get(queue_name)
     if queue is None:
-        raise KeyError(f"参与者 '{name}' 的输入队列不存在")
-    await queue.put(text)
+        raise KeyError(f"参与者 '{queue_name}' 的输入队列不存在")
+    await queue.put((text or "").strip())
 
 
 def clear_human_queues(names: list[str] | None = None) -> None:
@@ -120,6 +166,10 @@ def clear_human_queues(names: list[str] | None = None) -> None:
     global _human_input_queues
     if names is None:
         _human_input_queues.clear()
+        _human_name_aliases.clear()
     else:
         for name in names:
-            _human_input_queues.pop(name, None)
+            normalized = normalize_display_name(name)
+            queue_name = _resolve_queue_name(normalized) or normalized
+            _human_input_queues.pop(queue_name, None)
+            _human_name_aliases.pop(normalized, None)

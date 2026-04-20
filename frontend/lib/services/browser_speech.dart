@@ -4,14 +4,14 @@
 /// 通过 dart:js 和 dart:html 在 Flutter Web 中调用。
 ///
 /// 注意：SpeechRecognition 仅 Chrome/Edge 完全支持。
+// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
-// ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 import 'dart:async';
 import 'dart:js' as js;
 
-import 'speech_service.dart';
+import 'speech_contract.dart';
 
 /// 浏览器原生 TTS 实现
 class BrowserTtsService implements TtsService {
@@ -72,8 +72,8 @@ class BrowserTtsService implements TtsService {
 class BrowserAsrService implements AsrService {
   bool _isListening = false;
   bool _isAvailable = false;
-  final StreamController<String> _controller =
-      StreamController<String>.broadcast();
+  final StreamController<AsrResult> _controller =
+      StreamController<AsrResult>.broadcast();
   js.JsObject? _recognition;
 
   BrowserAsrService() {
@@ -97,7 +97,7 @@ class BrowserAsrService implements AsrService {
   bool get isListening => _isListening;
 
   @override
-  Stream<String> get transcriptionStream => _controller.stream;
+  Stream<AsrResult> get transcriptionStream => _controller.stream;
 
   @override
   Future<void> startListening() async {
@@ -105,13 +105,14 @@ class BrowserAsrService implements AsrService {
 
     try {
       final context = js.context;
-      final SpeechRecognition = context.hasProperty('webkitSpeechRecognition')
-          ? context['webkitSpeechRecognition']
-          : context['SpeechRecognition'];
+      final speechRecognitionCtor =
+          context.hasProperty('webkitSpeechRecognition')
+              ? context['webkitSpeechRecognition']
+              : context['SpeechRecognition'];
 
-      _recognition = js.JsObject(SpeechRecognition as js.JsFunction);
-      _recognition!['continuous'] = false;
-      _recognition!['interimResults'] = false;
+      _recognition = js.JsObject(speechRecognitionCtor as js.JsFunction);
+      _recognition!['continuous'] = true;
+      _recognition!['interimResults'] = true;
       _recognition!['lang'] = 'zh-CN';
 
       // 绑定结果事件
@@ -119,11 +120,14 @@ class BrowserAsrService implements AsrService {
         try {
           final results = event['results'];
           final len = (results['length'] as num).toInt();
-          if (len > 0) {
-            final lastResult = results[len - 1];
-            final transcript = (lastResult[0]['transcript'] ?? '') as String;
-            if (transcript.isNotEmpty && !_controller.isClosed) {
-              _controller.add(transcript);
+          if (len > 0 && !_controller.isClosed) {
+            for (var i = 0; i < len; i++) {
+              final item = results[i];
+              final transcript =
+                  ((item[0]['transcript'] ?? '') as String).trim();
+              if (transcript.isEmpty) continue;
+              final isFinal = item['isFinal'] == true;
+              _controller.add(AsrResult(text: transcript, isFinal: isFinal));
             }
           }
         } catch (_) {}
@@ -151,6 +155,20 @@ class BrowserAsrService implements AsrService {
       _recognition!.callMethod('stop');
     } catch (_) {}
     _isListening = false;
+  }
+
+  @override
+  Future<String> refineTranscript(String text) async {
+    var v = text.trim();
+    if (v.isEmpty) return '';
+    // 轻量后处理：去重复空白、修正常见重复词、补句末标点
+    v = v.replaceAll(RegExp(r'\s+'), ' ');
+    v = v.replaceAll(RegExp(r'(我觉得){2,}'), '我觉得');
+    v = v.replaceAll(RegExp(r'(然后){2,}'), '然后');
+    if (!RegExp(r'[。！？!?]$').hasMatch(v)) {
+      v = '$v。';
+    }
+    return v;
   }
 
   @override

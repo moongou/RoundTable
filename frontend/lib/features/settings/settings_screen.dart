@@ -25,8 +25,10 @@ class _SettingsContent extends ConsumerStatefulWidget {
   ConsumerState<_SettingsContent> createState() => _SettingsContentState();
 }
 
-class _SettingsContentState extends ConsumerState<_SettingsContent> {
+class _SettingsContentState extends ConsumerState<_SettingsContent>
+    with SingleTickerProviderStateMixin {
   late TextEditingController _serverUrlCtrl;
+  late TabController _tabController;
 
   String? _expandedProvider;
   String? _expandedVoiceService;
@@ -51,9 +53,34 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
 
   bool _healthRefreshing = false;
 
+  // Benchmark state
+  bool _benchmarkingAsr = false;
+  bool _benchmarkingTts = false;
+  bool _benchmarkingLlm = false;
+  Map<String, dynamic>? _asrBenchmark;
+  Map<String, dynamic>? _ttsBenchmark;
+  Map<String, dynamic>? _llmBenchmark;
+
+  // ScrollController 保持页面位置不跳动
+  final _aiScrollCtrl = ScrollController();
+  final _asrScrollCtrl = ScrollController();
+  final _ttsScrollCtrl = ScrollController();
+  final _generalScrollCtrl = ScrollController();
+
+  // Voice service test state
+  bool _testingVoiceService = false;
+  Map<String, dynamic>? _voiceServiceTestResult;
+
+  String _interactionModeLabel(LocalSettings s) {
+    if (!s.pushToTalk) return '自由对话';
+    if (s.micControlMode == 'hold_ctrl') return '按住 Ctrl 说话';
+    return '双击 Ctrl 开关录音';
+  }
+
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 4, vsync: this);
     _serverUrlCtrl = TextEditingController(text: 'http://localhost:8001');
     // Defer loading the actual server URL from provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -66,8 +93,13 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
 
   @override
   void dispose() {
+    _tabController.dispose();
     _serverUrlCtrl.dispose();
     _tavilyKeyCtrl.dispose();
+    _aiScrollCtrl.dispose();
+    _asrScrollCtrl.dispose();
+    _ttsScrollCtrl.dispose();
+    _generalScrollCtrl.dispose();
     for (final c in [
       ..._apiKeyCtrl.values,
       ..._baseUrlCtrl.values,
@@ -226,7 +258,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
                 if (currentConfig != null)
                   _DialogRow('网络搜索',
                       currentConfig.webSearchEnabled ? 'Tavily 已启用' : '未启用'),
-                _DialogRow('交互方式', s.pushToTalk ? '按住说话' : '自由对话'),
+                _DialogRow('交互方式', _interactionModeLabel(s)),
                 _DialogRow('服务器', s.serverUrl),
               ],
             ),
@@ -278,10 +310,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
       'openai_whisper': 'openai_whisper_api_key',
       'openai_tts': 'openai_api_key',
     };
-    if (url.isNotEmpty && urlMap.containsKey(p.id))
+    if (url.isNotEmpty && urlMap.containsKey(p.id)) {
       updates[urlMap[p.id]!] = url;
-    if (key.isNotEmpty && keyMap.containsKey(p.id))
+    }
+    if (key.isNotEmpty && keyMap.containsKey(p.id)) {
       updates[keyMap[p.id]!] = key;
+    }
     if (voice != null && voice.isNotEmpty) {
       updates[p.id == 'cosyvoice' ? 'cosyvoice_voice' : 'tts_voice'] = voice;
     }
@@ -395,86 +429,95 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
                 style: TextStyle(color: AppColors.amberGold, fontSize: 13)),
           ),
         ],
+        bottom: TabBar(
+          controller: _tabController,
+          isScrollable: true,
+          labelColor: AppColors.amberGold,
+          unselectedLabelColor: AppColors.warmGray,
+          indicatorColor: AppColors.amberGold,
+          labelStyle:
+              const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          tabs: const [
+            Tab(icon: Icon(Icons.smart_toy_outlined, size: 18), text: 'AI 模型'),
+            Tab(icon: Icon(Icons.mic_outlined, size: 18), text: '语音识别'),
+            Tab(icon: Icon(Icons.volume_up_outlined, size: 18), text: '语音合成'),
+            Tab(icon: Icon(Icons.settings_outlined, size: 18), text: '通用'),
+          ],
+        ),
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final wide = constraints.maxWidth > 900;
-          if (wide) {
-            return _buildWideLayout(
-                s, providersAsync, speechAsync, healthAsync, currentAsync);
-          }
-          return _buildNarrowLayout(
-              s, providersAsync, speechAsync, healthAsync, currentAsync);
-        },
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildAiModelTab(s, providersAsync, currentAsync),
+          _buildAsrTab(s, speechAsync, healthAsync),
+          _buildTtsTab(s, speechAsync, healthAsync),
+          _buildGeneralTab(s, currentAsync, healthAsync),
+        ],
       ),
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  Wide layout (>900 px): two columns
+  //  Tab builders (Req8: 4 sub-pages)
   // ─────────────────────────────────────────────────────────────────────────
 
-  Widget _buildWideLayout(LocalSettings s, AsyncValue providersAsync,
-      AsyncValue speechAsync, AsyncValue healthAsync, AsyncValue currentAsync) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Left column – server + LLM + web search
-        Expanded(
-          flex: 5,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 16, 10, 32),
-            children: [
-              _buildServerSection(currentAsync),
-              const SizedBox(height: 14),
-              _buildLlmSection(providersAsync, s),
-              const SizedBox(height: 14),
-              _buildTavilySection(currentAsync),
-            ],
-          ),
-        ),
-        // Right column – ASR + TTS + interaction + summary + health
-        Expanded(
-          flex: 4,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(10, 16, 20, 32),
-            children: [
-              _buildAsrSection(speechAsync, s),
-              const SizedBox(height: 14),
-              _buildTtsSection(speechAsync, s),
-              const SizedBox(height: 14),
-              _buildInteractionSection(s),
-              const SizedBox(height: 14),
-              _buildSummarySection(s, currentAsync),
-              const SizedBox(height: 14),
-              _buildHealthSection(healthAsync),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  //  Narrow layout (≤900 px): single column
-  // ─────────────────────────────────────────────────────────────────────────
-
-  Widget _buildNarrowLayout(LocalSettings s, AsyncValue providersAsync,
-      AsyncValue speechAsync, AsyncValue healthAsync, AsyncValue currentAsync) {
+  Widget _buildAiModelTab(
+      LocalSettings s, AsyncValue providersAsync, AsyncValue currentAsync) {
     return ListView(
+      controller: _aiScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       children: [
         _buildServerSection(currentAsync),
         const SizedBox(height: 14),
         _buildLlmSection(providersAsync, s),
         const SizedBox(height: 14),
+        _buildTavilySection(currentAsync),
+        const SizedBox(height: 14),
+        _buildLlmBenchmarkSection(),
+        const SizedBox(height: 32),
+      ],
+    );
+  }
+
+  Widget _buildAsrTab(
+      LocalSettings s, AsyncValue speechAsync, AsyncValue healthAsync) {
+    return ListView(
+      controller: _asrScrollCtrl,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      children: [
         _buildAsrSection(speechAsync, s),
         const SizedBox(height: 14),
+        _buildAsrBenchmarkSection(),
+        const SizedBox(height: 14),
+        _buildVoiceServiceTestSection(type: 'asr'),
+        const SizedBox(height: 32),
+      ],
+    );
+  }
+
+  Widget _buildTtsTab(
+      LocalSettings s, AsyncValue speechAsync, AsyncValue healthAsync) {
+    return ListView(
+      controller: _ttsScrollCtrl,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      children: [
         _buildTtsSection(speechAsync, s),
         const SizedBox(height: 14),
-        _buildInteractionSection(s),
+        _buildTtsBenchmarkSection(),
         const SizedBox(height: 14),
-        _buildTavilySection(currentAsync),
+        _buildVoiceServiceTestSection(type: 'tts'),
+        const SizedBox(height: 32),
+      ],
+    );
+  }
+
+  Widget _buildGeneralTab(
+      LocalSettings s, AsyncValue currentAsync, AsyncValue healthAsync) {
+    return ListView(
+      controller: _generalScrollCtrl,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      children: [
+        _buildInteractionSection(s),
         const SizedBox(height: 14),
         _buildSummarySection(s, currentAsync),
         const SizedBox(height: 14),
@@ -485,7 +528,313 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  Section builders (reused by both layouts)
+  //  Benchmark sections (Req5, Req6, Req7)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  Widget _buildLlmBenchmarkSection() => _Section(
+        title: 'AI 模型响应测速',
+        icon: Icons.speed_outlined,
+        children: [
+          Row(children: [
+            _GoldBtn(
+              _benchmarkingLlm ? '测试中...' : '开始测试',
+              onTap: _benchmarkingLlm ? null : _runLlmBenchmark,
+            ),
+            if (_llmBenchmark != null) ...[
+              const SizedBox(width: 12),
+              Text(
+                '推荐: ${_llmBenchmark!['results']?[0]?['provider'] ?? '-'}',
+                style:
+                    const TextStyle(color: AppColors.amberGold, fontSize: 12),
+              ),
+            ],
+          ]),
+          if (_benchmarkingLlm)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: LinearProgressIndicator(color: AppColors.amberGold),
+            ),
+          if (_llmBenchmark != null) _buildBenchmarkResults(_llmBenchmark!),
+        ],
+      );
+
+  Widget _buildAsrBenchmarkSection() => _Section(
+        title: 'ASR 服务性能对比',
+        icon: Icons.timer_outlined,
+        children: [
+          Row(children: [
+            _GoldBtn(
+              _benchmarkingAsr ? '测试中...' : '全部测试（3轮）',
+              onTap: _benchmarkingAsr ? null : _runAsrBenchmark,
+            ),
+            if (_asrBenchmark?['recommended'] != null) ...[
+              const SizedBox(width: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.green.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '推荐: ${_asrBenchmark!['recommended']}',
+                  style: const TextStyle(color: Colors.green, fontSize: 12),
+                ),
+              ),
+            ],
+          ]),
+          if (_benchmarkingAsr)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: LinearProgressIndicator(color: AppColors.amberGold),
+            ),
+          if (_asrBenchmark != null) _buildBenchmarkResults(_asrBenchmark!),
+        ],
+      );
+
+  Widget _buildTtsBenchmarkSection() => _Section(
+        title: 'TTS 服务性能对比',
+        icon: Icons.timer_outlined,
+        children: [
+          Row(children: [
+            _GoldBtn(
+              _benchmarkingTts ? '测试中...' : '全部测试（3轮）',
+              onTap: _benchmarkingTts ? null : _runTtsBenchmark,
+            ),
+            if (_ttsBenchmark?['recommended'] != null) ...[
+              const SizedBox(width: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.green.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '推荐: ${_ttsBenchmark!['recommended']}',
+                  style: const TextStyle(color: Colors.green, fontSize: 12),
+                ),
+              ),
+            ],
+          ]),
+          if (_benchmarkingTts)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: LinearProgressIndicator(color: AppColors.amberGold),
+            ),
+          if (_ttsBenchmark != null) _buildBenchmarkResults(_ttsBenchmark!),
+        ],
+      );
+
+  Widget _buildVoiceServiceTestSection({required String type}) => _Section(
+        title: '独立服务测试',
+        icon: Icons.science_outlined,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: (type == 'asr'
+                    ? ['capswriter', 'vosk', 'funasr']
+                    : [
+                        'edge_tts',
+                        'vibevoice',
+                        'fireredtts',
+                        'openvoice',
+                        'cosyvoice'
+                      ])
+                .map((svc) => _OutBtn(
+                      svc,
+                      onTap: _testingVoiceService
+                          ? null
+                          : () => _runVoiceServiceTest(svc, type),
+                    ))
+                .toList(),
+          ),
+          if (_testingVoiceService)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: LinearProgressIndicator(color: AppColors.amberGold),
+            ),
+          if (_voiceServiceTestResult != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${_voiceServiceTestResult!['service']} - ${_voiceServiceTestResult!['status']}',
+                      style: TextStyle(
+                        color: _voiceServiceTestResult!['status'] == 'ok'
+                            ? Colors.green
+                            : Colors.orange,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (_voiceServiceTestResult!['health_ms'] != null)
+                      Text(
+                        '健康检查: ${_voiceServiceTestResult!['health_ms']}ms',
+                        style: const TextStyle(
+                            color: AppColors.warmGray, fontSize: 11),
+                      ),
+                    if (_voiceServiceTestResult!['synth_ms'] != null)
+                      Text(
+                        '合成延迟: ${_voiceServiceTestResult!['synth_ms']}ms  音频: ${_voiceServiceTestResult!['audio_size']}B',
+                        style: const TextStyle(
+                            color: AppColors.warmGray, fontSize: 11),
+                      ),
+                    if (_voiceServiceTestResult!['error'] != null)
+                      Text(
+                        '错误: ${_voiceServiceTestResult!['error']}',
+                        style: const TextStyle(
+                            color: Colors.redAccent, fontSize: 11),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      );
+
+  Widget _buildBenchmarkResults(Map<String, dynamic> data) {
+    final results = (data['results'] as List<dynamic>?) ?? [];
+    if (results.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 8),
+        child: Text('无结果',
+            style: TextStyle(color: AppColors.warmGray, fontSize: 12)),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        children: results.map((r) {
+          final m = r as Map<String, dynamic>;
+          final name = m['service'] ?? m['provider'] ?? '-';
+          final status = m['status'] ?? 'unknown';
+          final isOk = status == 'ok';
+          String detail = '';
+          if (m.containsKey('short_text')) {
+            detail =
+                '短: ${m['short_text']?['avg_ms'] ?? '-'}ms  长: ${m['long_text']?['avg_ms'] ?? '-'}ms';
+          } else if (m.containsKey('latency')) {
+            detail = '平均: ${m['latency']?['avg_ms'] ?? '-'}ms';
+          } else if (m.containsKey('avg_ms')) {
+            detail =
+                '平均: ${m['avg_ms']}ms  最小: ${m['min_ms']}ms  最大: ${m['max_ms']}ms';
+          } else if (m.containsKey('error')) {
+            detail = m['error'] as String;
+          }
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                Icon(
+                  isOk ? Icons.check_circle : Icons.cancel,
+                  size: 14,
+                  color: isOk ? Colors.green : Colors.red,
+                ),
+                const SizedBox(width: 6),
+                Text(name,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(detail,
+                      style: TextStyle(
+                          color: isOk ? AppColors.warmGray : Colors.redAccent,
+                          fontSize: 11)),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  // ── Benchmark actions ────────────────────────────────────────────────────
+
+  Future<void> _runAsrBenchmark() async {
+    setState(() {
+      _benchmarkingAsr = true;
+      _asrBenchmark = null;
+    });
+    try {
+      final client = ref.read(apiClientProvider);
+      final resp = await client.dio
+          .post('/api/v1/benchmark/asr', queryParameters: {'rounds': 3});
+      setState(() => _asrBenchmark = resp.data as Map<String, dynamic>);
+    } catch (e) {
+      _snackErr('ASR 测试失败: $e');
+    } finally {
+      setState(() => _benchmarkingAsr = false);
+    }
+  }
+
+  Future<void> _runTtsBenchmark() async {
+    setState(() {
+      _benchmarkingTts = true;
+      _ttsBenchmark = null;
+    });
+    try {
+      final client = ref.read(apiClientProvider);
+      final resp = await client.dio
+          .post('/api/v1/benchmark/tts', queryParameters: {'rounds': 3});
+      setState(() => _ttsBenchmark = resp.data as Map<String, dynamic>);
+    } catch (e) {
+      _snackErr('TTS 测试失败: $e');
+    } finally {
+      setState(() => _benchmarkingTts = false);
+    }
+  }
+
+  Future<void> _runLlmBenchmark() async {
+    setState(() {
+      _benchmarkingLlm = true;
+      _llmBenchmark = null;
+    });
+    try {
+      final client = ref.read(apiClientProvider);
+      final resp = await client.dio
+          .post('/api/v1/benchmark/llm', queryParameters: {'rounds': 2});
+      setState(() => _llmBenchmark = resp.data as Map<String, dynamic>);
+    } catch (e) {
+      _snackErr('LLM 测试失败: $e');
+    } finally {
+      setState(() => _benchmarkingLlm = false);
+    }
+  }
+
+  Future<void> _runVoiceServiceTest(String serviceId, String type) async {
+    setState(() {
+      _testingVoiceService = true;
+      _voiceServiceTestResult = null;
+    });
+    try {
+      final client = ref.read(apiClientProvider);
+      final resp = await client.dio
+          .post('/api/v1/benchmark/voice/test', queryParameters: {
+        'service_id': serviceId,
+        'service_type': type,
+      });
+      setState(
+          () => _voiceServiceTestResult = resp.data as Map<String, dynamic>);
+    } catch (e) {
+      _snackErr('服务测试失败: $e');
+    } finally {
+      setState(() => _testingVoiceService = false);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  Section builders (reused by tabs)
   // ─────────────────────────────────────────────────────────────────────────
 
   Widget _buildServerSection(AsyncValue currentAsync) => _Section(
@@ -519,6 +868,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         icon: Icons.smart_toy_outlined,
         children: [
           providersAsync.when(
+            skipLoadingOnRefresh: true,
             data: (list) =>
                 Column(children: list.map((p) => _providerTile(p, s)).toList()),
             loading: () => const _Spin(),
@@ -532,6 +882,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         icon: Icons.mic_outlined,
         children: [
           speechAsync.when(
+            skipLoadingOnRefresh: true,
             data: (sp) => Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: sp.asrProviders
@@ -549,6 +900,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         icon: Icons.volume_up_outlined,
         children: [
           speechAsync.when(
+            skipLoadingOnRefresh: true,
             data: (sp) => Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: sp.ttsProviders
@@ -568,7 +920,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
           SwitchListTile(
             title: const Text('按住说话（Push-to-Talk）',
                 style: TextStyle(color: AppColors.warmWhite)),
-            subtitle: const Text('空格键：按住录音，松开发送  ·  Esc：取消',
+            subtitle: const Text('双击 Ctrl：开始/结束录音  ·  可切换按住 Ctrl 模式',
                 style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
             value: s.pushToTalk,
             onChanged: (v) async {
@@ -580,6 +932,47 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
             contentPadding: EdgeInsets.zero,
             activeThumbColor: AppColors.amberGold,
             dense: true,
+          ),
+          const SizedBox(height: 8),
+          Opacity(
+            opacity: s.pushToTalk ? 1.0 : 0.45,
+            child: IgnorePointer(
+              ignoring: !s.pushToTalk,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Ctrl 控制模式',
+                      style: TextStyle(
+                          color: AppColors.warmWhite,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      ChoiceChip(
+                        label: const Text('双击 Ctrl 开关录音'),
+                        selected: s.micControlMode == 'double_ctrl',
+                        onSelected: (_) async {
+                          await ref
+                              .read(localSettingsProvider.notifier)
+                              .setMicControlMode('double_ctrl');
+                        },
+                      ),
+                      ChoiceChip(
+                        label: const Text('按住 Ctrl 说话'),
+                        selected: s.micControlMode == 'hold_ctrl',
+                        onSelected: (_) async {
+                          await ref
+                              .read(localSettingsProvider.notifier)
+                              .setMicControlMode('hold_ctrl');
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       );
@@ -667,7 +1060,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
               _SummaryRow('语音合成', s.ttsProvider.toUpperCase()),
               _SummaryRow(
                   '网络搜索', c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用'),
-              _SummaryRow('交互方式', s.pushToTalk ? '按住说话' : '自由对话'),
+              _SummaryRow('交互方式', _interactionModeLabel(s)),
             ]),
             loading: () => const _Spin(),
             error: (e, _) => _ErrorBox('无法加载配置: $e'),
@@ -780,70 +1173,159 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
         p.id == ref.read(localSettingsProvider).valueOrNull?.llmProvider;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Divider(color: AppColors.warmGray, height: 18),
+      // API Key + 操作按钮同行
       if (p.needsApiKey) ...[
-        const _Label('API Key'),
-        _Field(
-            ctrl: _pk(p),
-            hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
-            obscure: true),
-        const SizedBox(height: 8),
-      ],
-      const _Label('请求地址（Base URL）'),
-      _Field(ctrl: _bu(p), hint: p.baseUrl),
-      const SizedBox(height: 8),
-      Row(children: [
-        _OutBtn(testing ? '测试中…' : '🔌 测试连接',
-            onTap: testing ? null : () => _testProvider(p), loading: testing),
-        if (result != null) ...[
-          const SizedBox(width: 8),
-          Icon(result.success ? Icons.check_circle : Icons.cancel,
-              color: result.success ? Colors.green : Colors.red, size: 14),
-          const SizedBox(width: 4),
-          Flexible(
-              child: Text(
-            result.success
-                ? '✓ ${result.models.length} 个模型可用'
-                : result.error ?? '失败',
-            style: TextStyle(
-                fontSize: 10,
-                color: result.success ? Colors.green : Colors.red),
-            overflow: TextOverflow.ellipsis,
-          )),
-        ],
-      ]),
-      const SizedBox(height: 8),
-      const _Label('模型'),
-      if (result != null && result.success && result.models.isNotEmpty)
-        _DropField(items: result.models, ctrl: _mc(p))
-      else
-        _Field(ctrl: _mc(p), hint: p.model),
-      const SizedBox(height: 10),
-      Row(children: [
-        Expanded(
-            child: _OutBtn('应用（本次有效）',
-                onTap: saving ? null : () => _saveProvider(p))),
-        const SizedBox(width: 8),
-        Expanded(
-            child: _GoldBtn('💾 写入 .env',
-                onTap: saving ? null : () => _saveProvider(p, persist: true))),
-      ]),
-      if (!active) ...[
-        const SizedBox(height: 8),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            onPressed: () => _selectProvider(p),
-            icon: const Icon(Icons.check_circle_outline, size: 14),
-            label: const Text('使用此提供商'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: AppColors.amberGold,
-              side: const BorderSide(color: AppColors.amberGold),
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              textStyle: const TextStyle(fontSize: 12),
+        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const _Label('API Key'),
+              _Field(
+                  ctrl: _pk(p),
+                  hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
+                  obscure: true),
+            ]),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.end,
+                    children: [
+                      _OutBtn('应用\n（本次有效）',
+                          onTap: saving ? null : () => _saveProvider(p),
+                          height: 48,
+                          padding: 12),
+                      _GoldBtn('💾 写入\n.env',
+                          onTap: saving
+                              ? null
+                              : () => _saveProvider(p, persist: true),
+                          height: 48,
+                          padding: 12),
+                      _OutBtn(testing ? '测试中…' : '🔌 测试\n连接',
+                          onTap: testing ? null : () => _testProvider(p),
+                          loading: testing,
+                          height: 48,
+                          padding: 12),
+                    ],
+                  ),
+                  if (result != null) ...[
+                    const SizedBox(width: 12),
+                    Icon(result.success ? Icons.check_circle : Icons.cancel,
+                        color: result.success ? Colors.green : Colors.red,
+                        size: 14),
+                    const SizedBox(width: 4),
+                    Flexible(
+                        child: Text(
+                      result.success
+                          ? '✓ ${result.models.length} 个模型'
+                          : result.error ?? '失败',
+                      style: TextStyle(
+                          fontSize: 10,
+                          color: result.success ? Colors.green : Colors.red),
+                      overflow: TextOverflow.ellipsis,
+                    )),
+                  ],
+                ],
+              ),
             ),
           ),
-        ),
+        ]),
+        const SizedBox(height: 8),
       ],
+      // Base URL + 测试结果
+      Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+        Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const _Label('请求地址（Base URL）'),
+            _Field(ctrl: _bu(p), hint: p.baseUrl),
+          ]),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              if (!p.needsApiKey) ...[
+                _OutBtn('应用\n（本次有效）',
+                    onTap: saving ? null : () => _saveProvider(p),
+                    height: 48,
+                    padding: 12),
+                const SizedBox(width: 8),
+                _GoldBtn('💾 写入\n.env',
+                    onTap:
+                        saving ? null : () => _saveProvider(p, persist: true),
+                    height: 48,
+                    padding: 12),
+                const SizedBox(width: 8),
+                _OutBtn(testing ? '测试中…' : '🔌 测试\n连接',
+                    onTap: testing ? null : () => _testProvider(p),
+                    loading: testing,
+                    height: 48,
+                    padding: 12),
+              ],
+              if (result != null) ...[
+                const SizedBox(width: 12),
+                Icon(result.success ? Icons.check_circle : Icons.cancel,
+                    color: result.success ? Colors.green : Colors.red,
+                    size: 14),
+                const SizedBox(width: 4),
+                Flexible(
+                    child: Text(
+                  result.success
+                      ? '✓ ${result.models.length} 个模型可用'
+                      : result.error ?? '失败',
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: result.success ? Colors.green : Colors.red),
+                  overflow: TextOverflow.ellipsis,
+                )),
+              ],
+            ]),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 8),
+      // 模型选择
+      Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+        Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const _Label('模型'),
+            result != null && result.success && result.models.isNotEmpty
+                ? _DropField(items: result.models, ctrl: _mc(p))
+                : _Field(ctrl: _mc(p), hint: p.model),
+          ]),
+        ),
+        const SizedBox(width: 16),
+        if (!active)
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: OutlinedButton.icon(
+                onPressed: () => _selectProvider(p),
+                icon: const Icon(Icons.check_circle_outline, size: 14),
+                label: const Text('使用此提供商'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.amberGold,
+                  side: const BorderSide(color: AppColors.amberGold),
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+                  textStyle: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ),
+          )
+        else
+          const Expanded(child: SizedBox.shrink()),
+      ]),
     ]);
   }
 
@@ -861,11 +1343,14 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
+        // ignore: deprecated_member_use
         Radio<String>(
           value: p.id,
+          // ignore: deprecated_member_use
           groupValue: activeId,
           activeColor: AppColors.amberGold,
           materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          // ignore: deprecated_member_use
           onChanged: (v) async {
             if (v == null) return;
             if (isAsr) {
@@ -930,21 +1415,33 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
       const SizedBox(height: 4),
       if (p.needsApiKey) ...[
         const _Label('API Key'),
-        _Field(
-            ctrl: _vk(p),
-            hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
-            obscure: true),
+        FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: 0.5,
+          child: _Field(
+              ctrl: _vk(p),
+              hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
+              obscure: true),
+        ),
         const SizedBox(height: 6),
       ],
       const _Label('服务地址'),
-      _Field(
-          ctrl: _vu(p),
-          hint:
-              p.defaultUrl.isNotEmpty ? p.defaultUrl : 'http://localhost:???'),
+      FractionallySizedBox(
+        alignment: Alignment.centerLeft,
+        widthFactor: 0.5,
+        child: _Field(
+            ctrl: _vu(p),
+            hint: p.defaultUrl.isNotEmpty
+                ? p.defaultUrl
+                : 'http://localhost:???'),
+      ),
       const SizedBox(height: 8),
       Row(children: [
         _OutBtn(testing ? '测试中…' : '🔌 测试连接',
-            onTap: testing ? null : () => _testVoice(p), loading: testing),
+            onTap: testing ? null : () => _testVoice(p),
+            loading: testing,
+            height: 36,
+            padding: 12),
         if (result != null) ...[
           const SizedBox(width: 8),
           Icon(result.success ? Icons.check_circle : Icons.cancel,
@@ -965,19 +1462,22 @@ class _SettingsContentState extends ConsumerState<_SettingsContent> {
       if (result != null && result.success && voices.isNotEmpty) ...[
         const SizedBox(height: 8),
         const _Label('选择音色'),
-        _VoiceDrop(
-          voices: voices,
-          value: _selectedVoice[p.id],
-          onChanged: (v) => setState(() => _selectedVoice[p.id] = v),
+        FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: 0.5,
+          child: _VoiceDrop(
+            voices: voices,
+            value: _selectedVoice[p.id],
+            onChanged: (v) => setState(() => _selectedVoice[p.id] = v),
+          ),
         ),
       ],
       const SizedBox(height: 8),
-      Row(children: [
-        Expanded(child: _OutBtn('应用', onTap: () => _saveVoice(p))),
+      Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+        _OutBtn('应用', onTap: () => _saveVoice(p), height: 36, padding: 12),
         const SizedBox(width: 8),
-        Expanded(
-            child:
-                _GoldBtn('💾 .env', onTap: () => _saveVoice(p, persist: true))),
+        _GoldBtn('💾 .env',
+            onTap: () => _saveVoice(p, persist: true), height: 36, padding: 12),
       ]),
       const SizedBox(height: 4),
     ]);
@@ -1093,14 +1593,17 @@ class _Label extends StatelessWidget {
 class _GoldBtn extends StatelessWidget {
   final String label;
   final VoidCallback? onTap;
-  const _GoldBtn(this.label, {this.onTap});
+  final double? height;
+  final double? padding;
+  const _GoldBtn(this.label, {this.onTap, this.height, this.padding});
   @override
   Widget build(BuildContext context) => FilledButton(
         onPressed: onTap,
         style: FilledButton.styleFrom(
           backgroundColor: AppColors.amberGold,
           foregroundColor: AppColors.scrollTitle,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          padding: EdgeInsets.symmetric(
+              horizontal: padding ?? 12, vertical: (height ?? 28) / 4),
           textStyle: const TextStyle(fontSize: 12),
           minimumSize: Size.zero,
         ),
@@ -1112,14 +1615,18 @@ class _OutBtn extends StatelessWidget {
   final String label;
   final VoidCallback? onTap;
   final bool loading;
-  const _OutBtn(this.label, {this.onTap, this.loading = false});
+  final double? height;
+  final double? padding;
+  const _OutBtn(this.label,
+      {this.onTap, this.loading = false, this.height, this.padding});
   @override
   Widget build(BuildContext context) => OutlinedButton(
         onPressed: onTap,
         style: OutlinedButton.styleFrom(
           foregroundColor: AppColors.warmWhite,
           side: BorderSide(color: AppColors.warmGray.withValues(alpha: 0.5)),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          padding: EdgeInsets.symmetric(
+              horizontal: padding ?? 10, vertical: (height ?? 24) / 4),
           textStyle: const TextStyle(fontSize: 11),
           minimumSize: Size.zero,
         ),

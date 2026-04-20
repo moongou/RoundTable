@@ -22,72 +22,48 @@ class SpeakingBubble extends StatelessWidget {
       duration: const Duration(milliseconds: 400),
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // 发言者名称标签 (左对齐浮标)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-            decoration: BoxDecoration(
-              color: speakerColor.withValues(alpha: 0.85),
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(8),
-                topRight: Radius.circular(8),
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 6,
-                  height: 6,
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 5),
-                Text(
-                  speaker,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12,
-                    letterSpacing: 0.5,
-                  ),
+          Text(
+            speaker,
+            style: TextStyle(
+              color: speakerColor,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.4,
+              shadows: [
+                Shadow(
+                  color: Colors.black.withValues(alpha: 0.85),
+                  blurRadius: 6,
+                  offset: const Offset(0, 1),
                 ),
               ],
             ),
           ),
-          // 字幕文本区
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.55),
-              borderRadius: const BorderRadius.only(
-                bottomLeft: Radius.circular(10),
-                bottomRight: Radius.circular(10),
-                topRight: Radius.circular(10),
-              ),
+          const SizedBox(height: 4),
+          Text(
+            content,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
+              shadows: [
+                Shadow(
+                  color: Colors.black.withValues(alpha: 0.95),
+                  blurRadius: 10,
+                  offset: const Offset(0, 1),
+                ),
+                Shadow(
+                  color: speakerColor.withValues(alpha: 0.35),
+                  blurRadius: 16,
+                  offset: const Offset(0, 0),
+                ),
+              ],
             ),
-            child: Text(
-              content,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 15,
-                height: 1.5,
-                shadows: [
-                  Shadow(
-                    color: Colors.black,
-                    blurRadius: 4,
-                    offset: Offset(0, 1),
-                  ),
-                ],
-              ),
-              textAlign: TextAlign.center,
-              maxLines: 4,
-              overflow: TextOverflow.ellipsis,
-            ),
+            textAlign: TextAlign.center,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
           ),
         ],
       ),

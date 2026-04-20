@@ -39,6 +39,7 @@ PROVIDER_DEFAULTS = {
     "doubao": {
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
         "model": "doubao-pro-32k",
+        "alias_of": "volcengine",  # 豆包=火山引擎，标记为别名
     },
     "volcengine": {
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
@@ -72,8 +73,8 @@ PROVIDER_NAMES = {
     "deepseek": "DeepSeek",
     "ollama": "Ollama (本地)",
     "ollama_cloud": "Ollama (云端)",
-    "doubao": "豆包",
-    "volcengine": "火山引擎",
+    "doubao": "豆包（=火山引擎）",
+    "volcengine": "火山引擎（豆包）",
     "bailian": "阿里百炼",
     "zhipu": "智谱AI (ChatGLM)",
     "anthropic": "Anthropic Claude",
@@ -85,6 +86,8 @@ PROVIDER_NAMES = {
 
 ASR_PROVIDERS = {
     "browser": "浏览器原生语音识别",
+    "capswriter": "CapsWriter 本地服务（推荐，低延迟）",
+    "vosk": "Vosk 本地服务（支持流式）",
     "funasr": "FunASR 本地服务",
     "openai_whisper": "OpenAI Whisper API",
     "disabled": "禁用语音识别（纯文本输入）",
@@ -93,6 +96,9 @@ ASR_PROVIDERS = {
 TTS_PROVIDERS = {
     "browser": "浏览器原生语音合成",
     "edge_tts": "OpenAI Edge TTS 本地服务",
+    "vibevoice": "VibeVoice 本地服务（微软，高品质）",
+    "fireredtts": "FireRedTTS 本地服务（支持流式）",
+    "openvoice": "OpenVoice 本地服务（支持变声）",
     "cosyvoice": "CosyVoice 本地服务",
     "openai_tts": "OpenAI TTS API",
     "disabled": "禁用语音合成（纯文本显示）",
@@ -103,10 +109,30 @@ LOCAL_SERVICE_DEFAULTS = {
     "cosyvoice": {"url": "http://localhost:50000", "health": "/health"},
     "funasr": {"url": "http://localhost:10096", "health": "/"},
     "ollama": {"url": "http://localhost:11434", "health": "/api/tags"},
+    "capswriter": {"url": "http://localhost:6701", "health": "/health"},
+    "vosk": {"url": "http://localhost:6702", "health": "/health"},
+    "vibevoice": {"url": "http://localhost:6704", "health": "/health"},
+    "fireredtts": {"url": "http://localhost:6706", "health": "/health"},
+    "openvoice": {"url": "http://localhost:6707", "health": "/health"},
+    "gateway": {"url": "http://localhost:6666", "health": "/health"},
 }
 
 # 语音服务提供商详细元数据
 VOICE_SERVICE_META = {
+    "capswriter": {
+        "name": "CapsWriter 本地语音识别（推荐）",
+        "default_url": "http://localhost:6666",
+        "type": "asr",
+        "needs_api_key": False,
+        "health_path": "/health/capswriter",
+    },
+    "vosk": {
+        "name": "Vosk 本地语音识别（流式）",
+        "default_url": "http://localhost:6666",
+        "type": "asr",
+        "needs_api_key": False,
+        "health_path": "/health/vosk",
+    },
     "funasr": {
         "name": "FunASR 本地语音识别",
         "default_url": "http://localhost:10096",
@@ -127,6 +153,27 @@ VOICE_SERVICE_META = {
         "type": "tts",
         "needs_api_key": False,
         "health_path": "/v1/models",
+    },
+    "vibevoice": {
+        "name": "VibeVoice 微软高品质语音合成",
+        "default_url": "http://localhost:6666",
+        "type": "tts",
+        "needs_api_key": False,
+        "health_path": "/health/vibevoice",
+    },
+    "fireredtts": {
+        "name": "FireRedTTS 本地语音合成（流式）",
+        "default_url": "http://localhost:6666",
+        "type": "tts",
+        "needs_api_key": False,
+        "health_path": "/health/fireredtts",
+    },
+    "openvoice": {
+        "name": "OpenVoice 本地语音合成（变声）",
+        "default_url": "http://localhost:6666",
+        "type": "tts",
+        "needs_api_key": False,
+        "health_path": "/health/openvoice",
     },
     "cosyvoice": {
         "name": "CosyVoice 本地语音合成",

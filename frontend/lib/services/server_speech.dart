@@ -4,16 +4,16 @@
 ///
 /// 注意：此文件使用 dart:html（仅限 Flutter Web）。
 /// 在非 Web 平台，此文件将无法编译，需要条件导入替代实现。
+// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
-// ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
-import 'speech_service.dart';
+import 'speech_contract.dart';
 
 /// 服务器端 TTS 实现：调用 POST /api/v1/voice/tts 获取音频并播放
 class ServerTtsService implements TtsService {
@@ -69,8 +69,9 @@ class ServerTtsService implements TtsService {
       _audioElement!.onError.listen((_) {
         _isSpeaking = false;
         html.Url.revokeObjectUrl(url);
-        if (!completer.isCompleted)
+        if (!completer.isCompleted) {
           completer.completeError('TTS playback error');
+        }
       });
 
       await _audioElement!.play();
@@ -99,8 +100,8 @@ class ServerAsrService implements AsrService {
   final String serverUrl;
   final Dio _dio;
   bool _isListening = false;
-  final StreamController<String> _controller =
-      StreamController<String>.broadcast();
+  final StreamController<AsrResult> _controller =
+      StreamController<AsrResult>.broadcast();
   html.MediaRecorder? _mediaRecorder;
   final List<html.Blob> _chunks = [];
 
@@ -118,7 +119,7 @@ class ServerAsrService implements AsrService {
   bool get isAvailable => true; // 假设服务器可用
 
   @override
-  Stream<String> get transcriptionStream => _controller.stream;
+  Stream<AsrResult> get transcriptionStream => _controller.stream;
 
   @override
   Future<void> startListening() async {
@@ -187,7 +188,7 @@ class ServerAsrService implements AsrService {
       final text = response.data['text'] as String? ?? '';
 
       if (text.isNotEmpty && !_controller.isClosed) {
-        _controller.add(text);
+        _controller.add(AsrResult(text: text.trim(), isFinal: true));
       }
     } catch (e) {
       if (!_controller.isClosed) {
@@ -195,6 +196,22 @@ class ServerAsrService implements AsrService {
       }
     } finally {
       _chunks.clear();
+    }
+  }
+
+  @override
+  Future<String> refineTranscript(String text) async {
+    final normalized = text.trim();
+    if (normalized.isEmpty) return '';
+    try {
+      final response = await _dio.post(
+        '/api/v1/voice/asr/refine',
+        data: {'text': normalized},
+      );
+      final refined = (response.data['text'] as String?)?.trim() ?? normalized;
+      return refined.isEmpty ? normalized : refined;
+    } catch (_) {
+      return normalized;
     }
   }
 

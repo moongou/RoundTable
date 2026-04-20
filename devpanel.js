@@ -267,12 +267,38 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .links{margin-top:20px;display:flex;gap:16px;flex-wrap:wrap}
   .link-btn{background:#0f3460;color:#d4a017;border:1px solid #0f3460;border-radius:8px;padding:8px 16px;font-size:13px;text-decoration:none;display:inline-block}
   .link-btn:hover{border-color:#d4a017}
+  .header-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:24px}
+  .header-left{flex:0 0 auto}
+  .header-right{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+  .hw-info{display:flex;gap:12px;align-items:center;font-size:11px;color:#888;background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:6px 12px}
+  .hw-info .hw-chip{color:#d4a017;font-weight:600;font-size:12px}
+  .hw-info .hw-sep{color:#333}
   .footer{margin-top:24px;color:#444;font-size:12px}
 </style>
 </head>
 <body>
-<h1>🕯 RoundTable 开发面板</h1>
-<p class="subtitle">localhost:8888 — 圆桌思辨讨论平台</p>
+<div class="header-row">
+  <div class="header-left">
+    <h1>🕯 RoundTable 开发面板</h1>
+    <p class="subtitle">localhost:8888 — 圆桌思辨讨论平台</p>
+  </div>
+  <div class="header-right">
+    <div class="hw-info" id="hw-info" style="display:none">
+      <span class="hw-chip" id="hw-chip"></span>
+      <span class="hw-sep">|</span>
+      <span id="hw-cpu"></span>
+      <span class="hw-sep">|</span>
+      <span id="hw-mem"></span>
+      <span class="hw-sep">|</span>
+      <span id="hw-gpu"></span>
+    </div>
+    <button class="link-btn" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer;border:none;background:#0f3460;color:#d4a017;font-size:12px;padding:6px 12px;border-radius:6px">🖥 硬件检测</button>
+    <a class="link-btn" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
+    <a class="link-btn" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API Docs</a>
+    <a class="link-btn" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
+    <a class="link-btn" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+  </div>
+</div>
 <div class="grid">
   <div class="card" id="card-backend">
     <div class="card-title">
@@ -311,12 +337,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="health-grid" id="health-grid">
     <div style="padding:14px;color:#666;text-align:center">加载中…</div>
   </div>
-</div>
-<div class="links">
-  <a class="link-btn" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
-  <a class="link-btn" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API Docs</a>
-  <a class="link-btn" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
-  <a class="link-btn" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
 </div>
 <div class="footer">RoundTable Dev Panel · 使用 <kbd>Ctrl+C</kbd> 停止面板</div>
 <script>
@@ -403,6 +423,21 @@ function renderHealth(data) {
 function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 setTimeout(refreshHealth, 500);
 setInterval(refreshHealth, 30000);
+// Fetch hardware info
+function fetchHardware() {
+  fetch('http://localhost:8001/api/v1/benchmark/hardware')
+    .then(function(r){ return r.json(); })
+    .then(function(hw) {
+      var el = document.getElementById('hw-info');
+      el.style.display = 'flex';
+      document.getElementById('hw-chip').textContent = hw.apple_chip || hw.cpu_brand || 'CPU';
+      document.getElementById('hw-cpu').textContent = hw.cpu_cores + ' cores / ' + hw.cpu_threads + ' perf';
+      document.getElementById('hw-mem').textContent = hw.memory_gb + ' GB RAM';
+      document.getElementById('hw-gpu').textContent = hw.mps_available ? 'MPS ✓' + (hw.gpu_cores ? ' ' + hw.gpu_cores + ' cores' : '') : hw.cuda_available ? 'CUDA ✓' : 'CPU only';
+    })
+    .catch(function() { /* backend not ready yet */ });
+}
+setTimeout(fetchHardware, 2000);
 </script>
 </body>
 </html>`;

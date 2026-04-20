@@ -5,6 +5,12 @@ import 'app_colors.dart';
 
 class AppTheme {
   static const _primaryColor = Color(0xFFFFB74D);
+  static final _darkColorScheme = ColorScheme.fromSeed(
+          seedColor: _primaryColor, brightness: Brightness.dark)
+      .copyWith(
+    surface: AppColors.studyWallLight,
+    onSurface: AppColors.warmWhite,
+  );
 
   static final lightTheme = ThemeData(
     useMaterial3: true,
@@ -36,7 +42,6 @@ class AppTheme {
 
   static final darkTheme = ThemeData(
     useMaterial3: true,
-    colorSchemeSeed: _primaryColor,
     brightness: Brightness.dark,
     textTheme: GoogleFonts.notoSansScTextTheme(
       ThemeData(brightness: Brightness.dark).textTheme,
@@ -56,10 +61,7 @@ class AppTheme {
       filled: true,
     ),
     scaffoldBackgroundColor: AppColors.studyWall,
-    colorScheme: ColorScheme.dark(
-      surface: AppColors.studyWallLight,
-      onSurface: AppColors.warmWhite,
-    ),
+    colorScheme: _darkColorScheme,
   );
 
   static TextStyle calligraphyStyle({
@@ -102,7 +104,8 @@ class AppTheme {
     );
   }
 
-  static BoxDecoration glowBoxDecoration(Color glowColor, {double blurRadius = 20}) {
+  static BoxDecoration glowBoxDecoration(Color glowColor,
+      {double blurRadius = 20}) {
     return BoxDecoration(
       shape: BoxShape.circle,
       boxShadow: [

@@ -10,7 +10,8 @@ import '../services/api_client.dart';
 /// Web 环境下自动使用浏览器 origin 避免跨域问题
 final apiClientProvider = Provider<ApiClient>((ref) {
   final asyncSettings = ref.watch(localSettingsProvider);
-  final serverUrl = asyncSettings.valueOrNull?.serverUrl ?? 'http://localhost:8001';
+  final serverUrl =
+      asyncSettings.valueOrNull?.serverUrl ?? 'http://localhost:8001';
   // Web: ApiClient 构造器内部会自动使用 Uri.base.origin
   // 非 Web: 使用用户配置的 serverUrl
   return ApiClient(baseUrl: serverUrl);
@@ -23,6 +24,7 @@ const _prefsKeyLlmProvider = 'llm_provider';
 const _prefsKeyAsrProvider = 'asr_provider';
 const _prefsKeyTtsProvider = 'tts_provider';
 const _prefsKeyPushToTalk = 'push_to_talk';
+const _prefsKeyMicControlMode = 'mic_control_mode';
 
 /// 本地设置 Provider（异步加载）
 final localSettingsProvider =
@@ -40,6 +42,7 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
       asrProvider: prefs.getString(_prefsKeyAsrProvider) ?? 'browser',
       ttsProvider: prefs.getString(_prefsKeyTtsProvider) ?? 'browser',
       pushToTalk: prefs.getBool(_prefsKeyPushToTalk) ?? true,
+      micControlMode: prefs.getString(_prefsKeyMicControlMode) ?? 'double_ctrl',
     );
   }
 
@@ -77,6 +80,13 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     await prefs.setBool(_prefsKeyPushToTalk, enabled);
     state = AsyncData(state.value!.copyWith(pushToTalk: enabled));
   }
+
+  /// 更新麦克风控制模式（double_ctrl | hold_ctrl）
+  Future<void> setMicControlMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsKeyMicControlMode, mode);
+    state = AsyncData(state.value!.copyWith(micControlMode: mode));
+  }
 }
 
 // ── 远端配置 Provider（从后端 API 读取）─────────────────────────────────────
@@ -107,8 +117,7 @@ final currentConfigProvider = FutureProvider<CurrentConfig>((ref) async {
 });
 
 /// 配置验证结果
-final configValidationProvider =
-    FutureProvider<ConfigValidation?>((ref) async {
+final configValidationProvider = FutureProvider<ConfigValidation?>((ref) async {
   final apiClient = ref.watch(apiClientProvider);
   return apiClient.validateConfig();
 });

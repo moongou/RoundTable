@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from app.api.v1.benchmark_api import router as benchmark_router
 from app.api.v1.characters import router as characters_router
 from app.api.v1.config_api import router as config_router
 from app.api.v1.sessions import router as sessions_router
@@ -18,4 +19,5 @@ api_router.include_router(sessions_router, tags=["sessions"])
 api_router.include_router(config_router, tags=["config"])
 api_router.include_router(thinkers_router, tags=["thinkers"])
 api_router.include_router(voice_router, tags=["voice"])
+api_router.include_router(benchmark_router, tags=["benchmark"])
 api_router.include_router(websocket_router, tags=["websocket"])

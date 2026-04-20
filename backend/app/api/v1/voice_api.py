@@ -47,6 +47,18 @@ class ASRResponse(BaseModel):
     language: Optional[str] = None
 
 
+class ASRRefineRequest(BaseModel):
+    """ASR 文本纠错请求"""
+
+    text: str
+
+
+class ASRRefineResponse(BaseModel):
+    """ASR 文本纠错响应"""
+
+    text: str
+
+
 # ── 角色音色映射 ──────────────────────────────────────────────────────────────
 
 def _get_voice_for_character(character_id: str) -> str:
@@ -130,3 +142,41 @@ async def speech_to_text(
     except Exception as e:
         logger.error(f"ASR 识别失败: {e}")
         raise HTTPException(status_code=500, detail=f"语音识别失败: {str(e)}")
+
+
+def _refine_transcript_text(text: str) -> str:
+    """轻量级转写后处理：去口语噪声、去重复、补标点。"""
+    import re
+
+    v = (text or "").strip()
+    if not v:
+        return ""
+
+    v = re.sub(r"\s+", " ", v)
+    v = re.sub(r"([，。！？；,.!?;])\1+", r"\1", v)
+    v = re.sub(r"(嗯|呃|啊|那个|就是)(\s*\1)+", r"\1", v)
+    v = re.sub(r"(我觉得){2,}", "我觉得", v)
+    v = re.sub(r"(然后){2,}", "然后", v)
+
+    parts = [p.strip() for p in re.split(r"[，。！？；,.!?;]+", v)]
+    dedup: list[str] = []
+    prev = ""
+    for p in parts:
+        if not p or p == prev:
+            continue
+        dedup.append(p)
+        prev = p
+
+    v = "，".join(dedup).strip()
+    if not v:
+        return ""
+    if not re.search(r"[。！？!?]$", v):
+        v += "。"
+    return v
+
+
+@router.post("/asr/refine")
+async def refine_asr_text(request: ASRRefineRequest) -> ASRRefineResponse:
+    """对 ASR 最终文本做后处理，提升句式可读性。"""
+    refined = _refine_transcript_text(request.text)
+    return ASRRefineResponse(text=refined)

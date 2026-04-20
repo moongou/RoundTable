@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,6 +29,13 @@ class SessionScreen extends ConsumerStatefulWidget {
 }
 
 class _SessionScreenState extends ConsumerState<SessionScreen> {
+  // Ctrl 键计数与定时器
+  int _ctrlKeyCount = 0;
+  DateTime? _lastCtrlKeyTime;
+  Timer? _ctrlKeyTimer;
+  Timer? _speechTimeoutTimer;
+  bool _hasSpokenDuringRecording = false;
+
   final DiscussionWebSocket _wsClient = DiscussionWebSocket();
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -61,11 +70,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     _asrService = createAsrService(asrProvider, serverUrl: serverUrl);
 
     // 监听 ASR 转录结果
-    _asrService.transcriptionStream.listen((text) {
-      if (text.isNotEmpty) {
-        _wsClient.sendHumanInput(speaker: widget.humanName, content: text);
+    _asrService.transcriptionStream.listen((result) {
+      if (!result.isFinal) return;
+      final normalized = result.text.trim();
+      if (normalized.isNotEmpty) {
+        _hasSpokenDuringRecording = true;
+        _wsClient.sendHumanInput(
+            speaker: widget.humanName, content: normalized);
         setState(() {
-          _messages.add(ChatMessage(source: widget.humanName, content: text));
+          _messages
+              .add(ChatMessage(source: widget.humanName, content: normalized));
           _isMyTurn = false;
           _statusText = '等待其他人发言...';
         });
@@ -175,6 +189,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           _isMyTurn = true;
           _statusText = '轮到你发言了！';
         });
+      case WsEventType.apiError:
+        final apiData = event.data;
+        setState(() {
+          _statusText =
+              '错误: ${apiData?['message'] ?? apiData?['original_error'] ?? 'AI 服务异常'}';
+        });
       case WsEventType.error:
         final data = event.data;
         setState(() {
@@ -221,12 +241,28 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   // ── Push-to-Talk ────────────────────────────────────────────────────────────
 
   void _onPttStart() {
+    _speechTimeoutTimer?.cancel();
+    _hasSpokenDuringRecording = false;
     setState(() => _isRecording = true);
     _wsClient.sendPushToTalkStart(speaker: widget.humanName);
     _asrService.startListening();
+
+    // 10 秒未检测到语音则自动结束并跳过。
+    _speechTimeoutTimer = Timer(const Duration(seconds: 10), () {
+      if (!mounted || !_isRecording) return;
+      _onPttEnd();
+      if (!_hasSpokenDuringRecording) {
+        _wsClient.sendHumanInput(speaker: widget.humanName, content: '（跳过）');
+        setState(() {
+          _statusText = '10秒未检测到语音，已自动跳过';
+          _isMyTurn = false;
+        });
+      }
+    });
   }
 
   void _onPttEnd() {
+    _speechTimeoutTimer?.cancel();
     setState(() => _isRecording = false);
     _wsClient.sendPushToTalkEnd(speaker: widget.humanName);
     _asrService.stopListening();
@@ -261,6 +297,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   @override
   void dispose() {
+    _ctrlKeyTimer?.cancel();
+    _speechTimeoutTimer?.cancel();
     _ttsService.dispose();
     _asrService.dispose();
     _wsClient.dispose();
@@ -273,7 +311,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   @override
   Widget build(BuildContext context) {
     final isPushToTalk = _isPushToTalk;
-    final canSpeak = _isMyTurn || _isRecording;
 
     return KeyboardListener(
       focusNode: _keyboardFocusNode,
@@ -333,17 +370,38 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 
   void _onKeyEvent(KeyEvent event) {
-    // 仅 Push-to-Talk 模式下空格键触发
+    // 仅 Push-to-Talk 模式下Ctrl键触发
     if (!_isPushToTalk) return;
 
-    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.space) {
-      if (_isMyTurn && !_isRecording) {
-        _onPttStart();
+    // 监听Ctrl键
+    final isCtrl = event.logicalKey == LogicalKeyboardKey.controlLeft ||
+        event.logicalKey == LogicalKeyboardKey.controlRight;
+
+    if (event is KeyDownEvent && isCtrl) {
+      final now = DateTime.now();
+      if (_lastCtrlKeyTime == null ||
+          now.difference(_lastCtrlKeyTime!) >
+              const Duration(milliseconds: 1200)) {
+        _ctrlKeyCount = 1;
+      } else {
+        _ctrlKeyCount++;
       }
-    } else if (event is KeyUpEvent &&
-        event.logicalKey == LogicalKeyboardKey.space) {
-      if (_isRecording) {
+      _lastCtrlKeyTime = now;
+
+      _ctrlKeyTimer?.cancel();
+      _ctrlKeyTimer = Timer(const Duration(milliseconds: 1200), () {
+        _ctrlKeyCount = 0;
+      });
+
+      // 三击Ctrl启动语音识别
+      if (_ctrlKeyCount == 3 && _isMyTurn && !_isRecording) {
+        _onPttStart();
+        _ctrlKeyCount = 0;
+      }
+      // 双击Ctrl结束语音识别
+      else if (_ctrlKeyCount == 2 && _isRecording) {
         _onPttEnd();
+        _ctrlKeyCount = 0;
       }
     }
   }

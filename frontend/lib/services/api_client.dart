@@ -30,6 +30,9 @@ class ApiClient {
     _dio.options.baseUrl = url;
   }
 
+  /// 暴露 Dio 实例供基准测试等直接调用
+  Dio get dio => _dio;
+
   String get baseUrl => _dio.options.baseUrl;
 
   /// 将 DioException 转为用户友好的中文错误信息
@@ -136,8 +139,8 @@ class ApiClient {
   Future<Map<String, ServiceHealth>> checkServicesHealth() async {
     final response = await _dio.get('/api/v1/config/health');
     final data = response.data as Map<String, dynamic>;
-    return data.map((name, json) =>
-        MapEntry(name, ServiceHealth.fromJson(name, json as Map<String, dynamic>)));
+    return data.map((name, json) => MapEntry(
+        name, ServiceHealth.fromJson(name, json as Map<String, dynamic>)));
   }
 
   /// 获取当前生效配置
@@ -153,7 +156,8 @@ class ApiClient {
   }
 
   /// 更新运行时配置（LLM 提供商、API Key、模型等）
-  Future<Map<String, dynamic>> updateConfig(Map<String, dynamic> updates) async {
+  Future<Map<String, dynamic>> updateConfig(
+      Map<String, dynamic> updates) async {
     final response = await _dio.post('/api/v1/config/update', data: updates);
     return Map<String, dynamic>.from(response.data);
   }
@@ -184,12 +188,14 @@ class ApiClient {
     String? url,
     String? apiKey,
   }) async {
-    final response = await _dio.post('/api/v1/config/test-voice-service', data: {
+    final response =
+        await _dio.post('/api/v1/config/test-voice-service', data: {
       'service': service,
       if (url != null && url.isNotEmpty) 'url': url,
       if (apiKey != null && apiKey.isNotEmpty) 'api_key': apiKey,
     });
-    return VoiceServiceTestResult.fromJson(response.data as Map<String, dynamic>);
+    return VoiceServiceTestResult.fromJson(
+        response.data as Map<String, dynamic>);
   }
 
   /// 获取网络搜索配置

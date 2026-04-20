@@ -11,6 +11,7 @@ enum WsEventType {
   stateChange,
   system,
   humanInputRequested,
+  apiError,
   error,
   ended,
   interrupt;

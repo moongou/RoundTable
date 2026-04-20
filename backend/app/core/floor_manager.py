@@ -2,6 +2,7 @@
 
 核心组件：桥接 AutoGen 的文本轮次模型和实时通信层。
 管理讨论状态转换、人类输入队列、AI 输出流。
+支持指定发言者、错误恢复和超时处理。
 """
 
 from __future__ import annotations
@@ -24,9 +25,9 @@ from autogen_agentchat.messages import (
 )
 from autogen_agentchat.teams import SelectorGroupChat
 
-from app.agents.human_proxy import get_human_queue, put_human_input
+from app.agents.human_proxy import put_human_input
 from app.core.safety_filter import SafetyFilter
-from app.core.turn_scheduler import create_discussion_team
+from app.core.turn_scheduler import create_discussion_team, set_designated_speaker, parse_speaker_designation
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,10 @@ class FloorManager:
         self._streaming_buffer: dict[str, list[str]] = {}
         self._current_streaming_source: Optional[str] = None
 
+        # display name → agent name 映射（需求4：用于指定发言者解析）
+        self._display_name_to_agent: dict[str, str] = {}
+        self._agent_to_display_name: dict[str, str] = {}
+
     def on_message(self, callback: Callable) -> "FloorManager":
         """注册消息回调。callback(source, content, msg_type)"""
         self._on_message = callback
@@ -116,6 +121,11 @@ class FloorManager:
         """注册打断回调。callback(interrupter, current_speaker)"""
         self._on_interrupt = callback
         return self
+
+    def set_display_name_map(self, agent_to_display: dict[str, str]) -> None:
+        """设置 agent name → display name 映射，用于指定发言者解析。"""
+        self._agent_to_display_name = dict(agent_to_display)
+        self._display_name_to_agent = {v: k for k, v in agent_to_display.items()}
 
     async def _emit_message(self, source: str, content: str, msg_type: str = "text") -> None:
         """发送消息事件。"""
@@ -220,6 +230,8 @@ class FloorManager:
             speaker = event.content if hasattr(event, "content") else str(event)
             is_human = speaker in self.human_names
 
+            logger.info("[FloorManager] 选择发言者: %s (is_human=%s)", speaker, is_human)
+
             if is_human:
                 await self._set_state(FloorState.HUMAN_TURN_WAITING)
             else:
@@ -256,9 +268,21 @@ class FloorManager:
             if source == "user":
                 return None
 
+            logger.info("[FloorManager] 完整消息: source=%s, content_len=%d", source, len(content))
+
             # 安全过滤 AI 输出
             if source in self.ai_names:
                 content = await self.safety_filter.filter_or_rewrite(content)
+
+            # 如果是老师或用户的发言，检查是否指定了下一位发言者（需求4）
+            display_source = self._agent_to_display_name.get(source, source)
+            all_display_names = list(self._display_name_to_agent.keys())
+            if all_display_names and (source in self.ai_names or source in self.human_names):
+                designated = parse_speaker_designation(content, all_display_names)
+                if designated:
+                    agent_name = self._display_name_to_agent.get(designated, designated)
+                    logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
+                    set_designated_speaker(agent_name)
 
             # 清空该发言者的流式缓冲
             self._streaming_buffer.pop(source, None)
@@ -294,18 +318,54 @@ class FloorManager:
         """提交人类参与者的输入文本。
 
         从 WebSocket/STT 收到人类消息时调用此方法。
+        同时检查用户发言中是否指定了下一位发言者。
 
         Args:
             name: 参与者名字。
             text: 转录文本。
         """
+        normalized_name = (name or "").strip()
+        normalized_text = (text or "").strip()
+
+        logger.info("[FloorManager] 收到人类输入: name=%s, text_len=%d", normalized_name, len(normalized_text))
+
+        # 空输入直接按跳过处理，保证流程继续。
+        if not normalized_text:
+            logger.info("[FloorManager] 空输入，自动跳过: %s", normalized_name)
+            await put_human_input(normalized_name, "（跳过）")
+            await self._emit_message("系统", f"{normalized_name or '该同学'}未输入有效内容，已自动跳过本轮。", "system")
+            return
+
+        # 跳过指令不需要安全过滤
+        if normalized_text in ("（跳过）", "(跳过)", "跳过"):
+            logger.info("[FloorManager] 用户主动跳过: %s", normalized_name)
+            await put_human_input(normalized_name, "（跳过）")
+            return
+
         # 安全过滤人类输入
-        is_safe, reason = await self.safety_filter.check_human_input(text)
+        is_safe, reason = await self.safety_filter.check_human_input(normalized_text)
         if not is_safe:
+            logger.warning("[FloorManager] 人类输入被安全过滤: %s, reason=%s", normalized_name, reason)
             await self._emit_message("系统", "你的发言包含不适当的内容，请换一种方式表达。", "system")
             return
 
-        await put_human_input(name, text)
+        # 检查用户是否指定了下一位发言者（需求4）
+        all_participant_names = list(self.all_names)
+        # 使用 display name map if available
+        designated = parse_speaker_designation(normalized_text, list(self._display_name_to_agent.keys()) if hasattr(self, '_display_name_to_agent') else all_participant_names)
+        if designated:
+            logger.info("[FloorManager] 用户 %s 指定下一位发言者: %s", normalized_name, designated)
+            # 转换为 agent name
+            agent_name = self._display_name_to_agent.get(designated, designated) if hasattr(self, '_display_name_to_agent') else designated
+            set_designated_speaker(agent_name)
+
+        try:
+            await put_human_input(normalized_name, normalized_text)
+            logger.info("[FloorManager] 人类输入已提交到队列: %s", normalized_name)
+        except Exception as e:
+            logger.warning("[FloorManager] 提交人类输入失败，自动跳过。name=%s, err=%s", normalized_name, e)
+            await put_human_input(normalized_name, "（跳过）")
+            await self._emit_message("系统", f"{normalized_name or '该同学'}输入处理异常，系统已自动跳过并继续讨论。", "system")
 
     async def request_interrupt(self, speaker: str) -> None:
         """处理打断请求。
