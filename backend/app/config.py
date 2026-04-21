@@ -107,7 +107,7 @@ TTS_PROVIDERS = {
 LOCAL_SERVICE_DEFAULTS = {
     "edge_tts": {"url": "http://localhost:5051", "health": "/v1/models"},
     "cosyvoice": {"url": "http://localhost:50000", "health": "/health"},
-    "funasr": {"url": "http://localhost:10096", "health": "/"},
+    "funasr": {"url": "ws://localhost:10095", "health": "/"},
     "ollama": {"url": "http://localhost:11434", "health": "/api/tags"},
     "capswriter": {"url": "http://localhost:6701", "health": "/health"},
     "vosk": {"url": "http://localhost:6702", "health": "/health"},
@@ -135,10 +135,12 @@ VOICE_SERVICE_META = {
     },
     "funasr": {
         "name": "FunASR 本地语音识别",
-        "default_url": "http://localhost:10096",
+        "default_url": "ws://localhost:10095",
         "type": "asr",
         "needs_api_key": False,
         "health_path": "/",
+        # HTTP 模式：将 url 改为 http://localhost:8000（需先启动 FunASR HTTP server）
+        # WS  模式：ws://localhost:10095（当前运行中）
     },
     "openai_whisper": {
         "name": "OpenAI Whisper API",
@@ -265,8 +267,8 @@ class Settings(BaseSettings):
 
     # ASR (语音识别)
     asr_provider: str = "browser"  # browser / funasr / openai_whisper
-    asr_url: str = "http://localhost:10096"  # deprecated, use funasr_url
-    funasr_url: str = "http://localhost:10096"
+    asr_url: str = "ws://localhost:10095"  # deprecated, use funasr_url
+    funasr_url: str = "ws://localhost:10095"  # WS 模式（当前运行）；HTTP 模式改为 http://localhost:8000
     openai_whisper_api_key: str = ""  # uses openai_api_key if blank
     openai_whisper_base_url: str = "https://api.openai.com/v1"
 

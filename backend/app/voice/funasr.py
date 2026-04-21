@@ -1,7 +1,8 @@
 """FunASR ASR 提供商
 
-通过本地的 FunASR 服务（端口 10096）提供语音识别。
-FunASR 支持 HTTP 接口接收音频并返回转录文本。
+通过本地的 FunASR 服务提供语音识别：
+  - HTTP API:    http://localhost:8000/recognition  (默认)
+  - WebSocket:   ws://localhost:10095              (将 base_url 设为 ws:// 前缀启用)
 """
 
 from __future__ import annotations
@@ -28,25 +29,44 @@ logger = logging.getLogger(__name__)
 class FunASRProvider(ASRProvider):
     """FunASR ASR 提供商，通过本地 FunASR 服务进行语音识别。"""
 
-    def __init__(self, base_url: str = "http://localhost:10096"):
+    def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url.rstrip("/")
 
     async def transcribe(self, audio_data: bytes, format: str = "wav") -> str:
         if self.base_url.startswith("ws://") or self.base_url.startswith("wss://"):
             return await self._transcribe_via_websocket(audio_data, format=format)
 
-        # FunASR 典型接口: POST /recognize with multipart audio upload
+        # FunASR HTTP API: POST /recognition with multipart audio upload
         async with httpx.AsyncClient(timeout=30.0) as client:
             files = {"audio": (f"audio.{format}", audio_data, f"audio/{format}")}
             response = await client.post(
-                f"{self.base_url}/recognize",
+                f"{self.base_url}/recognition",
                 files=files,
             )
             response.raise_for_status()
 
             data = response.json()
-            # FunASR 返回格式通常是 {"text": "识别结果", ...}
-            return data.get("text", data.get("result", ""))
+            # FunASR HTTP 响应格式有多种，按优先级依次尝试：
+            # 1. {"result": "text"}  (runtime/python/http/server.py 常见)
+            # 2. {"text": "text"}
+            # 3. [{"text": "...", ...}, ...]  (列表格式)
+            # 4. {"code": 0, "data": {"result": "text"}}
+            if isinstance(data, list):
+                texts = [item.get("text", "") for item in data if isinstance(item, dict)]
+                return " ".join(t.strip() for t in texts if t.strip())
+            if isinstance(data, dict):
+                for key in ("result", "text"):
+                    val = data.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+                # {"code": 0, "data": {"result": "..."}}
+                nested = data.get("data", {})
+                if isinstance(nested, dict):
+                    for key in ("result", "text"):
+                        val = nested.get(key)
+                        if isinstance(val, str) and val.strip():
+                            return val.strip()
+            return ""
 
     async def _transcribe_via_websocket(self, audio_data: bytes, format: str = "wav") -> str:
         pcm_data, sample_rate = self._to_pcm_stream(audio_data, format)
@@ -130,13 +150,13 @@ class FunASRProvider(ASRProvider):
             if not shutil.which("ffmpeg"):
                 raise ValueError(
                     "FunASR WebSocket 收到压缩音频，且未安装 ffmpeg，无法转码。"
-                    "请安装 ffmpeg 或切换到可直接输出 WAV/PCM 的录音链路。"
+                    "请安装 ffmpeg 或将 funasr_url 设为 HTTP 地址（http://localhost:8000）使用批量转录模式。"
                 )
             return self._convert_to_pcm_with_ffmpeg(audio_data, fmt)
 
         raise ValueError(
             "FunASR WebSocket 模式仅支持 PCM/WAV 输入。"
-            "当前为非 PCM 音频，请改用 HTTP FunASR(10096) 或调整前端录音格式。"
+            "当前为非 PCM 音频，请改用 HTTP FunASR (http://localhost:8000) 或安装 ffmpeg 进行自动转码。"
         )
 
     def _convert_to_pcm_with_ffmpeg(self, audio_data: bytes, src_format: str) -> tuple[bytes, int]:

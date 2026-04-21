@@ -89,6 +89,7 @@ class SpeechProviderInfo {
   final String id;
   final String name;
   final bool isActive;
+  final bool available;
   final String url;
   final String defaultUrl;
   final bool needsApiKey;
@@ -98,6 +99,7 @@ class SpeechProviderInfo {
     required this.id,
     required this.name,
     required this.isActive,
+    this.available = false,
     this.url = '',
     this.defaultUrl = '',
     this.needsApiKey = false,
@@ -109,6 +111,7 @@ class SpeechProviderInfo {
         id: json['id'] as String,
         name: json['name'] as String,
         isActive: json['is_active'] as bool? ?? false,
+        available: json['available'] as bool? ?? false,
         url: json['url'] as String? ?? '',
         defaultUrl: json['default_url'] as String? ?? '',
         needsApiKey: json['needs_api_key'] as bool? ?? false,

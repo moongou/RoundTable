@@ -1491,6 +1491,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     final testing = _testingVoice[p.id] ?? false;
     final vResult = _voiceTestResult[p.id];
 
+    // 可用性指示点（浏览器/禁用始终绿色；本地/云服务按探测结果）
+    final availColor = p.available ? const Color(0xFF4CAF50) : const Color(0xFFBDBDBD);
+    final availTip = p.available ? '服务可用' : '服务不可用或未启动';
+
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         // ignore: deprecated_member_use
@@ -1520,6 +1524,19 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             child:
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
+            // 可用性指示点
+            Tooltip(
+              message: availTip,
+              child: Container(
+                width: 7,
+                height: 7,
+                margin: const EdgeInsets.only(right: 6),
+                decoration: BoxDecoration(
+                  color: availColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
             Text(p.name,
                 style:
                     const TextStyle(color: AppColors.warmWhite, fontSize: 13)),

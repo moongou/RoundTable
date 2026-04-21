@@ -230,7 +230,8 @@ async def list_providers():
 
 @router.get("/speech")
 async def list_speech_providers():
-    """列出语音识别/合成服务提供商（含当前URL配置）。"""
+    """列出语音识别/合成服务提供商（含当前URL配置和实时可用性探测）。"""
+
     def voice_service_detail(service_id: str) -> dict:
         meta = VOICE_SERVICE_META.get(service_id, {})
         url = settings.get_voice_service_url(service_id) or meta.get("default_url", "")
@@ -248,12 +249,56 @@ async def list_speech_providers():
             "has_api_key": bool(api_key),
         }
 
+    # ── 并行探测所有本地服务的可用性 ──────────────────────────────────────
+    # 列出需要实时探测的本地服务（排除浏览器、禁用和纯API类服务）
+    _local_probes = {
+        pid: (
+            settings.get_voice_service_url(pid)
+            or LOCAL_SERVICE_DEFAULTS.get(pid, {}).get("url", ""),
+            # 优先使用 LOCAL_SERVICE_DEFAULTS 的直连 health 路径，
+            # 避免 VOICE_SERVICE_META 中指向网关的聚合路径
+            LOCAL_SERVICE_DEFAULTS.get(pid, {}).get("health")
+            or VOICE_SERVICE_META.get(pid, {}).get("health_path", "/health"),
+        )
+        for pid in list(ASR_PROVIDERS.keys()) + list(TTS_PROVIDERS.keys())
+        if pid not in ("browser", "disabled", "openai_whisper", "openai_tts")
+        and LOCAL_SERVICE_DEFAULTS.get(pid)
+    }
+    # 去重（asr+tts 字典合并后同一 pid 只探测一次）
+    _probe_ids = list(dict.fromkeys(_local_probes.keys()))
+    _probe_results: dict[str, bool] = {}
+    if _probe_ids:
+        probe_coros = []
+        for pid in _probe_ids:
+            url, health = _local_probes[pid]
+            if url.startswith("ws://") or url.startswith("wss://"):
+                # WebSocket 服务：用 WS 握手探测而非 HTTP GET
+                probe_coros.append(_probe_websocket_service(url, timeout_sec=2.0))
+            else:
+                probe_coros.append(_probe_service(url, health, timeout_sec=2.0))
+        results = await asyncio.gather(*probe_coros, return_exceptions=True)
+        for pid, result in zip(_probe_ids, results):
+            if isinstance(result, dict):
+                _probe_results[pid] = bool(result.get("reachable"))
+            else:
+                _probe_results[pid] = False
+
+    def _available(pid: str) -> bool:
+        if pid in ("browser", "disabled"):
+            return True
+        if pid == "openai_whisper":
+            return bool(settings.openai_whisper_api_key or settings.openai_api_key)
+        if pid == "openai_tts":
+            return bool(settings.openai_api_key)
+        return _probe_results.get(pid, False)
+
     return {
         "asr": [
             {
                 "id": pid,
                 "name": name,
                 "is_active": pid == settings.asr_provider,
+                "available": _available(pid),
                 **voice_service_detail(pid),
             }
             for pid, name in ASR_PROVIDERS.items()
@@ -263,6 +308,7 @@ async def list_speech_providers():
                 "id": pid,
                 "name": name,
                 "is_active": pid == settings.tts_provider,
+                "available": _available(pid),
                 **voice_service_detail(pid),
             }
             for pid, name in TTS_PROVIDERS.items()
