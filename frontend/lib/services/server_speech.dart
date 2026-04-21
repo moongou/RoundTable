@@ -21,6 +21,7 @@ class ServerTtsService implements TtsService {
   final Dio _dio;
   bool _isSpeaking = false;
   html.AudioElement? _audioElement;
+  Completer<void>? _pendingCompleter;
 
   ServerTtsService({this.serverUrl = 'http://localhost:8001'})
       : _dio = Dio(BaseOptions(
@@ -71,16 +72,19 @@ class ServerTtsService implements TtsService {
         ..autoplay = true;
 
       final completer = Completer<void>();
+      _pendingCompleter = completer;
 
       _audioElement!.onEnded.listen((_) {
         _isSpeaking = false;
         html.Url.revokeObjectUrl(url);
+        _pendingCompleter = null;
         if (!completer.isCompleted) completer.complete();
       });
 
       _audioElement!.onError.listen((_) {
         _isSpeaking = false;
         html.Url.revokeObjectUrl(url);
+        _pendingCompleter = null;
         if (!completer.isCompleted) {
           completer.completeError('TTS playback error');
         }
@@ -99,6 +103,11 @@ class ServerTtsService implements TtsService {
     _isSpeaking = false;
     _audioElement?.pause();
     _audioElement = null;
+    // 完成 pending completer 以立即中断 speak() 中的等待
+    if (_pendingCompleter != null && !_pendingCompleter!.isCompleted) {
+      _pendingCompleter!.complete();
+      _pendingCompleter = null;
+    }
   }
 
   @override
@@ -116,7 +125,9 @@ class ServerAsrService implements AsrService {
   final StreamController<AsrResult> _controller =
       StreamController<AsrResult>.broadcast();
   html.MediaRecorder? _mediaRecorder;
+  html.MediaStream? _mediaStream;
   final List<html.Blob> _chunks = [];
+  DateTime? _recordingStartTime;
 
   ServerAsrService({this.serverUrl = 'http://localhost:8001'})
       : _dio = Dio(BaseOptions(
@@ -141,16 +152,22 @@ class ServerAsrService implements AsrService {
   Future<void> startListening() async {
     if (_isListening) return;
 
+    // 清理上一轮可能残留的资源
+    await _forceCleanup();
+
     try {
-      // 请求麦克风权限并开始录音
       final mediaDevices = html.window.navigator.mediaDevices;
-      if (mediaDevices == null) return;
+      if (mediaDevices == null) {
+        _controller.addError('浏览器不支持麦克风访问');
+        return;
+      }
 
       final stream = await mediaDevices.getUserMedia({'audio': true});
+      _mediaStream = stream;
       _mediaRecorder = html.MediaRecorder(stream);
       _chunks.clear();
+      _recordingStartTime = DateTime.now();
 
-      // 使用 addEventListener 监听数据
       _mediaRecorder!.addEventListener('dataavailable', (html.Event event) {
         final blobEvent = event as html.BlobEvent;
         if (blobEvent.data != null) {
@@ -160,7 +177,6 @@ class ServerAsrService implements AsrService {
 
       _mediaRecorder!.addEventListener('stop', (html.Event _) async {
         await _sendForTranscription();
-        _isListening = false;
       });
 
       // 每秒收集一次数据
@@ -168,25 +184,54 @@ class ServerAsrService implements AsrService {
       _isListening = true;
     } catch (e) {
       _isListening = false;
+      _controller.addError('麦克风启动失败: $e');
     }
   }
 
   @override
   Future<void> stopListening() async {
-    if (!_isListening || _mediaRecorder == null) return;
+    if (!_isListening) return;
+
+    // 立即标记为非监听状态，防止重复触发
+    _isListening = false;
+
+    if (_mediaRecorder == null) return;
+
     try {
+      // 如果录音时间太短（< 300ms），大概率没有有效音频，直接清空
+      final elapsedMs = _recordingStartTime != null
+          ? DateTime.now().difference(_recordingStartTime!).inMilliseconds
+          : 0;
+      if (elapsedMs < 300) {
+        _mediaRecorder!.stop();
+        _chunks.clear();
+        return;
+      }
+
       _mediaRecorder!.stop();
-    } catch (_) {
+
+      // 保险：若 3 秒内 stop 事件未触发（某些浏览器偶发），强制发送
+      await Future.delayed(const Duration(seconds: 3));
+      if (_chunks.isNotEmpty && !_isListening) {
+        await _sendForTranscription();
+      }
+    } catch (e) {
       _isListening = false;
+      _chunks.clear();
+      _controller.addError('停止录音失败: $e');
     }
   }
 
   Future<void> _sendForTranscription() async {
     if (_chunks.isEmpty) return;
 
+    // 避免并发发送
+    final chunksToSend = List<html.Blob>.from(_chunks);
+    _chunks.clear();
+
     try {
       // 合并音频块为单个 Blob
-      final mergedBlob = html.Blob(_chunks, 'audio/webm');
+      final mergedBlob = html.Blob(chunksToSend, 'audio/webm');
 
       // 读取 Blob 为字节
       final reader = html.FileReader();
@@ -194,25 +239,78 @@ class ServerAsrService implements AsrService {
       await reader.onLoadEnd.first;
       final audioData = reader.result as Uint8List;
 
-      // 上传到 ASR 端点
+      // 空音频检查
+      if (audioData.isEmpty || audioData.length < 1024) {
+        _controller.addError('录音数据过小，请确认麦克风正常工作并靠近麦克风说话');
+        return;
+      }
+
+      // 上传到 ASR 端点，带 12 秒超时
       final formData = FormData.fromMap({
         'audio': MultipartFile.fromBytes(audioData, filename: 'audio.webm'),
         'format': 'webm',
       });
 
-      final response = await _dio.post('/api/v1/voice/asr', data: formData);
+      final response = await _dio
+          .post('/api/v1/voice/asr', data: formData)
+          .timeout(const Duration(seconds: 12), onTimeout: () {
+        throw TimeoutException('语音识别请求超时（12秒），请检查网络或 ASR 服务状态');
+      });
+
       final text = response.data['text'] as String? ?? '';
 
       if (text.isNotEmpty && !_controller.isClosed) {
         _controller.add(AsrResult(text: text.trim(), isFinal: true));
+      } else if (!_controller.isClosed) {
+        _controller.addError('未识别到有效语音，请重试录音');
+      }
+    } on DioException catch (e) {
+      String errMsg;
+      if (e.response?.statusCode == 503) {
+        errMsg = '语音识别服务当前不可用，请在设置中切换其他 ASR 服务或确认本地服务已启动';
+      } else if (e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.sendTimeout ||
+          e.type == DioExceptionType.receiveTimeout) {
+        errMsg = '语音识别请求超时，请检查网络或 ASR 服务状态';
+      } else {
+        errMsg = '语音识别请求失败: ${e.message}';
+      }
+      if (!_controller.isClosed) {
+        _controller.addError(errMsg);
+      }
+    } on TimeoutException catch (e) {
+      if (!_controller.isClosed) {
+        _controller.addError(e.message ?? '语音识别超时');
       }
     } catch (e) {
       if (!_controller.isClosed) {
         _controller.addError('语音识别失败: $e');
       }
-    } finally {
-      _chunks.clear();
     }
+  }
+
+  Future<void> _forceCleanup() async {
+    _chunks.clear();
+    _recordingStartTime = null;
+    if (_mediaRecorder != null) {
+      try {
+        if (_mediaRecorder!.state == 'recording') {
+          _mediaRecorder!.stop();
+        }
+      } catch (_) {
+        // 忽略清理错误
+      }
+      _mediaRecorder = null;
+    }
+    if (_mediaStream != null) {
+      try {
+        _mediaStream!.getTracks().forEach((track) => track.stop());
+      } catch (_) {
+        // 忽略清理错误
+      }
+      _mediaStream = null;
+    }
+    _isListening = false;
   }
 
   @override
@@ -233,7 +331,7 @@ class ServerAsrService implements AsrService {
 
   @override
   void dispose() {
-    stopListening();
+    _forceCleanup();
     _controller.close();
     _dio.close();
   }

@@ -12,7 +12,7 @@ thinkers:
   description: 古罗马政治家凯撒，将政治的智慧带到圆桌讨论中。
   system_message: 你是凯撒（古罗马的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a political advisor applying Caesar
-  voice: zh-CN-YunxiNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何在体制内推动变革？
   - 什么时候该果断出手？
@@ -28,7 +28,7 @@ thinkers:
   description: 近代政治家圣雄甘地，将政治的智慧带到圆桌讨论中。
   system_message: 你是圣雄甘地（近代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Gandhi
-  voice: zh-CN-YunjianNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何用非暴力方式推动改变？
   - 当规则本身不公正时该怎么做？
@@ -44,7 +44,7 @@ thinkers:
   description: 近代政治家亚伯拉罕·林肯，将政治的智慧带到圆桌讨论中。
   system_message: 你是亚伯拉罕·林肯（近代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Lincoln
-  voice: zh-CN-XiaoyiNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何在深度对立中推动共识？
   - 领导者面对反对声音该怎么做？
@@ -60,7 +60,7 @@ thinkers:
   description: 当代政治家纳尔逊·曼德拉，将政治的智慧带到圆桌讨论中。
   system_message: 你是纳尔逊·曼德拉（当代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Mandela
-  voice: zh-CN-YunyangNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何原谅真正伤害过我的人？
   - 个人牺牲和集体目标如何平衡？
@@ -76,7 +76,7 @@ thinkers:
   description: 当代政治家马丁·路德·金，将政治的智慧带到圆桌讨论中。
   system_message: 你是马丁·路德·金（当代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Martin Luther King Jr.
-  voice: zh-CN-XiaohanNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何将个人遭遇转化为推动改变的力量？
   - 演讲如何真正打动人心？
@@ -92,7 +92,7 @@ thinkers:
   description: 都铎王朝政治家伊丽莎白一世，将政治的智慧带到圆桌讨论中。
   system_message: 你是伊丽莎白一世（都铎王朝的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a political advisor applying Elizabeth I
-  voice: zh-CN-XiaomengNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何在各方势力间保持平衡？
   - 什么时候该模糊态度？
@@ -108,7 +108,7 @@ thinkers:
   description: 近代政治家本杰明·富兰克林，将政治的智慧带到圆桌讨论中。
   system_message: 你是本杰明·富兰克林（近代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Franklin
-  voice: zh-CN-XiaochenNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何系统性地养成好品格？
   - 公民责任和个人利益如何平衡？
@@ -124,7 +124,7 @@ thinkers:
   description: 当代政治家玛格丽特·撒切尔，将政治的智慧带到圆桌讨论中。
   system_message: 你是玛格丽特·撒切尔（当代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Thatcher
-  voice: zh-CN-XiaoshuangNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何在反对声中坚持推进正确的事？
   - 做不受欢迎的决定需要什么心态？
@@ -140,7 +140,7 @@ thinkers:
   description: 近代政治家西奥多·罗斯福，将政治的智慧带到圆桌讨论中。
   system_message: 你是西奥多·罗斯福（近代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Theodore Roosevelt
-  voice: zh-CN-XiaoxuanNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何从旁观者变成行动者？
   - 风险和回报如何权衡？
@@ -156,7 +156,7 @@ thinkers:
   description: 当代政治家李光耀，将政治的智慧带到圆桌讨论中。
   system_message: 你是李光耀（当代的政治家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a thinking advisor using Lee Kuan Yew
-  voice: zh-CN-XiaoxiaoNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何在资源匮乏时建立强大的组织？
   - 纪律和自由如何取得平衡？
@@ -174,7 +174,7 @@ thinkers:
     are Donald Trump, 45th and 47th US President, real estate developer. Everything
     is a deal — all relationships are negotiations with chips, concessions, winners
     and losers. Truthful hyperbole: the '
-  voice: zh-CN-YunyangNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何从强势位置谈判？
   - 媒体关注怎样变成权力？

@@ -39,8 +39,10 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     return LocalSettings(
       serverUrl: prefs.getString(_prefsKeyServerUrl) ?? 'http://localhost:8001',
       llmProvider: prefs.getString(_prefsKeyLlmProvider) ?? 'openai',
-      asrProvider: prefs.getString(_prefsKeyAsrProvider) ?? 'browser',
-      ttsProvider: prefs.getString(_prefsKeyTtsProvider) ?? 'browser',
+      // 默认 FunASR 流式（ws://localhost:10095）—— 浏览器原生 Web Speech API
+      // 在本地/无网情况下会立即触发 onend，造成“麦克风一打开就关”。
+      asrProvider: prefs.getString(_prefsKeyAsrProvider) ?? 'funasr',
+      ttsProvider: prefs.getString(_prefsKeyTtsProvider) ?? 'edge_tts',
       pushToTalk: prefs.getBool(_prefsKeyPushToTalk) ?? true,
       micControlMode: prefs.getString(_prefsKeyMicControlMode) ?? 'double_ctrl',
     );

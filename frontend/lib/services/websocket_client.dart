@@ -47,7 +47,7 @@ class WsEvent {
     final eventTypeRaw = json['event_type']?.toString() ?? 'error';
     final dataRaw = json['data'];
     final dataMap = dataRaw is Map
-      ? Map<String, dynamic>.from(dataRaw)
+        ? Map<String, dynamic>.from(dataRaw)
         : <String, dynamic>{};
 
     return WsEvent(
@@ -78,6 +78,7 @@ class DiscussionWebSocket {
     required List<String> characterIds,
     required List<String> humanNames,
     List<String> thinkerIds = const [],
+    bool observerMode = false,
   }) async {
     final uri = Uri.parse('$wsUrl/api/v1/ws/discussion/$sessionId');
     _channel = WebSocketChannel.connect(uri);
@@ -90,6 +91,7 @@ class DiscussionWebSocket {
       'character_ids': characterIds,
       'thinker_ids': thinkerIds,
       'human_names': humanNames,
+      'observer_mode': observerMode,
     }));
 
     // 监听消息

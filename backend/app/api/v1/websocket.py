@@ -163,6 +163,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         character_ids = config.get("character_ids", ["explorer", "skeptic"])
         thinker_ids = config.get("thinker_ids", [])
         human_names = config.get("human_names", ["豆苗"])
+        # 需求16：旁听模式——用户只观看讨论，每次轮到用户时系统自动跳过
+        observer_mode = bool(config.get("observer_mode", False))
 
         # 验证话题
         topic = get_topic_by_id(topic_id)
@@ -221,10 +223,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             return
 
         # Display names (Chinese) for system prompt and frontend display
-        all_participant_names = [templates["moderator"].name]
-        all_participant_names += [templates[cid].name for cid in character_ids if cid in templates and cid != "moderator"]
-        all_participant_names += [get_thinker(tid).get("name", tid) for tid in thinker_ids]
-        all_participant_names += human_names
+        student_names = [templates[cid].name for cid in character_ids if cid in templates and cid != "moderator"]
+        thinker_display_names = [get_thinker(tid).get("name", tid) for tid in thinker_ids]
+        all_participant_names = [templates["moderator"].name] + student_names + thinker_display_names + human_names
 
         # internal agent name → Chinese display name (for translating events to frontend)
         agent_display_map: dict[str, str] = {"moderator": templates["moderator"].name}
@@ -240,16 +241,29 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             model_client=moderator_client,
             topic=topic.title + " - " + topic.description,
             participant_names=all_participant_names,
+            student_names=student_names,
+            thinker_names=thinker_display_names,
+            human_names=human_names,
         )
 
         characters = [
-            create_virtual_character(cid, model_client=character_client, topic=topic.title)
+            create_virtual_character(
+                cid,
+                model_client=character_client,
+                topic=topic.title,
+                participant_names=all_participant_names,
+            )
             for cid in character_ids if cid != "moderator"
         ]
 
         # 创建思想家角色
         thinker_agents = [
-            create_thinker_agent(tid, model_client=character_client, topic=topic.title)
+            create_thinker_agent(
+                tid,
+                model_client=character_client,
+                topic=topic.title,
+                participant_names=all_participant_names,
+            )
             for tid in thinker_ids
         ]
 
@@ -267,6 +281,11 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         ai_agents = [a for a in unique_agents if a in ([moderator] + characters + thinker_agents)]
         human_agents = [a for a in unique_agents if a in humans]
 
+        # 构建 display_name → agent_name 映射（用于 turn_scheduler 解析点名）
+        display_name_to_agent: dict[str, str] = {}
+        for agent_name, display_name in agent_display_map.items():
+            display_name_to_agent[display_name] = agent_name
+
         # 创建讨论团队
         team = create_discussion_team(
             moderator=moderator_agent,
@@ -275,6 +294,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             selector_client=moderator_client,
             consume_designated_speaker=consume_session_designated_speaker,
             on_designation_lifecycle=on_designation_lifecycle,
+            display_name_to_agent=display_name_to_agent,
         )
 
         # 创建安全过滤器
@@ -295,6 +315,14 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         # 注册回调，将事件推送到 WebSocket
         async def on_message(source, content, msg_type):
+            # 需求8：暂停期间丢弃 AI/角色消息，避免恢复后出现堆积重放与错乱
+            if floor_manager is not None and getattr(floor_manager, "_paused", False):
+                if msg_type != "system":
+                    logger.debug(
+                        "[pause] drop message during pause source=%s len=%d",
+                        source, len(content or ""),
+                    )
+                    return
             display_source = agent_display_map.get(source, source)
             await send_event(
                 "message",
@@ -309,9 +337,26 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             )
 
         async def on_state_change(old_state, new_state, reason="", recovery=False):
+            # 需求13：把机器代号转成用户可读的中文，前端直接展示即可
+            state_label_map = {
+                "init": "初始化",
+                "moderator_opening": "主持人开场",
+                "selecting_speaker": "安排下一位发言",
+                "ai_speaking": "角色发言中",
+                "human_turn_waiting": "等待你发言",
+                "human_speaking": "你正在发言",
+                "interrupted": "有人举手插话",
+                "closing": "即将结束",
+                "ended": "讨论已结束",
+            }
             await send_event(
                 "state_change",
-                {"old_state": old_state.value, "new_state": new_state.value},
+                {
+                    "old_state": old_state.value,
+                    "new_state": new_state.value,
+                    "old_label": state_label_map.get(old_state.value, old_state.value),
+                    "new_label": state_label_map.get(new_state.value, new_state.value),
+                },
             )
             await send_phase_telemetry(
                 {
@@ -327,6 +372,15 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     "session_id": session_id,
                 },
             )
+            # 需求16：旁听模式——轮到用户时立刻自动跳过，让讨论继续
+            if observer_mode and new_state.value == "human_turn_waiting":
+                speaker = floor_manager.current_speaker or ""
+                if speaker:
+                    try:
+                        from app.agents.human_proxy import put_human_input
+                        await put_human_input(speaker, "（旁听）")
+                    except Exception:
+                        logger.debug("observer auto-skip failed", exc_info=True)
 
         async def on_interrupt(interrupter, current_speaker, approved_by):
             await send_event(
@@ -436,6 +490,14 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                                 "asr_error": error,
                             }
                         )
+                    elif msg.get("type") == "pause":
+                        if floor_manager is not None:
+                            floor_manager.set_paused(True)
+                            await send_event("system", {"message": "讨论已暂停"})
+                    elif msg.get("type") == "resume":
+                        if floor_manager is not None:
+                            floor_manager.set_paused(False)
+                            await send_event("system", {"message": "讨论已恢复"})
 
             except WebSocketDisconnect:
                 ws_closed = True

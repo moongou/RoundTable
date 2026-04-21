@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../../models/discussion_models.dart';
 import '../../painters/candlelight_painter.dart';
 import '../../painters/round_table_painter.dart';
 import '../../services/speech_service.dart';
+import '../../services/saved_topics_store.dart';
 import '../../state/settings_provider.dart';
 import '../../utils/open_external_url_stub.dart'
     if (dart.library.html) '../../utils/open_external_url_web.dart';
@@ -49,6 +51,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       TextEditingController(text: '豆苗');
   final TextEditingController _freeTopicController = TextEditingController();
   bool _isFreeTopicMode = false;
+  // 需求16：旁听模式开关
+  bool _isObserverMode = false;
 
   late AnimationController _pulseCtrl;
   late AnimationController _entranceCtrl;
@@ -200,6 +204,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           characterIds: _selectedCharacterIds.toList(),
           thinkerIds: _selectedThinkerIds.toList(),
           humanName: _nameController.text.isEmpty ? '豆苗' : _nameController.text,
+          observerMode: _isObserverMode,
         ),
         transitionsBuilder: (_, a1, a2, child) => FadeTransition(
           opacity: CurvedAnimation(parent: a1, curve: Curves.easeIn),
@@ -231,7 +236,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                 (item) => Padding(
                   padding: const EdgeInsets.only(bottom: 6),
                   child: Text('• $item',
-                      style: const TextStyle(color: _kTextPrimary, fontSize: 12)),
+                      style:
+                          const TextStyle(color: _kTextPrimary, fontSize: 12)),
                 ),
               ),
             ],
@@ -311,6 +317,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           nameController: _nameController,
           onSettings: () => Navigator.pushNamed(context, '/settings'),
           onDevPanel: () => _openDevPanel(context),
+          observerMode: _isObserverMode,
+          onObserverModeChanged: (v) => setState(() => _isObserverMode = v),
         ),
         Expanded(
           child: isWide
@@ -409,11 +417,15 @@ class _TopBar extends StatelessWidget {
   final TextEditingController nameController;
   final VoidCallback onSettings;
   final VoidCallback onDevPanel;
+  final bool observerMode;
+  final ValueChanged<bool> onObserverModeChanged;
 
   const _TopBar({
     required this.nameController,
     required this.onSettings,
     required this.onDevPanel,
+    required this.observerMode,
+    required this.onObserverModeChanged,
   });
 
   @override
@@ -455,6 +467,40 @@ class _TopBar extends StatelessWidget {
             ),
           ),
           const Spacer(),
+          // 需求16：旁听模式切换
+          Tooltip(
+            message: observerMode ? '旁听模式：已开启（用户不参与发言）' : '旁听模式：关闭',
+            child: InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: () => onObserverModeChanged(!observerMode),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: observerMode
+                      ? _kNeonGold.withValues(alpha: 0.12)
+                      : Colors.transparent,
+                  border:
+                      Border.all(color: observerMode ? _kNeonGold : _kBorder),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(
+                    observerMode ? Icons.visibility : Icons.visibility_outlined,
+                    size: 16,
+                    color: observerMode ? _kNeonGold : _kTextSecondary,
+                  ),
+                  const SizedBox(width: 6),
+                  Text('旁听',
+                      style: TextStyle(
+                          color: observerMode ? _kNeonGold : _kTextSecondary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600)),
+                ]),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
           _GlassField(controller: nameController, hint: '你的名号'),
           const SizedBox(width: 8),
           _IconBtn(
@@ -1115,6 +1161,7 @@ class _FreeTopicToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final screenH = MediaQuery.of(context).size.height;
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
       decoration: const BoxDecoration(
@@ -1131,14 +1178,11 @@ class _FreeTopicToggle extends StatelessWidget {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: isActive
-                    ? _kNeonGold.withValues(alpha: 0.15)
-                    : _kCard,
+                color: isActive ? _kNeonGold.withValues(alpha: 0.15) : _kCard,
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
-                  color: isActive
-                      ? _kNeonGold.withValues(alpha: 0.6)
-                      : _kBorder,
+                  color:
+                      isActive ? _kNeonGold.withValues(alpha: 0.6) : _kBorder,
                 ),
               ),
               child: Row(
@@ -1168,38 +1212,369 @@ class _FreeTopicToggle extends StatelessWidget {
             ),
           ),
           if (isActive) ...[
-            const SizedBox(height: 8),
-            TextField(
+            const SizedBox(height: 10),
+            // 需求17：输入区高度=屏幕 1/3；支持语音录入 + 自动整理
+            _FreeTopicInput(
               controller: controller,
-              onChanged: (_) => onChanged(),
-              style: const TextStyle(color: _kTextPrimary, fontSize: 14),
-              maxLines: 3,
-              minLines: 1,
-              decoration: InputDecoration(
-                hintText: '输入你想讨论的话题...',
-                hintStyle: TextStyle(
-                    color: _kTextSecondary.withValues(alpha: 0.6),
-                    fontSize: 13),
-                filled: true,
-                fillColor: _kCard,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: _kBorder),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: _kBorder),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: _kNeonGold),
-                ),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              ),
+              height: (screenH / 3).clamp(180.0, 360.0),
+              onChanged: onChanged,
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+class _FreeTopicInput extends ConsumerStatefulWidget {
+  final TextEditingController controller;
+  final double height;
+  final VoidCallback onChanged;
+  const _FreeTopicInput(
+      {required this.controller,
+      required this.height,
+      required this.onChanged});
+
+  @override
+  ConsumerState<_FreeTopicInput> createState() => _FreeTopicInputState();
+}
+
+class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
+  AsrService? _asr;
+  StreamSubscription? _asrSub;
+  String _draft = '';
+  bool _listening = false;
+  bool _refining = false;
+  List<String> _savedTopics = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSaved();
+  }
+
+  Future<void> _loadSaved() async {
+    final list = await SavedTopicsStore.load();
+    if (!mounted) return;
+    setState(() => _savedTopics = list);
+  }
+
+  Future<void> _saveCurrent() async {
+    final t = widget.controller.text.trim();
+    if (t.isEmpty) return;
+    await SavedTopicsStore.add(t);
+    await _loadSaved();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('已加入常用话题')),
+    );
+  }
+
+  @override
+  void dispose() {
+    _asrSub?.cancel();
+    try {
+      _asr?.dispose();
+    } catch (_) {}
+    super.dispose();
+  }
+
+  Future<void> _toggleMic() async {
+    if (_listening) {
+      await _stopMic();
+      return;
+    }
+    try {
+      final providerId =
+          ref.read(localSettingsProvider).valueOrNull?.asrProvider ?? 'browser';
+      _asr ??= createAsrService(providerId);
+      await _asr!.warmup();
+      await _asr!.startListening();
+      _draft = '';
+      _asrSub = _asr!.transcriptionStream.listen((r) {
+        setState(() {
+          _draft = r.text;
+          if (r.isFinal && _draft.trim().isNotEmpty) {
+            final sep = widget.controller.text.isEmpty ? '' : ' ';
+            widget.controller.text =
+                '${widget.controller.text}$sep${_draft.trim()}';
+            widget.controller.selection = TextSelection.fromPosition(
+              TextPosition(offset: widget.controller.text.length),
+            );
+            _draft = '';
+            widget.onChanged();
+          }
+        });
+      });
+      setState(() => _listening = true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('语音识别启动失败: $e')),
+      );
+    }
+  }
+
+  Future<void> _stopMic() async {
+    try {
+      await _asr?.stopListening();
+    } catch (_) {}
+    await _asrSub?.cancel();
+    _asrSub = null;
+    // 需求：讲话结束后，若没有收到 isFinal 事件，也要把草稿落到输入框里，
+    // 否则用户会看到"按了麦克风但什么都没出现"。
+    final leftover = _draft.trim();
+    if (leftover.isNotEmpty) {
+      final sep = widget.controller.text.isEmpty ? '' : ' ';
+      widget.controller.text = '${widget.controller.text}$sep$leftover';
+      widget.controller.selection = TextSelection.fromPosition(
+        TextPosition(offset: widget.controller.text.length),
+      );
+      _draft = '';
+      widget.onChanged();
+    }
+    setState(() => _listening = false);
+    // 需求一：结束录音后自动触发 AI 整理，
+    // 让"开启麦克风→讲话→松开→立即看到生成话题"成为一键流程。
+    if (widget.controller.text.trim().isNotEmpty) {
+      unawaited(_refineNow());
+    }
+  }
+
+  Future<void> _refineNow() async {
+    final text = widget.controller.text.trim();
+    if (text.isEmpty || _refining) return;
+    setState(() => _refining = true);
+    try {
+      final providerId =
+          ref.read(localSettingsProvider).valueOrNull?.asrProvider ?? 'browser';
+      _asr ??= createAsrService(providerId);
+      final refined = await _asr!.refineTranscript(text);
+      if (refined.trim().isNotEmpty) {
+        widget.controller.text = refined.trim();
+        widget.onChanged();
+      }
+    } catch (_) {
+      // 忽略错误，保留原文
+    } finally {
+      if (mounted) setState(() => _refining = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_savedTopics.isNotEmpty) ...[
+          SizedBox(
+            height: 32,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: _savedTopics.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 6),
+              itemBuilder: (_, i) {
+                final t = _savedTopics[i];
+                return InkWell(
+                  onTap: () {
+                    widget.controller.text = t;
+                    widget.onChanged();
+                    setState(() {});
+                  },
+                  borderRadius: BorderRadius.circular(14),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _kCard,
+                      border:
+                          Border.all(color: _kNeonGold.withValues(alpha: 0.4)),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.bookmark_border,
+                          size: 12, color: _kNeonGold),
+                      const SizedBox(width: 4),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 140),
+                        child: Text(
+                          t,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: _kTextPrimary, fontSize: 11),
+                        ),
+                      ),
+                    ]),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+        Container(
+          height: widget.height,
+          decoration: BoxDecoration(
+            color: _kCard,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: _kBorder),
+          ),
+          child: Stack(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 64),
+                child: TextField(
+                  controller: widget.controller,
+                  onChanged: (_) => widget.onChanged(),
+                  style: const TextStyle(
+                      color: _kTextPrimary, fontSize: 15, height: 1.6),
+                  maxLines: null,
+                  expands: true,
+                  textAlignVertical: TextAlignVertical.top,
+                  decoration: InputDecoration(
+                    hintText: _listening
+                        ? '正在聆听…说完话会自动整理'
+                        : '说出或写下你想讨论的话题，\n例如：小学生每天该不该用手机？',
+                    hintStyle: TextStyle(
+                        color: _kTextSecondary.withValues(alpha: 0.6),
+                        fontSize: 13,
+                        height: 1.6),
+                    border: InputBorder.none,
+                  ),
+                ),
+              ),
+              if (_draft.isNotEmpty)
+                Positioned(
+                  left: 12,
+                  right: 80,
+                  bottom: 56,
+                  child: Text(
+                    '（草稿）$_draft',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: _kNeonCyan.withValues(alpha: 0.8),
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ),
+              Positioned(
+                left: 10,
+                right: 10,
+                bottom: 10,
+                child: Row(
+                  children: [
+                    _MicButton(listening: _listening, onTap: _toggleMic),
+                    const SizedBox(width: 10),
+                    _SmallActionBtn(
+                      icon:
+                          _refining ? Icons.auto_fix_high : Icons.auto_awesome,
+                      label: _refining ? '整理中…' : 'AI 整理',
+                      onTap: _refining ? null : _refineNow,
+                    ),
+                    const SizedBox(width: 6),
+                    _SmallActionBtn(
+                      icon: Icons.bookmark_add_outlined,
+                      label: '保存',
+                      onTap: widget.controller.text.trim().isEmpty
+                          ? null
+                          : _saveCurrent,
+                    ),
+                    const Spacer(),
+                    if (widget.controller.text.isNotEmpty)
+                      _SmallActionBtn(
+                        icon: Icons.close,
+                        label: '清空',
+                        onTap: () {
+                          widget.controller.clear();
+                          widget.onChanged();
+                          setState(() {});
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MicButton extends StatelessWidget {
+  final bool listening;
+  final VoidCallback onTap;
+  const _MicButton({required this.listening, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(26),
+      child: Container(
+        width: 52,
+        height: 52,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: listening
+              ? const Color(0xFFFF4444).withValues(alpha: 0.18)
+              : _kNeonGold.withValues(alpha: 0.12),
+          border: Border.all(
+              color: listening ? const Color(0xFFFF4444) : _kNeonGold,
+              width: 1.5),
+          boxShadow: listening
+              ? [
+                  BoxShadow(
+                      color: const Color(0xFFFF4444).withValues(alpha: 0.35),
+                      blurRadius: 14,
+                      spreadRadius: 1)
+                ]
+              : null,
+        ),
+        child: Icon(
+          listening ? Icons.stop_circle_outlined : Icons.mic_rounded,
+          color: listening ? const Color(0xFFFF4444) : _kNeonGold,
+          size: 26,
+        ),
+      ),
+    );
+  }
+}
+
+class _SmallActionBtn extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  const _SmallActionBtn(
+      {required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = onTap == null;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(18),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: _kSurface,
+          border: Border.all(
+              color: disabled ? _kBorder : _kNeonGold.withValues(alpha: 0.6)),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 14, color: disabled ? _kTextSecondary : _kNeonGold),
+          const SizedBox(width: 6),
+          Text(label,
+              style: TextStyle(
+                  color: disabled ? _kTextSecondary : _kNeonGold,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+        ]),
       ),
     );
   }

@@ -222,10 +222,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   body{background:#1a1a2e;color:#e0e0e0;font-family:'SF Mono',Menlo,'Courier New',monospace;min-height:100vh;padding:24px}
   h1{color:#d4a017;font-size:24px;margin-bottom:6px;letter-spacing:2px}
   .subtitle{color:#888;font-size:13px;margin-bottom:24px}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
-  @media(max-width:700px){.grid{grid-template-columns:1fr}}
-  .card{background:#16213e;border:1px solid #0f3460;border-radius:12px;padding:20px;margin-bottom:0}
-  .card-mt{margin-top:20px}
+  /* 需求6：重新布局 - 改为单列堆叠 + 顶部状态条，信息密度更低、层次更清晰 */
+  .topbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;
+    background:linear-gradient(135deg,#16213e 0%,#0f1b35 100%);
+    border:1px solid #0f3460;border-radius:12px;padding:14px 18px;margin-bottom:20px}
+  .topbar .tb-left{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .topbar .tb-chip{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
+    background:#0d1a33;border:1px solid #1b335f;font-size:12px;color:#c8cee2}
+  .topbar .tb-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .stack{display:flex;flex-direction:column;gap:20px}
+  .card{background:#16213e;border:1px solid #0f3460;border-radius:12px;padding:20px}
   .card-title{display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:15px;font-weight:600}
   .dot{width:10px;height:10px;border-radius:50%;background:#555;transition:background .3s}
   .dot.running{background:#4caf50;box-shadow:0 0 8px #4caf50}
@@ -285,56 +291,40 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div class="header-row">
-  <div class="header-left">
-    <h1>🕯 RoundTable 开发面板</h1>
-    <p class="subtitle">localhost:8888 — 圆桌思辨讨论平台</p>
+<div class="topbar">
+  <div class="tb-left">
+    <h1 style="margin:0;font-size:20px">🕯 RoundTable 开发面板</h1>
+    <span class="tb-chip"><span class="dot" id="dot-backend"></span><span id="status-backend">检测中…</span></span>
+    <span class="tb-chip"><span class="dot" id="dot-flutter"></span><span id="status-flutter">前端检测中…</span></span>
   </div>
-  <div class="header-right">
-    <div class="action-row">
-      <button class="link-btn action-btn" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer;border:none;background:#0f3460;color:#d4a017;font-size:12px;border-radius:8px">🖥 硬件检测</button>
+</div>
+<div class="stack">
+  <div class="card" id="card-actions">
+    <div class="card-title">🔗 快速导航</div>
+    <div class="action-row" style="justify-content:flex-start;gap:10px;flex-wrap:wrap">
       <a class="link-btn action-btn" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
-      <a class="link-btn action-btn" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 原生 ASR 测试页</a>
+      <a class="link-btn action-btn" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
       <a class="link-btn action-btn" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API DOCS</a>
       <a class="link-btn action-btn" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
       <a class="link-btn action-btn" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
     </div>
-    <span class="hw-opt" id="hw-opt">点击“硬件检测”以生成优化建议</span>
-    <div class="hw-info" id="hw-info" style="display:none">
-      <span class="hw-chip" id="hw-chip"></span>
-      <span class="hw-sep">|</span>
-      <span id="hw-cpu"></span>
-      <span class="hw-sep">|</span>
-      <span id="hw-mem"></span>
-      <span class="hw-sep">|</span>
-      <span id="hw-gpu"></span>
+  </div>
+  <div class="card">
+    <div class="card-title">
+      ❤ 系统健康检查
+      <span class="status-label" id="health-summary">加载中…</span>
+      <button class="btn-refresh" onclick="refreshHealth()" style="margin-left:auto">🔄 刷新</button>
     </div>
-    <div class="hw-report" id="hw-report">
-      <div class="title">硬件检测报告</div>
-      <div class="row"><span class="k">摘要:</span><span class="v" id="hw-report-summary">-</span></div>
-      <div class="row"><span class="k">推荐:</span><span class="v" id="hw-report-reco">-</span></div>
-      <div class="row"><span class="k">已应用优化:</span><span class="v" id="hw-report-tuning">-</span></div>
+    <div class="health-grid" id="health-grid">
+      <div style="padding:14px;color:#666;text-align:center">加载中…</div>
     </div>
   </div>
-</div>
-<div class="grid">
   <div class="card" id="card-backend">
-    <div class="card-title">
-      <span class="dot" id="dot-backend"></span>后端 FastAPI
-      <span class="status-label" id="status-backend">检测中…</span>
-    </div>
-    <div class="btns">
-      <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动</button>
-      <button class="btn-stop" id="btn-stop-backend" onclick="ctrl('backend','stop')" disabled>⏹ 停止</button>
-      <a class="btn-open" href="http://localhost:8001" target="_blank" rel="noopener">🌐 打开 :8001</a>
-    </div>
+    <div class="card-title">📟 后端运行日志 (FastAPI :8001)</div>
     <div class="log-box" id="log-backend"></div>
   </div>
   <div class="card" id="card-flutter">
-    <div class="card-title">
-      <span class="dot" id="dot-flutter"></span>前端 Flutter Web
-      <span class="status-label" id="status-flutter">检测中…</span>
-    </div>
+    <div class="card-title">🎨 前端 Flutter Web</div>
     <div class="monitor-info" id="flutter-monitor">
       <div><span class="label">部署方式:</span> <span class="val">内嵌到后端 :8001</span></div>
       <div><span class="label">访问地址:</span> <a href="http://localhost:8001" target="_blank" rel="noopener" style="color:#d4a017">http://localhost:8001</a></div>
@@ -345,18 +335,38 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </div>
     </div>
   </div>
-</div>
-<div class="card card-mt">
-  <div class="card-title">
-    ❤ 系统健康检查
-    <span class="status-label" id="health-summary">加载中…</span>
-    <button class="btn-refresh" onclick="refreshHealth()" style="margin-left:auto">🔄 刷新</button>
-  </div>
-  <div class="health-grid" id="health-grid">
-    <div style="padding:14px;color:#666;text-align:center">加载中…</div>
+  <div class="card" id="card-hardware">
+    <div class="card-title">
+      🖥 硬件检测与优化
+      <button class="link-btn action-btn" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer;border:none;background:#0f3460;color:#d4a017;font-size:12px;border-radius:8px;margin-left:auto">🔍 开始检测</button>
+    </div>
+    <span class="hw-opt" id="hw-opt">点击“开始检测”以生成优化建议</span>
+    <div class="hw-info" id="hw-info" style="display:none;margin-top:10px">
+      <span class="hw-chip" id="hw-chip"></span>
+      <span class="hw-sep">|</span>
+      <span id="hw-cpu"></span>
+      <span class="hw-sep">|</span>
+      <span id="hw-mem"></span>
+      <span class="hw-sep">|</span>
+      <span id="hw-gpu"></span>
+    </div>
+    <div class="hw-report" id="hw-report" style="margin-top:10px">
+      <div class="title">硬件检测报告</div>
+      <div class="row"><span class="k">摘要:</span><span class="v" id="hw-report-summary">-</span></div>
+      <div class="row"><span class="k">推荐:</span><span class="v" id="hw-report-reco">-</span></div>
+      <div class="row"><span class="k">已应用优化:</span><span class="v" id="hw-report-tuning">-</span></div>
+    </div>
   </div>
 </div>
 <div class="footer">RoundTable Dev Panel · 使用 <kbd>Ctrl+C</kbd> 停止面板</div>
+<!-- 需求23：主要操作按钮固定到页面底部 -->
+<div style="position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,rgba(26,26,46,0) 0%,#101828 40%);padding:14px 24px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;z-index:50;border-top:1px solid #0f3460">
+  <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动后端</button>
+  <button class="btn-stop" id="btn-stop-backend" onclick="ctrl('backend','stop')" disabled>⏹ 停止后端</button>
+  <a class="btn-open" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
+  <a class="btn-open" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
+</div>
+<style>body{padding-bottom:80px}</style>
 <script>
 function ctrl(svc, action) {
   fetch('/api/' + action + '/' + svc, {method:'POST'})

@@ -12,7 +12,7 @@ thinkers:
   description: 当代商业家查理·芒格，将商业的智慧带到圆桌讨论中。
   system_message: 你是查理·芒格（当代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are Charlie Munger, Vice Chairman of Berkshire Hathaway, Buffett
-  voice: zh-CN-YunxiNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 这个投资机会值得参与吗？
   - 如何避免愚蠢的决定？
@@ -28,7 +28,7 @@ thinkers:
   description: 当代商业家彼得·德鲁克，将商业的智慧带到圆桌讨论中。
   system_message: 你是彼得·德鲁克（当代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Drucker
-  voice: zh-CN-YunjianNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 我的时间都花在最重要的事上了吗？
   - 如何评估一个管理者的效能？
@@ -44,7 +44,7 @@ thinkers:
   description: 近代商业家安德鲁·卡内基，将商业的智慧带到圆桌讨论中。
   system_message: 你是安德鲁·卡内基（近代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Carnegie
-  voice: zh-CN-XiaoyiNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何从小生意扩展到大企业？
   - 怎么在行业中建立竞争壁垒？
@@ -60,7 +60,7 @@ thinkers:
   description: 近代商业家松下幸之助，将商业的智慧带到圆桌讨论中。
   system_message: 你是松下幸之助（近代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Matsushita
-  voice: zh-CN-YunyangNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何在降低成本的同时保持品质？
   - 怎么让员工真正认同公司？
@@ -76,7 +76,7 @@ thinkers:
   description: 工业时代商业家亨利·福特，将商业的智慧带到圆桌讨论中。
   system_message: 你是亨利·福特（工业时代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are a business advisor applying Henry Ford
-  voice: zh-CN-XiaohanNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何大幅降低生产成本？
   - 怎样让产品走进千家万户？
@@ -92,7 +92,7 @@ thinkers:
   description: 当代商业家瑞·达利欧，将商业的智慧带到圆桌讨论中。
   system_message: 你是瑞·达利欧（当代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Dalio
-  voice: zh-CN-XiaomengNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何建立一套做决策的原则？
   - 怎么从失败中系统性地学习？
@@ -108,7 +108,7 @@ thinkers:
   description: 当代商业家沃伦·巴菲特，将商业的智慧带到圆桌讨论中。
   system_message: 你是沃伦·巴菲特（当代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Buffett
-  voice: zh-CN-XiaochenNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何判断一家公司的长期价值？
   - 市场下跌时该怎么做？
@@ -124,7 +124,7 @@ thinkers:
   description: 当代商业家彼得·蒂尔，将商业的智慧带到圆桌讨论中。
   system_message: 你是彼得·蒂尔（当代的商业家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Peter Thiel
-  voice: zh-CN-XiaoshuangNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 有什么你相信但多数人不同意的重要事实？
   - 竞争是不是一种失败？
@@ -142,7 +142,7 @@ thinkers:
     are Steve Jobs, creator of Mac, iPod, iPhone, iPad. Focus means saying no to a
     hundred other good ideas. People who are serious about software should make their
     own hardware — control the entire e
-  voice: zh-CN-XiaoxuanNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 产品该做减法还是加法？
   - 如何找到真正重要的事？
@@ -160,7 +160,7 @@ thinkers:
     are Elon Musk, CEO of SpaceX, Tesla, xAI. Calculate the theoretical optimal value
     physics allows, then ask why reality is so far from it (Idiot Index = product
     price / raw material cost). The Five
-  voice: zh-CN-XiaoxiaoNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 这个行业的根本假设是什么？
   - 如何把不可能变成可能？
@@ -178,7 +178,7 @@ thinkers:
     are MrBeast (Jimmy Donaldson), YouTube creator with 400M+ subscribers. Only two
     numbers matter: Click-Through Rate and Average View Duration — both high means
     the algorithm pushes it. Zero dull mo'
-  voice: zh-CN-XiaoyiNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 怎样做一个爆款视频？
   - 什么让人点击并看完？
@@ -196,7 +196,7 @@ thinkers:
     are Naval Ravikant, co-founder of AngelList. Two questions: how to get rich without
     luck, and how to be happy without conditions. Four types of leverage: labor, capital,
     code, media — code and med'
-  voice: zh-CN-XiaohanNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何不靠运气致富？
   - 什么是专属知识？
@@ -214,7 +214,7 @@ thinkers:
     are Lei Jun, founder of Xiaomi. The internet way of thinking: ultimate products,
     ultimate prices, ultimate efficiency. Hardware is the entry point, internet services
     are the profit model. When the'
-  voice: zh-CN-XiaoxiaoNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 怎样做大众买得起的好产品？
   - 什么是互联网思维？

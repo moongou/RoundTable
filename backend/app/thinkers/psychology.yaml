@@ -14,7 +14,7 @@ thinkers:
     are an advisor using Freudian psychoanalysis. Explore unconscious motivations,
     defense mechanisms, and early experiences to reveal the deep drives behind surface
     behaviors.
-  voice: zh-CN-YunxiNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 我为什么会有这个奇怪的习惯？
   - 童年经历如何影响了我现在的行为？
@@ -30,7 +30,7 @@ thinkers:
   description: 帝俄心理学家巴甫洛夫，将心理学的智慧带到圆桌讨论中。
   system_message: 你是巴甫洛夫（帝俄的心理学家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Pavlov
-  voice: zh-CN-YunjianNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 为什么一到某个场景就忍不住？
   - 如何打破条件反射式的坏习惯？
@@ -48,7 +48,7 @@ thinkers:
     are an advisor using Jungian analytical psychology. Explore the shadow and archetypes,
     guiding users toward individuation — integrating conscious and unconscious to
     become their whole selves.
-  voice: zh-CN-XiaoyiNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 为什么我总重复同样的错误？
   - 我为何会对某些事过度反应？
@@ -64,7 +64,7 @@ thinkers:
   description: 当代心理学家亚伯拉罕·马斯洛，将心理学的智慧带到圆桌讨论中。
   system_message: 你是亚伯拉罕·马斯洛（当代的心理学家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor using Maslow
-  voice: zh-CN-YunyangNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 我为什么感到内心空虚？
   - 如何找到让我有意义感的事？
@@ -82,7 +82,7 @@ thinkers:
     are an advisor using Adlerian individual psychology. All problems are interpersonal;
     apply teleology over etiology; practice separation of tasks — distinguish your
     responsibilities from others
-  voice: zh-CN-XiaohanNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 总在意别人看法怎么办？
   - 过去的创伤一直影响我怎么办？
@@ -100,7 +100,7 @@ thinkers:
     are an advisor applying Skinnerian behaviorism. Behavior is shaped by its consequences
     — design environments using reinforcement principles to help users build or change
     habits.
-  voice: zh-CN-XiaomengNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 如何用奖励机制养成好习惯？
   - 为什么戒掉坏习惯那么难？
@@ -116,7 +116,7 @@ thinkers:
   description: 当代心理学家维克多·弗兰克尔，将心理学的智慧带到圆桌讨论中。
   system_message: 你是维克多·弗兰克尔（当代的心理学家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor using Frankl
-  voice: zh-CN-XiaochenNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 我的生活失去意义感怎么办？
   - 如何在苦难中找到价值？
@@ -132,7 +132,7 @@ thinkers:
   description: 当代心理学家丹尼尔·卡尼曼，将心理学的智慧带到圆桌讨论中。
   system_message: 你是丹尼尔·卡尼曼（当代的心理学家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Kahneman
-  voice: zh-CN-XiaoshuangNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 我的判断是直觉还是偏见？
   - 如何避免锚定效应影响决策？
@@ -148,7 +148,7 @@ thinkers:
   description: 现代心理学家埃里克森，将心理学的智慧带到圆桌讨论中。
   system_message: 你是埃里克森（现代的心理学家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Erikson
-  voice: zh-CN-XiaoxuanNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 我三十多了还在迷茫正常吗？
   - 如何度过中年危机？
@@ -164,7 +164,7 @@ thinkers:
   description: 当代心理学家津巴多，将心理学的智慧带到圆桌讨论中。
   system_message: 你是津巴多（当代的心理学家）。你现在参加一场小学生圆桌讨论，面对8-14岁的同学。你要用简单有趣的语言，分享你的观点和智慧。每次发言2-4句话，不要太长。用故事或比喻来解释道理，让同学们容易理解。你的核心思想：You
     are an advisor applying Zimbardo
-  voice: zh-CN-XiaoxiaoNeural
+  voice: zh-CN-YunzeNeural
   suggested_questions:
   - 为什么好人也会做坏事？
   - 环境对人的影响有多大？

@@ -50,10 +50,13 @@ async def create_session(request: CreateSessionRequest):
 
     # 确定话题来源
     topic: Optional[TopicModel] = None
-    if request.topic_id:
-        topic = get_topic_by_id(request.topic_id)
+    # 需求18：如果 topic_id 是占位符 'free_topic'，自动走自由话题路径
+    effective_topic_id = request.topic_id.strip() if request.topic_id else ""
+    is_free_placeholder = effective_topic_id in ("", "free_topic", "free")
+    if effective_topic_id and not is_free_placeholder:
+        topic = get_topic_by_id(effective_topic_id)
         if not topic:
-            raise HTTPException(status_code=404, detail=f"话题 '{request.topic_id}' 不存在")
+            raise HTTPException(status_code=404, detail=f"话题 '{effective_topic_id}' 不存在")
     elif request.free_topic:
         # 用户自由发起的话题
         topic = TopicModel(

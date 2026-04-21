@@ -138,6 +138,7 @@ def create_discussion_team(
     max_turns: int | None = None,
     consume_designated_speaker: Optional[Callable[[], Optional[str]]] = None,
     on_designation_lifecycle: Optional[Callable[[str, Optional[str]], None]] = None,
+    display_name_to_agent: Optional[dict[str, str]] = None,
 ) -> SelectorGroupChat:
     """创建圆桌讨论团队。"""
     if max_turns is None:
@@ -145,6 +146,10 @@ def create_discussion_team(
 
     all_participants = [moderator] + characters + humans
     all_names = [p.name for p in all_participants]
+
+    # display_name → agent_name 映射，用于在发言内容中解析 display name 的点名
+    _display_name_to_agent = display_name_to_agent or {}
+    _display_names = list(_display_name_to_agent.keys())
 
     termination = MaxMessageTermination(max_turns) | TextMentionTermination(
         "讨论结束"
@@ -158,7 +163,7 @@ def create_discussion_team(
         优先级：
         1. 全局指定发言者（老师/用户点名）
         2. 用户刚发言 → 老师点评
-        3. 主持人发言中的点名
+        3. 主持人发言中的点名（使用 display names 解析）
         4. 人类冷却期控制
         5. 交由 LLM 选择
         """
@@ -207,8 +212,21 @@ def create_discussion_team(
             getattr(latest_msg, "content", "") or getattr(latest_msg, "messages", "")
         ) if latest_msg else ""
         if latest_content and (latest_source == moderator.name or latest_source in human_name_set):
-            next_speaker = parse_speaker_designation(latest_content, all_names)
+            # 优先使用 display names 解析点名（moderator 发言中使用的是 display names）
+            next_display = None
+            if _display_names:
+                next_display = parse_speaker_designation(latest_content, _display_names)
+            # 回退到 agent names（兼容性）
+            next_speaker = next_display or parse_speaker_designation(latest_content, all_names)
             if next_speaker and next_speaker != latest_source:
+                # 将 display name 转换为 agent name
+                if next_speaker in _display_name_to_agent:
+                    next_speaker = _display_name_to_agent[next_speaker]
+                # 若 moderator 明确点名，无视冷却期，直接执行
+                if latest_source == moderator.name:
+                    logger.info("[TurnScheduler] moderator 明确点名: %s", next_speaker)
+                    return next_speaker
+                # 非 moderator 点名时，人类冷却期仍生效
                 if next_speaker in human_name_set and since_human < human_cooldown:
                     logger.info("[TurnScheduler] 点名 %s 但人类冷却中，跳过", next_speaker)
                 else:

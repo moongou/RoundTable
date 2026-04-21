@@ -260,7 +260,7 @@ class CurrentConfig {
         llmProviderName: json['llm_provider_name'] as String,
         apiKeyMasked: json['api_key_masked'] as String? ?? '',
         model: json['model'] as String,
-        asrProvider: json['asr_provider'] as String? ?? 'browser',
+        asrProvider: json['asr_provider'] as String? ?? 'funasr',
         ttsProvider: json['tts_provider'] as String? ?? 'browser',
         pushToTalk: json['push_to_talk'] as bool? ?? true,
         webSearchEnabled: json['web_search_enabled'] as bool? ?? false,
@@ -303,8 +303,8 @@ class LocalSettings {
   const LocalSettings({
     this.serverUrl = 'http://localhost:8001',
     this.llmProvider = 'openai',
-    this.asrProvider = 'browser',
-    this.ttsProvider = 'browser',
+    this.asrProvider = 'funasr',
+    this.ttsProvider = 'edge_tts',
     this.pushToTalk = true,
     this.micControlMode = 'double_ctrl',
   });

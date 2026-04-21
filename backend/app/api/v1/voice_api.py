@@ -66,12 +66,23 @@ def _get_voice_for_character(character_id: str) -> str:
     """根据角色 ID 获取对应的 TTS 音色。
 
     如果角色有指定的音色，返回该音色；否则返回默认音色。
+    需求14：优先级 思想家 YAML > 角色模板 YAML > 默认。
     """
+    try:
+        from app.core.thinkers import get_thinker
+        thinker = get_thinker(character_id)
+        if thinker:
+            voice = (thinker.get("voice") or "").strip()
+            if voice:
+                return voice
+    except Exception:
+        pass
     try:
         from app.agents.character_templates import load_all_templates
         templates = load_all_templates()
         if character_id in templates:
-            voice = templates[character_id].get("voice", "")
+            tpl = templates[character_id]
+            voice = getattr(tpl, "voice", "") or ""
             if voice:
                 return voice
     except Exception:
@@ -147,12 +158,24 @@ async def speech_to_text(
 
     try:
         provider = create_asr_provider()
+        # 先检查服务是否可用，避免直接抛出 500
+        if not await provider.is_available():
+            raise HTTPException(
+                status_code=503,
+                detail=f"语音识别服务 ({settings.asr_provider}) 当前不可用，请检查服务是否已启动或在设置中切换其他服务。",
+            )
         text = await provider.transcribe(audio_data, format=format)
         return ASRResponse(
             text=text,
             confidence=0.9,  # 本地服务无法提供准确置信度
             language="zh",
         )
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        # 来自 ASR 提供商的业务错误（如服务未启动）
+        logger.error(f"ASR 业务错误: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"ASR 识别失败: {e}")
         raise HTTPException(status_code=500, detail=f"语音识别失败: {str(e)}")

@@ -118,10 +118,22 @@ class FloorManager:
         self._last_watchdog_action_ts = 0.0
         self._stall_check_interval_sec = 2.0
         self._general_stall_timeout_sec = max(30.0, float(human_timeout) * 2.0)
-        # 给用户语音识别与重试留足窗口，避免“刚说完就被系统判跳过”。
-        self._human_stall_timeout_sec = max(45.0, float(human_timeout) + 15.0)
-        self._min_human_turn_window_sec = 10.0
+        # 需求11：用户要求 30 秒未发言自动跳过。与前端倒计时保持一致。
+        self._human_stall_timeout_sec = 30.0
+        self._min_human_turn_window_sec = 8.0
         self._human_turn_started_mono = 0.0
+
+        # 暂停状态
+        self._paused = False
+
+    def set_paused(self, paused: bool) -> None:
+        """设置暂停状态。暂停时 watchdog 停止检查，恢复时重置进度时间戳。"""
+        self._paused = paused
+        if paused:
+            self._touch_progress("paused")
+        else:
+            self._touch_progress("resumed")
+            self._last_watchdog_action_ts = 0.0
 
     def _sanitize_opening_reference(self, source: str, content: str) -> str:
         """首轮发言兜底规整：避免开场阶段出现不当引用。"""
@@ -145,7 +157,7 @@ class FloorManager:
             return text
 
         if (source in self.ai_names or source in self.human_names) and is_first_turn:
-            # 同学首轮发言去掉“上一位同学”式互引
+            # 同学首轮发言去掉"上一位同学"式互引
             text = re.sub(r"(上一位同学|刚才.*同学|某位同学)", "这个问题", text)
             text = re.sub(r"(你说得对|他说得对|她说得对)", "我先说说我的看法", text)
             text = re.sub(r"^(基于|根据).{0,12}(发言|观点)[，,]", "", text)
@@ -154,16 +166,36 @@ class FloorManager:
         return text
 
     def _sanitize_reference_attribution(self, source: str, content: str) -> str:
-        """修正明显错误的“刚才/上一位”引用归属。
+        """修正明显错误的"刚才/上一位"引用归属，并防止自引用。
 
-        规则：若文本出现“刚才X/上一位X/前面X”，且 X 不是最近一位实际发言者，
-        则改写为最近一位发言者，避免 A/B 错置。
+        规则：
+        1. 若文本出现"刚才X/上一位X/前面X"，且 X 不是最近一位实际发言者，
+           则改写为最近一位发言者，避免 A/B 错置。
+        2. 若角色引用了自己（"我觉得小明说得对"当自己是小明时），
+           改写为中性表述"有同学说得对"。
         """
         text = (content or "").strip()
-        if not text or not self._recent_display_speakers:
+        if not text:
             return text
 
         current_display = self._agent_to_display_name.get(source, source)
+        current_agent_names = {source, current_display}
+
+        # ── 规则 A：禁止自引用 ───────────────────────────────────────────────────
+        # 若角色引用自己（"我觉得XX说……"当自己是XX时），改为中性表述
+        self_reference_patterns = [
+            rf"{re.escape(current_display)}\s*(说|提到|认为|觉得|讲到|说过)",
+            rf"{re.escape(source)}\s*(说|提到|认为|觉得|讲到|说过)",
+        ]
+        for pattern in self_reference_patterns:
+            text = re.sub(pattern, r"有同学\1", text)
+
+        # 防止"我（XX）觉得……"这种冗余自我介绍
+        text = re.sub(rf"我[（(]{re.escape(current_display)}[）)]", "我", text)
+
+        if not self._recent_display_speakers:
+            return text
+
         last_display = ""
         for name in reversed(self._recent_display_speakers):
             if name != current_display:
@@ -269,6 +301,11 @@ class FloorManager:
         """Watchdog loop: auto-recover stuck human-turn windows and emit diagnostics."""
         while not self._watchdog_stop.is_set():
             await asyncio.sleep(self._stall_check_interval_sec)
+
+            # 暂停期间跳过所有 watchdog 检查
+            if self._paused:
+                continue
+
             now = time.monotonic()
             idle_sec = now - self._last_progress_ts
 
@@ -370,14 +407,24 @@ class FloorManager:
                         "recoverable": False,
                     },
                 }
-            elif "rate" in error_msg.lower() or "429" in error_msg or "quota" in error_msg.lower():
-                await self._emit_error(f"API 调用频率受限: {error_msg}")
+            elif "rate" in error_msg.lower() or "429" in error_msg or "quota" in error_msg.lower() or "insufficient" in error_msg.lower() or "余额" in error_msg or "billing" in error_msg.lower() or "balance" in error_msg.lower():
+                await self._emit_error(f"API 调用频率受限或 Token 不足: {error_msg}")
+                # 需求12：给出非常明确、友好的提示，而不是让讨论静默卡住
+                friendly = (
+                    "提示：AI 模型账户的 Token 额度或调用频率已用尽，讨论暂时无法继续。\n"
+                    "您可以：\n"
+                    "1) 在设置页切换到另一个仍有余额的模型（例如 DeepSeek / 豆包 / 通义千问）；\n"
+                    "2) 或给当前模型账户充值后点击“继续”重试；\n"
+                    "3) 当前内容已保存，随时可以恢复讨论。"
+                )
+                await self._emit_message("系统", friendly, "system")
                 yield {
                     "event_type": "api_error",
                     "data": {
-                        "message": "AI 服务调用频率受限或配额已用完，请稍后再试",
+                        "message": friendly,
                         "original_error": error_msg,
                         "recoverable": True,
+                        "kind": "token_exhausted",
                     },
                 }
             elif "model" in error_msg.lower() and ("not found" in error_msg.lower() or "not exist" in error_msg.lower()):
@@ -570,12 +617,23 @@ class FloorManager:
         """处理打断请求。
 
         当参与者请求打断当前发言者时调用。
+        只有人类学生可以举手打断，AI 角色不能举手。
         记录打断者，切换到 INTERRUPTED 状态，
         通知主持人进行下一轮选择。
 
         Args:
             speaker: 请求打断的参与者名字。
         """
+        # 检查打断者是否为人类学生
+        human_display_names = {
+            self._agent_to_display_name.get(name, name)
+            for name in self.human_names
+        }
+        is_human = speaker in self.human_names or speaker in human_display_names
+        if not is_human:
+            logger.info("[FloorManager] 非人类参与者 %s 尝试举手打断，忽略", speaker)
+            return
+
         logger.info(f"打断请求: {speaker} 请求发言 (当前发言者: {self.current_speaker})")
         self._interrupt_queue.append(speaker)
 
@@ -628,7 +686,7 @@ class FloorManager:
         logger.info(f"PTT 结束: {normalized or speaker} 结束发言")
         self._touch_progress("ptt_end")
 
-        # 从“正在讲话”切换回“等待提交文本”，避免状态长期停留 HUMAN_SPEAKING。
+        # 从"正在讲话"切换回"等待提交文本"，避免状态长期停留 HUMAN_SPEAKING。
         if self.state == FloorState.HUMAN_SPEAKING:
             await self._set_state(
                 FloorState.HUMAN_TURN_WAITING,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from app.config import settings
+from app.config import LOCAL_SERVICE_DEFAULTS, settings
 from app.voice.base import ASRProvider, TTSProvider
 from app.voice.cosyvoice import CosyVoiceProvider
 from app.voice.edge_tts import EdgeTTSProvider
@@ -93,9 +93,12 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
 
     if pid == "funasr":
         from app.voice.funasr import FunASRProvider
-        return FunASRProvider(
-            base_url=settings.funasr_url or settings.asr_url or "http://localhost:10096",
-        )
+        # 优先使用 settings.funasr_url，其次是 settings.asr_url，
+        # 最后回退到 LOCAL_SERVICE_DEFAULTS 中的默认值（HTTP 模式：8000）
+        default_url = LOCAL_SERVICE_DEFAULTS.get("funasr", {}).get("url", "http://localhost:8000")
+        # 兼容旧配置：若默认仍是 WS 端口但用户未启动 WS 服务，尝试 HTTP 回退
+        configured_url = settings.funasr_url or settings.asr_url or default_url
+        return FunASRProvider(base_url=configured_url)
     elif pid == "openai_whisper":
         return OpenAIWhisperProvider(
             base_url=settings.openai_base_url,
@@ -104,8 +107,18 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
     elif pid in ("capswriter", "vosk"):
         return GatewayASRProvider(service=pid)
     elif pid == "browser":
-        # 浏览器原生 ASR 由前端处理
-        logger.info("浏览器 ASR 由前端处理，后端默认使用 FunASR")
+        # 浏览器原生 ASR 由前端处理，但若前端通过 ServerAsrService 将音频发到后端
+        # （如用户在前端设置中选择了 funasr/capswriter 等），则根据配置的后端 ASR URL 自动选择。
+        configured_url = (
+            settings.asr_url
+            or settings.funasr_url
+            or LOCAL_SERVICE_DEFAULTS.get("funasr", {}).get("url", "")
+        )
+        if configured_url:
+            from app.voice.funasr import FunASRProvider
+            logger.info(f"浏览器 ASR 由前端处理，后端 ASR 代理使用 {configured_url}")
+            return FunASRProvider(base_url=configured_url)
+        logger.info("浏览器 ASR 由前端处理，无后端 ASR 配置可用")
         from app.voice.funasr import FunASRProvider
         return FunASRProvider()
     else:

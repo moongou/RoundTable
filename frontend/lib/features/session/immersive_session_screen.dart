@@ -26,6 +26,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   final List<String> characterIds;
   final List<String> thinkerIds;
   final String humanName;
+  final bool observerMode;
 
   const ImmersiveSessionScreen({
     super.key,
@@ -33,6 +34,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required this.characterIds,
     this.thinkerIds = const [],
     required this.humanName,
+    this.observerMode = false,
   });
 
   @override
@@ -54,6 +56,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   String _statusText = '连接中...';
   bool _hasRaisedHand = false;
   bool _isPaused = false;
+  // 需求4：用户发言完毕后，麦克风应立即置灰，直到下轮发言或举手经同意
+  bool _micLocked = false;
+  // 需求15：AI 总结的金句列表（侧边栏展示）
+  final List<String> _liveQuotes = [];
+  // 需求21：讨论结束后仅显示金句画面
+  bool _discussionEnded = false;
   // TTS 顺序播放队列 (i)
   final List<
       ({
@@ -71,6 +79,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     String playbackSessionId,
     DateTime enqueuedAt,
   })? _activeTtsItem;
+
+  /// Debug-only accessor so static analysis sees a read of the latent field.
+  // ignore: unused_element
+  String get _activeTtsSource => _activeTtsItem?.source ?? '';
   int _ttsSessionSeq = 0;
   String _activeTtsSessionId = '';
   bool _ttsPumpRunning = false;
@@ -86,6 +98,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   Timer? _ctrlTapTimer;
   bool _ctrlHeld = false;
   Timer? _speechFinalizeTimer;
+  bool _isFinalizingSpeech = false; // 防止多次快速按 Ctrl 导致并发 finalize
   bool get _pendingHumanTurn => _commander.pendingHumanTurn;
   String get _pendingHumanSpeaker => _commander.pendingHumanSpeaker;
   bool get _handApprovedToSpeak => _commander.handApprovedToSpeak;
@@ -153,19 +166,19 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   static const int _maxPhaseTelemetryHistory = 80;
   final List<_PhaseTelemetryEntry> _phaseTelemetryHistory = [];
 
-  // 角色显示名 → Edge TTS 音色映射
+  // 角色显示名 → Edge TTS 音色映射（与后端 YAML 配置严格同步）
   static const _nameToVoice = <String, String>{
-    '李老师': 'zh-CN-XiaoxiaoNeural', // 温暖女声·教师
+    '李老师': 'zh-CN-XiaoxiaoNeural', // 温暖女声·教师（成人音色）
     '小探': 'zh-CN-YunxiNeural', // 少年男声·探索
-    '小疑': 'zh-CN-YunzeNeural', // 深沉男声·质疑
+    '小疑': 'zh-CN-YunyeNeural', // 年轻男声·质疑
     '小和': 'zh-CN-XiaoyiNeural', // 柔和女声·和平
     '小说': 'zh-CN-XiaohanNeural', // 活泼女声·讲故事
     '小明': 'zh-CN-YunjieNeural', // 阳光男声·乐观
     '小思': 'zh-CN-YunxiaNeural', // 明亮男声·提问
     '小理': 'zh-CN-YunyangNeural', // 正式男声·理性
-    '小爱': 'zh-CN-XiaohanNeural', // 温柔女声·共情
+    '小爱': 'zh-CN-XiaomengNeural', // 可爱女声·共情
     '小想': 'zh-CN-YunfengNeural', // 稳健男声·创新
-    '小行': 'zh-CN-YunjianNeural', // 强劲男声·务实
+    '小行': 'zh-CN-YunhaoNeural', // 年轻男声·务实
   };
 
   // 每次会话分配的参与者音色表（用于思想家的哈希分配）
@@ -428,9 +441,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }
 
   bool _hasBlockingPlaybackForHumanTurn() {
-    return _ttsPlaying ||
-        _ttsService.isSpeaking ||
-        _ttsQueue.isNotEmpty;
+    return _ttsPlaying || _ttsService.isSpeaking || _ttsQueue.isNotEmpty;
   }
 
   void _scheduleBackgroundTask(Future<void> Function() task) {
@@ -578,6 +589,139 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     return metrics.length > maxLines ? maxLines : metrics.length;
   }
 
+  // 需求19：字幕翻页——把整条字幕按每页最多 2 行切分，随时间推进翻到下一页。
+  // 需求15/21：从讨论历史中提炼 5~8 句"金句"（简单启发式：挑选 12~60 字、
+  // 含有表达性关键词、非系统消息的短句）
+  List<String> _deriveGoldenQuotes() {
+    if (_messages.isEmpty) return const [];
+    final seen = <String>{};
+    final quotes = <String>[];
+    const stopPrefixes = ['请', '好的', '嗯', '哦', '谢谢', '我来', '那么', '让我'];
+    for (final m in _messages.reversed) {
+      if (m.type == 'system') continue;
+      for (final raw in _splitIntoSentences(m.content)) {
+        final s = _stripStageDirectionsForSpeech(raw.trim());
+        if (s.length < 10 || s.length > 60) continue;
+        if (stopPrefixes.any(s.startsWith)) continue;
+        if (seen.contains(s)) continue;
+        seen.add(s);
+        quotes.add(s);
+        if (quotes.length >= 8) return quotes;
+      }
+    }
+    return quotes.take(8).toList();
+  }
+
+  // 需求六：实时金句提炼。对新到的消息做快速筛选，挑出 10~20 字、
+  // 去掉表情/括号备注后内容独立的短句，去重后追加到 _liveQuotes，
+  // 上限 12 条，避免把整屏金句全塞出来。
+  static const int _kMaxLiveQuotes = 12;
+  void _extractAndAppendLiveQuotes(String content) {
+    if (content.trim().isEmpty) return;
+    const stopPrefixes = ['请', '好的', '嗯', '哦', '谢谢', '我来', '那么', '让我'];
+    final seen = _liveQuotes.toSet();
+    for (final raw in _splitIntoSentences(content)) {
+      if (_liveQuotes.length >= _kMaxLiveQuotes) return;
+      final s = _stripStageDirectionsForSpeech(raw.trim());
+      if (s.length < 8 || s.length > 20) continue;
+      if (stopPrefixes.any(s.startsWith)) continue;
+      if (seen.contains(s)) continue;
+      seen.add(s);
+      _liveQuotes.add(s);
+    }
+  }
+
+  List<String> _splitIntoSentences(String text) {
+    if (text.isEmpty) return const [];
+    final re = RegExp(r'[^。！？!?\n]+[。！？!?]?');
+    return re.allMatches(text).map((m) => m.group(0) ?? '').toList();
+  }
+
+  String _subtitlePageCacheKey = '';
+  List<String> _subtitlePages = const [];
+  int _subtitlePageIndex = 0;
+  Timer? _subtitlePageTimer;
+
+  String get _displayedSubtitleMessage {
+    if (_subtitlePages.isEmpty) return _centerMessage;
+    final idx = _subtitlePageIndex.clamp(0, _subtitlePages.length - 1);
+    return _subtitlePages[idx];
+  }
+
+  void _maybeAdvanceSubtitlePage({
+    required String fullText,
+    required double maxWidth,
+    required double lineHeight,
+  }) {
+    final cacheKey = '$fullText|${maxWidth.toStringAsFixed(1)}';
+    if (cacheKey == _subtitlePageCacheKey) return;
+    _subtitlePageCacheKey = cacheKey;
+    _subtitlePages = _paginateSubtitle(
+      text: _centerMessage,
+      maxWidth: maxWidth,
+      lineHeight: lineHeight,
+    );
+    _subtitlePageIndex = 0;
+    _subtitlePageTimer?.cancel();
+    if (_subtitlePages.length > 1) {
+      _subtitlePageTimer =
+          Timer.periodic(const Duration(milliseconds: 2600), (t) {
+        if (!mounted || _subtitlePages.length <= 1) {
+          t.cancel();
+          return;
+        }
+        setState(() {
+          _subtitlePageIndex = (_subtitlePageIndex + 1) % _subtitlePages.length;
+        });
+      });
+    }
+  }
+
+  List<String> _paginateSubtitle({
+    required String text,
+    required double maxWidth,
+    required double lineHeight,
+    int linesPerPage = 3,
+  }) {
+    if (text.trim().isEmpty) return const [];
+    final style = TextStyle(fontSize: 20, height: lineHeight);
+    // 估算一行能容纳多少字符，按句/标点切分
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: maxWidth);
+    final lineMetrics = tp.computeLineMetrics();
+    if (lineMetrics.length <= linesPerPage) return [text];
+    // 按可见字符位置切
+    final pages = <String>[];
+    int cursor = 0;
+    while (cursor < text.length) {
+      final sub = text.substring(cursor);
+      final pageTp = TextPainter(
+        text: TextSpan(text: sub, style: style),
+        textDirection: TextDirection.ltr,
+        maxLines: linesPerPage,
+        ellipsis: null,
+      )..layout(maxWidth: maxWidth);
+      final endOffset =
+          pageTp.getPositionForOffset(Offset(maxWidth, pageTp.height - 1));
+      var take = endOffset.offset.clamp(1, sub.length);
+      // 向回寻找更自然的断点（标点/空格）
+      if (take < sub.length) {
+        const punct = '，。；！？,.?!;、 ';
+        for (int i = take; i > max(0, take - 12); i--) {
+          if (punct.contains(sub[i - 1])) {
+            take = i;
+            break;
+          }
+        }
+      }
+      pages.add(sub.substring(0, take).trim());
+      cursor += take;
+    }
+    return pages.where((p) => p.isNotEmpty).toList(growable: false);
+  }
+
   String _nextTtsPlaybackSessionId() {
     _ttsSessionSeq += 1;
     return 'tts-$_ttsSessionSeq-${DateTime.now().microsecondsSinceEpoch}';
@@ -684,17 +828,24 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _humanTurnActivatedAt = DateTime.now();
     setState(() {
       _isMyTurn = true;
+      // 需求4：新一轮/举手批准，解锁麦克风
+      _micLocked = false;
       _isThinking = false;
       _thinkingController.stop();
       _sttPartialText = '';
       _clearSubtitleBeforeSpeakerSwitch(
           speaker.isEmpty ? widget.humanName : speaker);
-      _statusText = '轮到你了：请按住麦克风讲话';
-      _glowController.repeat(reverse: true);
+      // 需求20：暂停时不提示"请按住麦克风讲话"
+      _statusText = _isPaused ? '暂停中...' : '轮到你了：请按住麦克风讲话';
+      if (!_isPaused) {
+        _glowController.repeat(reverse: true);
+      }
       _currentSpeaker = activateSpeaker;
     });
-    _keyboardFocusNode.requestFocus();
-    _startTurnCountdown();
+    if (!_isPaused) {
+      _keyboardFocusNode.requestFocus();
+      _startTurnCountdown();
+    }
     _prepareUpcomingPipeline(
         reason: 'activate-human-turn', includeAsrWarmup: true);
   }
@@ -908,6 +1059,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         characterIds: widget.characterIds,
         thinkerIds: widget.thinkerIds,
         humanNames: [widget.humanName],
+        observerMode: widget.observerMode,
       );
 
       setState(() => _statusText = '已连接');
@@ -1097,6 +1249,31 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           final msgType = data['msg_type'] ?? 'text';
           final shouldSpeak = msgType != 'system' && source != widget.humanName;
 
+          // 需求7：去重 - 如果最后一条消息与当前完全相同，跳过重复
+          if (_messages.isNotEmpty) {
+            final last = _messages.last;
+            if (last.source == source &&
+                last.content == content &&
+                last.type == msgType) {
+              if (kDebugMode) {
+                debugPrint(
+                    '[MessageDedup] drop duplicate source=$source len=${content.length}');
+              }
+              break;
+            }
+          }
+
+          // 需求8：暂停期间不再接收/排队 TTS，避免恢复后出现错乱的连续播放
+          if (_isPaused) {
+            if (shouldSpeak) {
+              if (kDebugMode) {
+                debugPrint(
+                    '[PauseGuard] drop message while paused source=$source len=${content.length}');
+              }
+              break;
+            }
+          }
+
           setState(() {
             _messages.add(
                 ChatMessage(source: source, content: content, type: msgType));
@@ -1107,8 +1284,16 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             if (!shouldSpeak) {
               final isSystemLike = msgType == 'system' || source == '系统';
               // 用户轮次期间，避免其他角色/系统字幕抢占显示。
+              // 需求三：不同角色的讲话必须独立显示，严禁两人的字幕互相覆盖。
+              // 只有当前发言者本人的非系统消息才允许写入字幕，避免两段
+              // 不同角色的句子在同一字幕区反复切换。
+              final sameSpeaker = source == _currentSpeaker ||
+                  _currentSpeaker.isEmpty ||
+                  source == _centerSpeaker ||
+                  _centerSpeaker.isEmpty;
               if (!isSystemLike &&
                   !_ttsPlaying &&
+                  sameSpeaker &&
                   (!_isMyTurn || source == widget.humanName)) {
                 // 字幕去除表情提示（如"（微笑）"），保持干净显示
                 _centerMessage = _stripStageDirectionsForSpeech(content);
@@ -1120,6 +1305,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             if (source == _currentSpeaker) {
               _isThinking = false;
               _thinkingController.stop();
+            }
+
+            // 需求六：金句在讨论过程中实时生成，像打字机一样逐句弹出。
+            // 对非系统消息内容做启发式提炼（与收尾一致），直接追加到侧边栏。
+            if (msgType != 'system' && source != '系统') {
+              _extractAndAppendLiveQuotes(content);
             }
           });
 
@@ -1184,12 +1375,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             _hasRaisedHand = false;
             _sttPartialText = '';
             if (_isMyTurn) {
+              // 需求4：新一轮轮到我，解锁麦克风
+              _micLocked = false;
               _isThinking = false;
               _thinkingController.stop();
-              _statusText = '轮到你了：请按住麦克风讲话';
-              _glowController.repeat(reverse: true);
-              _keyboardFocusNode.requestFocus();
-              _startTurnCountdown();
+              // 需求20：暂停时不提示"请按住麦克风讲话"
+              _statusText = _isPaused ? '暂停中...' : '轮到你了：请按住麦克风讲话';
+              if (!_isPaused) {
+                _glowController.repeat(reverse: true);
+                _keyboardFocusNode.requestFocus();
+                _startTurnCountdown();
+              }
             } else if (isHuman) {
               _isThinking = false;
               _thinkingController.stop();
@@ -1254,10 +1450,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         final data = event.data;
         if (data != null) {
           final newState = data['new_state'] ?? '';
+          final newLabel = data['new_label'] ?? newState;
           if (newState == 'interrupted') {
             setState(() => _statusText = '有人请求打断...');
+          } else if (newState == 'human_turn_waiting' && _isPaused) {
+            // 需求20：暂停状态下不显示"轮到你了"之类的提示
           } else {
-            setState(() => _statusText = '状态: $newState');
+            setState(() => _statusText = '状态：$newLabel');
           }
         }
         break;
@@ -1367,11 +1566,19 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         break;
       case WsEventType.ended:
         final endedWithError = _lastErrorMessage != null;
+        // 需求21：讨论结束后生成金句并切换到纯金句画面
+        final summaryQuotes = _deriveGoldenQuotes();
         setState(() {
           _statusText =
               endedWithError ? '会话已中断: ${_lastErrorMessage!}' : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
+          if (summaryQuotes.isNotEmpty) {
+            _liveQuotes
+              ..clear()
+              ..addAll(summaryQuotes);
+          }
+          _discussionEnded = true;
         });
         break;
       case WsEventType.interrupt:
@@ -1416,6 +1623,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _showStatusToast('当前还未轮到你发言');
       return;
     }
+    if (_isRecording) {
+      // 已在录音中，忽略重复触发
+      return;
+    }
     if (!_asrService.isAvailable) {
       _reportAsrStatus(
         'not_available',
@@ -1430,6 +1641,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     }
     _cancelTurnCountdown();
     _speechFinalizeTimer?.cancel();
+    _speechFinalizeTimer = null;
     _deferredAutoSkipTimer?.cancel();
     _deferredAutoSkipTimer = null;
 
@@ -1441,6 +1653,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _centerMessage = '';
       _sttPartialText = '';
       _lastNonEmptySttText = '';
+      // 需求四：用户按下 Ctrl/点击麦克风启动后，立即撤掉
+      // "轮到你了，按住麦克风讲话"的残留提示，改成"正在聆听..."。
+      _statusText = '正在聆听...';
     });
     _acquireSubtitleToken(widget.humanName);
     _micController.repeat(reverse: true);
@@ -1485,84 +1700,102 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   void _onPttEnd() {
     if (!_isRecording) return;
+    if (_isFinalizingSpeech) return; // 防止并发 finalize
+    _isFinalizingSpeech = true;
     _cancelMaxSpeechTimer();
-    setState(() => _isRecording = false);
+    setState(() {
+      _isRecording = false;
+      // 需求5：录音结束、字幕还没出来时，立刻清除"请按住麦克风讲话"的提示
+      if (_statusText.contains('请按住麦克风讲话') || _statusText.contains('轮到你了')) {
+        _statusText = '识别中...';
+      }
+    });
     _micController.stop();
     _micController.reset();
     _wsClient.sendPushToTalkEnd(speaker: widget.humanName);
     _reportAsrStatus('stop_requested', listening: _asrService.isListening);
-    _asrService.stopListening();
+    try {
+      _asrService.stopListening();
+    } catch (e) {
+      if (kDebugMode) debugPrint('[ASR] stopListening error: $e');
+    }
     _reportAsrStatus('stop_called', listening: _asrService.isListening);
     _awaitingAsrFirstPacket = false;
 
     _speechFinalizeTimer?.cancel();
     _speechFinalizeTimer = Timer(const Duration(milliseconds: 800), () async {
-      Future<void> finalizeWithRetry() async {
-        if (!mounted) return;
-        String rawText = (_sttPartialText.trim().isNotEmpty
-                ? _sttPartialText.trim()
-                : _lastNonEmptySttText.trim())
-            .trim();
-
-        // 给 ASR 最终包更长等待窗口，避免“录完即判空”导致误跳过。
-        final deadline = DateTime.now().add(const Duration(seconds: 8));
-        while (rawText.isEmpty && DateTime.now().isBefore(deadline)) {
-          await Future<void>.delayed(const Duration(milliseconds: 350));
-          if (!mounted) return;
-          rawText = (_sttPartialText.trim().isNotEmpty
-                  ? _sttPartialText.trim()
-                  : _lastNonEmptySttText.trim())
-              .trim();
+      try {
+        await _finalizeSpeechWithRetry();
+      } finally {
+        if (mounted) {
+          _isFinalizingSpeech = false;
         }
-
-        final refined =
-            rawText.isNotEmpty ? await _refineTranscript(rawText) : '';
-        if (!mounted) return;
-        setState(() => _sttPartialText = '');
-
-        // 若 ASR 仍为空，不自动跳过，保留用户回合并允许继续语音重试。
-        if (refined.trim().isEmpty && rawText.isEmpty) {
-          _reportAsrStatus(
-            'final_empty',
-            listening: _asrService.isListening,
-            textLen: 0,
-          );
-          setState(() {
-            _isMyTurn = true;
-            _statusText = '未识别到语音，请重新录音';
-          });
-          _showStatusToast('未识别到有效语音，请重试录音');
-          _startTurnCountdown();
-          return;
-        }
-        final submitText = refined.trim().isNotEmpty ? refined.trim() : rawText;
-        _reportAsrStatus(
-          'submitted',
-          listening: _asrService.isListening,
-          textLen: submitText.length,
-          isFinal: true,
-        );
-
-        _wsClient.sendHumanInput(
-            speaker: widget.humanName, content: submitText);
-        setState(() {
-          _messages
-              .add(ChatMessage(source: widget.humanName, content: submitText));
-          _isMyTurn = false;
-          _statusText = '等待其他人发言...';
-          _centerMessage = submitText;
-          _centerSpeaker = widget.humanName;
-        });
-        _commander.markHumanTurnCompleted();
-        _cancelPendingHumanTurnGuard();
-
-        // 字幕保留
-        _startSubtitleRetain(submitText);
-        _holdAiUntilHumanSubtitleDone(submitText);
       }
-
-      await finalizeWithRetry();
     });
+  }
+
+  Future<void> _finalizeSpeechWithRetry() async {
+    if (!mounted) return;
+    String rawText = (_sttPartialText.trim().isNotEmpty
+            ? _sttPartialText.trim()
+            : _lastNonEmptySttText.trim())
+        .trim();
+
+    // 给 ASR 最终包更长等待窗口，避免”录完即判空”导致误跳过。
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (rawText.isEmpty && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      if (!mounted) return;
+      rawText = (_sttPartialText.trim().isNotEmpty
+              ? _sttPartialText.trim()
+              : _lastNonEmptySttText.trim())
+          .trim();
+    }
+
+    final refined = rawText.isNotEmpty ? await _refineTranscript(rawText) : '';
+    if (!mounted) return;
+    setState(() => _sttPartialText = '');
+
+    // 若 ASR 仍为空，不自动跳过，保留用户回合并允许继续语音重试。
+    if (refined.trim().isEmpty && rawText.isEmpty) {
+      _reportAsrStatus(
+        'final_empty',
+        listening: _asrService.isListening,
+        textLen: 0,
+      );
+      setState(() {
+        _isMyTurn = true;
+        _statusText = '未识别到语音，请重新录音';
+      });
+      _showStatusToast('未识别到有效语音，请重试录音');
+      _startTurnCountdown();
+      return;
+    }
+    final submitText = refined.trim().isNotEmpty ? refined.trim() : rawText;
+    _reportAsrStatus(
+      'submitted',
+      listening: _asrService.isListening,
+      textLen: submitText.length,
+      isFinal: true,
+    );
+
+    _wsClient.sendHumanInput(speaker: widget.humanName, content: submitText);
+    setState(() {
+      // 不直接添加到 _messages，避免后端 message 事件重复添加
+      // 后端收到 human_input 后会发送 message 事件，前端 _handleEvent 中会添加
+      _isMyTurn = false;
+      // 需求4：发言完毕，锁定麦克风为灰色，直到下轮或举手批准
+      _micLocked = true;
+      _statusText = '等待其他人发言...';
+      _centerMessage = submitText;
+      _centerSpeaker = widget.humanName;
+    });
+    _commander.markHumanTurnCompleted();
+    _cancelPendingHumanTurnGuard();
+
+    // 字幕保留
+    _startSubtitleRetain(submitText);
+    _holdAiUntilHumanSubtitleDone(submitText);
   }
 
   // ── 跳过本轮发言 ────────────────────────────────────────────────────────────
@@ -1600,6 +1833,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             .add(ChatMessage(source: '系统', content: reason, type: 'system'));
       }
       _isMyTurn = false;
+      // 需求4：跳过后也锁定麦克风
+      _micLocked = true;
       _statusText = reason ?? '等待其他人发言...';
     });
     if (reason != null && reason.isNotEmpty) {
@@ -1713,6 +1948,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   /// Add text to the TTS queue and start playback if not already playing.
   void _enqueueTts(
       {required String source, required String text, String? voice}) {
+    // 需求8：暂停期间直接丢弃所有 TTS 请求，恢复后从新消息开始播放
+    if (_isPaused) return;
     final speechText = _stripStageDirectionsForSpeech(text);
     if (speechText.isEmpty) return;
     final playbackSessionId = _nextTtsPlaybackSessionId();
@@ -1937,11 +2174,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _isPaused = false;
         _statusText = '继续讨论...';
       });
+      // 需求8：恢复前强制清空残留队列和活动项，避免“许多语料”被集中重放
+      _ttsQueue.clear();
+      _activeTtsItem = null;
+      _activeTtsSessionId = '';
+      _ttsPlaying = false;
       _wsClient.sendResume();
-      // Resume TTS queue
-      if (_ttsQueue.isNotEmpty && !_ttsPlaying) _playNextTts();
     } else {
-      final active = _activeTtsItem;
       setState(() {
         _isPaused = true;
         _statusText = '已暂停（已冻结语音与轮次）';
@@ -1956,9 +2195,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _asrService.stopListening();
         _isRecording = false;
       }
-      if (active != null) {
-        _ttsQueue.insert(0, active);
-      }
+      // 清空 TTS 队列，停止当前播放，避免暂停后继续播放
+      _ttsQueue.clear();
       _activeTtsItem = null;
       _activeTtsSessionId = '';
       _ttsPlaying = false;
@@ -2573,15 +2811,77 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
   }
 
+  // 需求六/九：讨论结束后的金句朗读。
+  // 从当前 `_voiceMap` 里挑一位思想家（zh-CN-YunzeNeural）朗读每句金句，
+  // 每句读完后停顿 500ms 再读下一句；中途可取消。
+  bool _quotesReadAloudActive = false;
+  Future<void> _readAloudQuotes(List<String> quotes) async {
+    if (_quotesReadAloudActive) return;
+    _quotesReadAloudActive = true;
+    String thinkerVoice = 'zh-CN-YunzeNeural';
+    for (final v in _voiceMap.values) {
+      if (v.contains('Yunze') || v.contains('Yunxi') || v.contains('Yunjian')) {
+        thinkerVoice = v;
+        break;
+      }
+    }
+    try {
+      for (final raw in quotes) {
+        if (!_quotesReadAloudActive) break;
+        final line = _stripStageDirectionsForSpeech(raw).trim();
+        if (line.isEmpty) continue;
+        try {
+          await _ttsService.speak(line, voice: thinkerVoice, rate: 1.0);
+        } catch (_) {
+          try {
+            await _browserFallbackTts?.speak(line,
+                voice: thinkerVoice, rate: 1.0);
+          } catch (_) {}
+        }
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    } finally {
+      _quotesReadAloudActive = false;
+    }
+  }
+
+  void _stopReadAloudQuotes() {
+    _quotesReadAloudActive = false;
+    try {
+      _ttsService.stop();
+    } catch (_) {}
+    try {
+      _browserFallbackTts?.stop();
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
+    // 需求21：讨论结束后清空桌面元素，仅保留金句画面
+    if (_discussionEnded) {
+      return _EndingQuotesScreen(
+        quotes: _liveQuotes,
+        onExit: () {
+          if (Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+        },
+        // 需求九：朗读由"思想家角色"完成，句间有小停顿。
+        onReadAloud: _readAloudQuotes,
+        onStopReadAloud: _stopReadAloudQuotes,
+      );
+    }
     final size = MediaQuery.of(context).size;
     final tableRadius = min(size.width, size.height) * 0.18;
-    final subtitleWidth = size.width * 0.70;
+    // 需求五：字幕区宽度 +12%（0.70 -> 0.784）。
+    final subtitleWidth = size.width * 0.784;
 
-    // 圆桌圆心位于屏幕水平 1/3 处（需求3.2）
-    final tableCenterX = size.width / 3;
+    // 需求15：圆桌整体向右移动 100px，左侧留出金句展示区
+    final tableCenterX = size.width / 2 + 100;
     final tableCenterY = size.height / 2;
+    // 左侧金句区宽度（从屏幕最左到圆桌左边缘减一点间距）
+    final quoteAreaRight = tableCenterX - tableRadius - 60;
+    final quoteAreaWidth = max(0.0, quoteAreaRight - 24);
 
     _particles ??= CandleParticle.generate(
       areaWidth: size.width,
@@ -2593,16 +2893,33 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _currentSpeaker.isNotEmpty &&
         !_hasRaisedHand &&
         !_handApprovedToSpeak;
+    // canSpeakNow：仅当真正轮到用户或已批准发言时才允许操作
+    // 排除 _pendingHumanTurn，避免"human_input_requested"发出后、TTS 未停时提前允许录音
+    // 需求4：发言完毕后 _micLocked=true，麦克风立即灰化，需下轮或举手批准才重新可用
     final canSpeakNow =
-        _isMyTurn || _handApprovedToSpeak || _pendingHumanTurn || _isRecording;
+        (_isMyTurn || _handApprovedToSpeak || _isRecording) && !_micLocked;
+    // 按钮始终显示，但通过 opacity 和 IgnorePointer 控制是否可用
+    // 用户回合：麦克风可用，跳过可用
+    // 非用户回合但有发言者：举手可用
+    // 讨论已结束则置灰不可交互
+    final showActionButtons = !_discussionEnded;
     final subtitleLineCount = _estimateSubtitleLineCount(
       context,
       '$_centerSpeaker：$_centerMessage',
       maxWidth: subtitleWidth - 80,
-      style: const TextStyle(fontSize: 20, height: 1.7),
-      maxLines: 2,
+      style: const TextStyle(fontSize: 20, height: 1.9),
+      maxLines: 3,
     );
-    final subtitleBottom = subtitleLineCount <= 1 ? 86.0 : 70.0;
+    // 需求10：第一行字幕区域高度降低 30px；两行时整体再向下 10px 以拉大行距
+    final subtitleBottom = subtitleLineCount <= 1 ? 56.0 : 60.0;
+    // 需求10：两行行距 +10px（通过 TextStyle.height 增加）
+    final subtitleLineHeight = subtitleLineCount <= 1 ? 1.7 : 1.9;
+    // 需求19：若字幕超过 2 行，按 page 自动翻页显示
+    _maybeAdvanceSubtitlePage(
+      fullText: '$_centerSpeaker：$_centerMessage',
+      maxWidth: subtitleWidth - 80,
+      lineHeight: subtitleLineHeight,
+    );
 
     return KeyboardListener(
       focusNode: _keyboardFocusNode,
@@ -2615,6 +2932,19 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               size: size,
               painter: BookshelfPainter(lightIntensity: _isMyTurn ? 1.0 : 0.6),
             ),
+
+            // ── 需求15：左侧金句区（暗色虚线分隔）──
+            if (quoteAreaWidth > 80)
+              Positioned(
+                left: 24,
+                top: 80,
+                width: quoteAreaWidth,
+                height: size.height - 160,
+                child: _QuoteSidebar(
+                  width: quoteAreaWidth,
+                  quotes: _liveQuotes,
+                ),
+              ),
 
             // ── 圆桌（左移至 1/3 处）──
             Positioned(
@@ -2817,16 +3147,15 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               ),
 
             // ── 中间竖排按钮：麦克风 + 跳过 + 举手（圆桌与输入面板之间）──
-            if (_isMyTurn ||
-                canInterrupt ||
-                _hasRaisedHand ||
-                _handApprovedToSpeak)
-              Positioned(
-                left: tableCenterX + tableRadius + 148,
-                top: tableCenterY - tableRadius,
-                child: AnimatedOpacity(
-                  opacity: 1.0,
-                  duration: const Duration(milliseconds: 300),
+            // 始终显示按钮，非用户回合时置灰不可操作
+            Positioned(
+              left: tableCenterX + tableRadius + 148,
+              top: tableCenterY - tableRadius,
+              child: AnimatedOpacity(
+                opacity: showActionButtons ? 1.0 : 0.25,
+                duration: const Duration(milliseconds: 300),
+                child: IgnorePointer(
+                  ignoring: !showActionButtons,
                   child: _RightActionColumn(
                     showMic: canSpeakNow,
                     isRecording: _isRecording,
@@ -2841,59 +3170,54 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   ),
                 ),
               ),
+            ),
 
-            // ── 底部字幕区（电影风格，20号字，确保完整显示）──
+            // ── 字幕区：直接印在圆桌下方，无黑色背景，仅靠文字描边阴影保证可读 ──
             if (_centerSpeaker.isNotEmpty && _centerMessage.isNotEmpty)
               Positioned(
-                bottom: subtitleBottom,
+                bottom: subtitleBottom + 8,
                 left: (size.width - subtitleWidth) / 2,
                 width: subtitleWidth,
-                height: size.height * 0.2,
                 child: IgnorePointer(
                   child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.transparent,
-                          Colors.black.withValues(alpha: 0.7),
-                          Colors.black.withValues(alpha: 0.85),
-                        ],
-                        stops: const [0.0, 0.3, 1.0],
-                      ),
-                    ),
-                    padding: const EdgeInsets.fromLTRB(40, 18, 40, 16),
+                    padding: const EdgeInsets.fromLTRB(40, 12, 40, 12),
                     child: Align(
                       alignment: Alignment.bottomCenter,
                       child: RichText(
                         textAlign: TextAlign.center,
-                        maxLines: 2,
+                        maxLines: 3,
                         overflow: TextOverflow.ellipsis,
                         text: TextSpan(
                           children: [
                             TextSpan(
                               text: '$_centerSpeaker：',
-                              style: const TextStyle(
-                                color: Color(0xFF4FC3F7),
+                              style: TextStyle(
+                                color: const Color(0xFF4FC3F7),
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
-                                height: 1.7,
+                                height: subtitleLineHeight,
+                                // 需求5：去掉黑色背景与大范围黑影，仅保留极细描边保持可读
                                 shadows: [
-                                  Shadow(color: Colors.black, blurRadius: 8),
-                                  Shadow(color: Colors.black, blurRadius: 16),
+                                  Shadow(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.55),
+                                      blurRadius: 2,
+                                      offset: const Offset(0, 1)),
                                 ],
                               ),
                             ),
                             TextSpan(
-                              text: _centerMessage,
-                              style: const TextStyle(
+                              text: _displayedSubtitleMessage,
+                              style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 20,
-                                height: 1.7,
+                                height: subtitleLineHeight,
                                 shadows: [
-                                  Shadow(color: Colors.black, blurRadius: 8),
-                                  Shadow(color: Colors.black, blurRadius: 16),
+                                  Shadow(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.55),
+                                      blurRadius: 2,
+                                      offset: const Offset(0, 1)),
                                 ],
                               ),
                             ),
@@ -3793,30 +4117,31 @@ class _SpeakButtonState extends State<_SpeakButton>
               height: widget.size,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(18),
+                // 需求8：非可用状态采用与跳过按钮一致的浅灰低亮度
                 color: widget.isRecording
                     ? const Color(0xFFFF4444).withValues(alpha: 0.25)
                     : (widget.enabled
                         ? const Color(0xFF00FFCC).withValues(alpha: 0.18)
-                        : Colors.white.withValues(alpha: 0.08)),
+                        : Colors.white.withValues(alpha: 0.04)),
                 border: Border.all(
                   color: widget.isRecording
                       ? const Color(0xFFFF4444).withValues(alpha: 0.9)
                       : (widget.enabled
                           ? const Color(0xFF00FFCC).withValues(alpha: 0.9)
-                          : Colors.white.withValues(alpha: 0.3)),
-                  width: 2.5,
+                          : Colors.white.withValues(alpha: 0.15)),
+                  width: widget.enabled || widget.isRecording ? 2.5 : 1.5,
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: widget.isRecording
-                        ? const Color(0xFFFF4444).withValues(alpha: 0.35)
-                        : (widget.enabled
-                            ? const Color(0xFF00FFCC).withValues(alpha: 0.3)
-                            : Colors.black.withValues(alpha: 0.15)),
-                    blurRadius: 20,
-                    spreadRadius: 5,
-                  ),
-                ],
+                boxShadow: widget.enabled || widget.isRecording
+                    ? [
+                        BoxShadow(
+                          color: widget.isRecording
+                              ? const Color(0xFFFF4444).withValues(alpha: 0.35)
+                              : const Color(0xFF00FFCC).withValues(alpha: 0.3),
+                          blurRadius: 20,
+                          spreadRadius: 5,
+                        ),
+                      ]
+                    : const [],
               ),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -3827,7 +4152,7 @@ class _SpeakButtonState extends State<_SpeakButton>
                         ? const Color(0xFFFF4444)
                         : (widget.enabled
                             ? const Color(0xFF00FFCC)
-                            : Colors.white70),
+                            : Colors.white24),
                     size: 28,
                   ),
                   const SizedBox(height: 2),
@@ -3838,7 +4163,7 @@ class _SpeakButtonState extends State<_SpeakButton>
                           ? const Color(0xFFFF4444)
                           : (widget.enabled
                               ? const Color(0xFF00FFCC)
-                              : Colors.white70),
+                              : Colors.white24),
                       fontSize: 11,
                       fontWeight: FontWeight.w700,
                     ),
@@ -3849,6 +4174,274 @@ class _SpeakButtonState extends State<_SpeakButton>
           ),
         );
       },
+    );
+  }
+}
+
+// ─── 需求15/需求六：左侧金句侧边栏（暗色虚线分隔）───────────────────────
+/// 金句列表以 1、2、3 的序号形式展示，字体较小，最新一条淡入（打字机感）。
+class _QuoteSidebar extends StatelessWidget {
+  final double width;
+  final List<String> quotes;
+  const _QuoteSidebar({required this.width, required this.quotes});
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _DashedDividerPainter(),
+      // 需求六：虚线区域（即右边竖虚线）相较之前向左移动 100px，
+      // 通过 painter 里把 x 偏移 -100 来达到（见 painter），同时 padding 收窄。
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 124, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.format_quote,
+                    color: Color(0xFFE5B25D), size: 16),
+                const SizedBox(width: 8),
+                Text('金句回响',
+                    style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.85),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 2)),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: quotes.isEmpty
+                  ? Center(
+                      child: Text(
+                        '讨论中的精彩瞬间\n会在这里被记下…',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.22),
+                            fontSize: 11,
+                            height: 1.8),
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: quotes.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (_, i) {
+                        final isLatest = i == quotes.length - 1;
+                        final child = Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              width: 20,
+                              child: Text('${i + 1}.',
+                                  style: TextStyle(
+                                      color: const Color(0xFFE5B25D)
+                                          .withValues(alpha: 0.65),
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      height: 1.6)),
+                            ),
+                            Expanded(
+                              child: Text(
+                                quotes[i],
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.78),
+                                  fontSize: 11,
+                                  height: 1.6,
+                                ),
+                                softWrap: true,
+                              ),
+                            ),
+                          ],
+                        );
+                        if (!isLatest) return child;
+                        // 最新一条：淡入 + 轻微向上位移，形成"打字机弹出"感。
+                        return TweenAnimationBuilder<double>(
+                          key: ValueKey('quote-${quotes.length}'),
+                          duration: const Duration(milliseconds: 420),
+                          curve: Curves.easeOut,
+                          tween: Tween(begin: 0.0, end: 1.0),
+                          builder: (_, t, c) => Opacity(
+                            opacity: t,
+                            child: Transform.translate(
+                              offset: Offset(0, (1 - t) * 6),
+                              child: c,
+                            ),
+                          ),
+                          child: child,
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DashedDividerPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.12)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+    const dash = 6.0;
+    const gap = 5.0;
+    // 需求六：虚线向左移动 100px。
+    final x = size.width - 100;
+    if (x <= 0) return;
+    double y = 0;
+    while (y < size.height) {
+      canvas.drawLine(Offset(x, y), Offset(x, y + dash), paint);
+      y += dash + gap;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedDividerPainter oldDelegate) => false;
+}
+
+// ─── 需求21/九：讨论结束后仅保留金句画面，支持"思想家朗读"开关 ────────────
+class _EndingQuotesScreen extends StatefulWidget {
+  final List<String> quotes;
+  final VoidCallback onExit;
+  final Future<void> Function(List<String> quotes) onReadAloud;
+  final VoidCallback onStopReadAloud;
+  const _EndingQuotesScreen({
+    required this.quotes,
+    required this.onExit,
+    required this.onReadAloud,
+    required this.onStopReadAloud,
+  });
+
+  @override
+  State<_EndingQuotesScreen> createState() => _EndingQuotesScreenState();
+}
+
+class _EndingQuotesScreenState extends State<_EndingQuotesScreen> {
+  bool _reading = false;
+
+  Future<void> _toggleRead() async {
+    if (_reading) {
+      widget.onStopReadAloud();
+      setState(() => _reading = false);
+      return;
+    }
+    setState(() => _reading = true);
+    try {
+      await widget.onReadAloud(widget.quotes);
+    } finally {
+      if (mounted) setState(() => _reading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.onStopReadAloud();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final display = widget.quotes.isEmpty
+        ? const ['今天的讨论已经落幕，但思辨的星光将一直在心里闪烁。']
+        : widget.quotes;
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A0E1A),
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(56, 60, 56, 60),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      const Text(
+                        '今日金句',
+                        style: TextStyle(
+                          color: Color(0xFFE5B25D),
+                          fontSize: 28,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 12,
+                        ),
+                      ),
+                      const Spacer(),
+                      // 需求六/九：朗读开关，点击后由思想家朗读每一句。
+                      TextButton.icon(
+                        onPressed: _toggleRead,
+                        style: TextButton.styleFrom(
+                          foregroundColor: _reading
+                              ? const Color(0xFFE5B25D)
+                              : Colors.white70,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            side: BorderSide(
+                              color: (_reading
+                                      ? const Color(0xFFE5B25D)
+                                      : Colors.white24)
+                                  .withValues(alpha: 0.6),
+                            ),
+                          ),
+                        ),
+                        icon: Icon(
+                            _reading ? Icons.stop_circle : Icons.volume_up),
+                        label: Text(_reading ? '停止朗读' : '思想家朗读'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    height: 1,
+                    color: Colors.white.withValues(alpha: 0.12),
+                  ),
+                  const SizedBox(height: 40),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: display.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 28),
+                      itemBuilder: (_, i) => Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('${i + 1}.',
+                              style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.4),
+                                  fontSize: 20)),
+                          const SizedBox(width: 18),
+                          Expanded(
+                            child: Text(
+                              '"${display[i]}"',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 22,
+                                height: 1.9,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Positioned(
+              right: 24,
+              top: 24,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white70),
+                onPressed: widget.onExit,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

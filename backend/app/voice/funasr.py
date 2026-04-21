@@ -33,40 +33,60 @@ class FunASRProvider(ASRProvider):
         self.base_url = base_url.rstrip("/")
 
     async def transcribe(self, audio_data: bytes, format: str = "wav") -> str:
+        if not audio_data:
+            logger.warning("FunASR 收到空音频数据")
+            return ""
+
         if self.base_url.startswith("ws://") or self.base_url.startswith("wss://"):
             return await self._transcribe_via_websocket(audio_data, format=format)
 
         # FunASR HTTP API: POST /recognition with multipart audio upload
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            files = {"audio": (f"audio.{format}", audio_data, f"audio/{format}")}
-            response = await client.post(
-                f"{self.base_url}/recognition",
-                files=files,
-            )
-            response.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                files = {"audio": (f"audio.{format}", audio_data, f"audio/{format}")}
+                response = await client.post(
+                    f"{self.base_url}/recognition",
+                    files=files,
+                )
+                response.raise_for_status()
 
-            data = response.json()
-            # FunASR HTTP 响应格式有多种，按优先级依次尝试：
-            # 1. {"result": "text"}  (runtime/python/http/server.py 常见)
-            # 2. {"text": "text"}
-            # 3. [{"text": "...", ...}, ...]  (列表格式)
-            # 4. {"code": 0, "data": {"result": "text"}}
-            if isinstance(data, list):
-                texts = [item.get("text", "") for item in data if isinstance(item, dict)]
-                return " ".join(t.strip() for t in texts if t.strip())
-            if isinstance(data, dict):
-                for key in ("result", "text"):
-                    val = data.get(key)
-                    if isinstance(val, str) and val.strip():
-                        return val.strip()
-                # {"code": 0, "data": {"result": "..."}}
-                nested = data.get("data", {})
-                if isinstance(nested, dict):
+                data = response.json()
+                # FunASR HTTP 响应格式有多种，按优先级依次尝试：
+                # 1. {"result": "text"}  (runtime/python/http/server.py 常见)
+                # 2. {"text": "text"}
+                # 3. [{"text": "...", ...}, ...]  (列表格式)
+                # 4. {"code": 0, "data": {"result": "text"}}
+                if isinstance(data, list):
+                    texts = [item.get("text", "") for item in data if isinstance(item, dict)]
+                    return " ".join(t.strip() for t in texts if t.strip())
+                if isinstance(data, dict):
                     for key in ("result", "text"):
-                        val = nested.get(key)
+                        val = data.get(key)
                         if isinstance(val, str) and val.strip():
                             return val.strip()
-            return ""
+                    # {"code": 0, "data": {"result": "..."}}
+                    nested = data.get("data", {})
+                    if isinstance(nested, dict):
+                        for key in ("result", "text"):
+                            val = nested.get(key)
+                            if isinstance(val, str) and val.strip():
+                                return val.strip()
+                return ""
+        except httpx.ConnectError as e:
+            logger.error(f"FunASR 服务连接失败 ({self.base_url}): {e}")
+            raise RuntimeError(
+                f"FunASR 服务未启动或无法连接 ({self.base_url})。"
+                f"请确认 FunASR 已在运行，或将 asr_provider 切换为其他可用服务。"
+            ) from e
+        except httpx.HTTPStatusError as e:
+            logger.error(f"FunASR HTTP 错误: {e.response.status_code} - {e.response.text[:200]}")
+            raise RuntimeError(
+                f"FunASR 服务返回错误 {e.response.status_code}。"
+                f"请检查 FunASR 日志确认服务状态。"
+            ) from e
+        except Exception as e:
+            logger.error(f"FunASR 识别异常: {e}")
+            raise RuntimeError(f"FunASR 识别失败: {e}") from e
 
     async def _transcribe_via_websocket(self, audio_data: bytes, format: str = "wav") -> str:
         pcm_data, sample_rate = self._to_pcm_stream(audio_data, format)

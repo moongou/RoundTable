@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/config_models.dart';
 import '../../services/speech_service.dart';
+import '../../services/saved_topics_store.dart';
 import '../../state/settings_provider.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
@@ -83,7 +84,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _serverUrlCtrl = TextEditingController(text: 'http://localhost:8001');
     // Defer loading the actual server URL from provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -502,6 +503,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             Tab(icon: Icon(Icons.smart_toy_outlined, size: 18), text: 'AI 模型'),
             Tab(icon: Icon(Icons.mic_outlined, size: 18), text: '语音识别'),
             Tab(icon: Icon(Icons.volume_up_outlined, size: 18), text: '语音合成'),
+            Tab(icon: Icon(Icons.forum_outlined, size: 18), text: '话题'),
             Tab(icon: Icon(Icons.settings_outlined, size: 18), text: '通用'),
           ],
         ),
@@ -512,6 +514,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           _buildAiModelTab(s, providersAsync, currentAsync),
           _buildAsrTab(s, speechAsync, healthAsync),
           _buildTtsTab(s, speechAsync, healthAsync),
+          const _TopicsTab(),
           _buildGeneralTab(s, currentAsync, healthAsync),
         ],
       ),
@@ -1492,7 +1495,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     final vResult = _voiceTestResult[p.id];
 
     // 可用性指示点（浏览器/禁用始终绿色；本地/云服务按探测结果）
-    final availColor = p.available ? const Color(0xFF4CAF50) : const Color(0xFFBDBDBD);
+    final availColor =
+        p.available ? const Color(0xFF4CAF50) : const Color(0xFFBDBDBD);
     final availTip = p.available ? '服务可用' : '服务不可用或未启动';
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2142,4 +2146,145 @@ class _DialogRow extends StatelessWidget {
           ),
         ]),
       );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 需求22：话题管理（与首页自由话题共用同一存储）
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _TopicsTab extends StatefulWidget {
+  const _TopicsTab();
+  @override
+  State<_TopicsTab> createState() => _TopicsTabState();
+}
+
+class _TopicsTabState extends State<_TopicsTab> {
+  List<String> _items = const [];
+  bool _loading = true;
+  final TextEditingController _inputCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _inputCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final list = await SavedTopicsStore.load();
+    if (!mounted) return;
+    setState(() {
+      _items = list;
+      _loading = false;
+    });
+  }
+
+  Future<void> _add() async {
+    final t = _inputCtrl.text.trim();
+    if (t.isEmpty) return;
+    await SavedTopicsStore.add(t);
+    _inputCtrl.clear();
+    await _load();
+  }
+
+  Future<void> _remove(String t) async {
+    await SavedTopicsStore.remove(t);
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Center(
+          child: CircularProgressIndicator(color: AppColors.amberGold));
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      children: [
+        Text('常用话题管理', style: AppTheme.calligraphyStyleDark(fontSize: 16)),
+        const SizedBox(height: 4),
+        const Text(
+          '此处保存的话题会出现在首页「自由话题」输入框上方，点击即可直接使用。',
+          style: TextStyle(color: AppColors.warmGray, fontSize: 12),
+        ),
+        const SizedBox(height: 16),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _inputCtrl,
+              style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
+              decoration: InputDecoration(
+                hintText: '添加一个话题…',
+                hintStyle:
+                    const TextStyle(color: AppColors.warmGray, fontSize: 12),
+                filled: true,
+                fillColor: AppColors.studyWall,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: AppColors.warmGray),
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+              onSubmitted: (_) => _add(),
+            ),
+          ),
+          const SizedBox(width: 10),
+          ElevatedButton.icon(
+            onPressed: _add,
+            icon: const Icon(Icons.add, size: 16),
+            label: const Text('添加'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.amberGold,
+              foregroundColor: Colors.black,
+            ),
+          ),
+        ]),
+        const SizedBox(height: 18),
+        if (_items.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(
+              child: Text('暂无保存的话题',
+                  style: TextStyle(color: AppColors.warmGray, fontSize: 13)),
+            ),
+          )
+        else
+          ..._items.map(
+            (t) => Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppColors.studyWall,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                    color: AppColors.warmGray.withValues(alpha: 0.4)),
+              ),
+              child: Row(children: [
+                const Icon(Icons.bookmark,
+                    color: AppColors.amberGold, size: 16),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(t,
+                      style: const TextStyle(
+                          color: AppColors.warmWhite, fontSize: 13)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline,
+                      color: AppColors.warmGray, size: 18),
+                  tooltip: '删除',
+                  onPressed: () => _remove(t),
+                ),
+              ]),
+            ),
+          ),
+        const SizedBox(height: 32),
+      ],
+    );
+  }
 }
