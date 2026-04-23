@@ -96,6 +96,7 @@ class SessionResponse(BaseModel):
     topic: Topic
     participants: list[Participant]
     status: DiscussionStatus
+    max_turns: int = 30
 
 
 class ChatMessage(BaseModel):

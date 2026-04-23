@@ -18,6 +18,7 @@ from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
 from app.core.floor_manager import FloorManager
+from app.core.rolling_summary_memory import RollingSummaryMemory
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker
@@ -159,15 +160,50 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         config_msg = await websocket.receive_text()
         config = json.loads(config_msg)
 
-        topic_id = config.get("topic_id")
+        topic_id = (config.get("topic_id") or "").strip()
+        free_topic = (config.get("free_topic") or "").strip()
         character_ids = config.get("character_ids", ["explorer", "skeptic"])
         thinker_ids = config.get("thinker_ids", [])
         human_names = config.get("human_names", ["豆苗"])
+        max_turns = max(1, int(config.get("max_turns") or settings.max_turns))
         # 需求16：旁听模式——用户只观看讨论，每次轮到用户时系统自动跳过
         observer_mode = bool(config.get("observer_mode", False))
 
-        # 验证话题
-        topic = get_topic_by_id(topic_id)
+        # 验证话题；自由话题优先复用已创建 session 中的 topic，避免 websocket
+        # 再次把占位 topic_id 当成预设话题去查表。
+        topic = None
+        session_topic = None
+        try:
+            from app.api.v1.sessions import _sessions  # noqa: PLC0415
+
+            session = _sessions.get(session_id)
+            if session is not None:
+                session_topic = session.topic
+        except Exception:
+            logger.debug("resolve session topic failed", exc_info=True)
+
+        is_free_placeholder = topic_id in ("", "free", "free_topic")
+        if not is_free_placeholder:
+            topic = get_topic_by_id(topic_id)
+
+        if topic is None and session_topic is not None:
+            session_topic_id = (getattr(session_topic, "id", "") or "").strip()
+            if is_free_placeholder or session_topic_id == topic_id:
+                topic = session_topic
+
+        if topic is None and free_topic:
+            from app.models.session import Topic as TopicModel  # noqa: PLC0415
+
+            topic = TopicModel(
+                id="free_topic",
+                title=free_topic,
+                description=f"由用户发起的自由讨论话题：{free_topic}",
+                category="free",
+                age_range="8-12",
+                guide_questions=[],
+                tags=["自由话题"],
+            )
+
         if not topic:
             await send_event("error", {"message": f"话题 '{topic_id}' 不存在"})
             await websocket.close()
@@ -237,6 +273,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         for hn in dict.fromkeys(human_names):
             agent_display_map[safe_agent_name(hn)] = hn
 
+        summary_memory = RollingSummaryMemory()
+        shared_memory = [summary_memory]
+
         moderator = create_moderator(
             model_client=moderator_client,
             topic=topic.title + " - " + topic.description,
@@ -244,6 +283,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             student_names=student_names,
             thinker_names=thinker_display_names,
             human_names=human_names,
+            memory=shared_memory,
         )
 
         characters = [
@@ -252,6 +292,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 model_client=character_client,
                 topic=topic.title,
                 participant_names=all_participant_names,
+                memory=shared_memory,
             )
             for cid in character_ids if cid != "moderator"
         ]
@@ -263,11 +304,15 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 model_client=character_client,
                 topic=topic.title,
                 participant_names=all_participant_names,
+                memory=shared_memory,
             )
             for tid in thinker_ids
         ]
 
-        humans = [create_human_proxy(name) for name in dict.fromkeys(human_names)]
+        humans = [
+            create_human_proxy(name, session_scope=session_id)
+            for name in dict.fromkeys(human_names)
+        ]
 
         # 去重：确保没有同名 Agent（AutoGen 要求名字唯一）
         seen_names: set[str] = set()
@@ -292,6 +337,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             characters=[a for a in ai_agents if a is not moderator_agent],
             humans=human_agents,
             selector_client=moderator_client,
+            max_turns=max_turns,
             consume_designated_speaker=consume_session_designated_speaker,
             on_designation_lifecycle=on_designation_lifecycle,
             display_name_to_agent=display_name_to_agent,
@@ -308,6 +354,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             safety_filter=safety_filter,
             human_timeout=max(60, int(getattr(settings, "human_turn_timeout", 15) or 15)),
             designated_speaker_setter=set_session_designated_speaker,
+            summary_memory=summary_memory,
+            human_queue_scope=session_id,
         )
 
         # 设置 display name 映射（需求4：用于指定发言者解析）
@@ -339,14 +387,14 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         async def on_state_change(old_state, new_state, reason="", recovery=False):
             # 需求13：把机器代号转成用户可读的中文，前端直接展示即可
             state_label_map = {
-                "init": "初始化",
-                "moderator_opening": "主持人开场",
-                "selecting_speaker": "安排下一位发言",
-                "ai_speaking": "角色发言中",
-                "human_turn_waiting": "等待你发言",
-                "human_speaking": "你正在发言",
-                "interrupted": "有人举手插话",
-                "closing": "即将结束",
+                "init": "正在准备讨论",
+                "moderator_opening": "李老师正在开场",
+                "selecting_speaker": "李老师正在安排下一位发言",
+                "ai_speaking": "思考中……",
+                "human_turn_waiting": "轮到你了",
+                "human_speaking": "正在听你说",
+                "interrupted": "有人想补充一句",
+                "closing": "正在收尾",
                 "ended": "讨论已结束",
             }
             await send_event(
@@ -378,7 +426,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 if speaker:
                     try:
                         from app.agents.human_proxy import put_human_input
-                        await put_human_input(speaker, "（旁听）")
+                        await put_human_input(speaker, "（旁听）", session_scope=session_id)
                     except Exception:
                         logger.debug("observer auto-skip failed", exc_info=True)
 
@@ -415,7 +463,12 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         # 运行讨论（异步任务）
         discussion_task = asyncio.create_task(
-            _run_discussion(send_event, floor_manager, topic.title + "\n\n" + topic.description)
+            _run_discussion(
+                send_event,
+                floor_manager,
+                topic.title + "\n\n" + topic.description,
+                agent_display_map=agent_display_map,
+            )
         )
 
         # 同时处理来自客户端的人类输入
@@ -559,7 +612,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 task.cancel()
             await asyncio.gather(*background_tasks, return_exceptions=True)
             background_tasks.clear()
-        clear_human_queues(human_names)  # only clear THIS session's queues
+        clear_human_queues(session_scope=session_id)
         logger.info(f"WebSocket 清理完成: session_id={session_id}")
 
 
@@ -567,6 +620,7 @@ async def _run_discussion(
     send_event: Callable[[str, dict], Awaitable[bool]],
     floor_manager: FloorManager,
     topic: str,
+    agent_display_map: dict[str, str] | None = None,
 ):
     """运行讨论并推送事件。"""
     async for event in floor_manager.run(topic):
@@ -582,4 +636,8 @@ async def _run_discussion(
             await send_event("stream", event.get("data", {}))
         elif event["event_type"] == "human_input_requested":
             # 请求人类输入 - 直接推送给前端
-            await send_event("human_input_requested", event.get("data", {}))
+            data = dict(event.get("data", {}))
+            speaker = (data.get("speaker") or "").strip()
+            if speaker and agent_display_map is not None:
+                data["speaker"] = agent_display_map.get(speaker, speaker)
+            await send_event("human_input_requested", data)

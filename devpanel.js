@@ -301,12 +301,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="stack">
   <div class="card" id="card-actions">
     <div class="card-title">🔗 快速导航</div>
-    <div class="action-row" style="justify-content:flex-start;gap:10px;flex-wrap:wrap">
-      <a class="link-btn action-btn" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
-      <a class="link-btn action-btn" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
-      <a class="link-btn action-btn" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API DOCS</a>
-      <a class="link-btn action-btn" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
-      <a class="link-btn action-btn" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+    <div style="padding:10px 0 2px;color:#94a3b8;font-size:12px;line-height:1.7">
+      常用操作入口已统一收纳到页面底部工具条，避免顶部与右侧分散操作按钮。
     </div>
   </div>
   <div class="card">
@@ -338,7 +334,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="card" id="card-hardware">
     <div class="card-title">
       🖥 硬件检测与优化
-      <button class="link-btn action-btn" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer;border:none;background:#0f3460;color:#d4a017;font-size:12px;border-radius:8px;margin-left:auto">🔍 开始检测</button>
     </div>
     <span class="hw-opt" id="hw-opt">点击“开始检测”以生成优化建议</span>
     <div class="hw-info" id="hw-info" style="display:none;margin-top:10px">
@@ -359,14 +354,26 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 <div class="footer">RoundTable Dev Panel · 使用 <kbd>Ctrl+C</kbd> 停止面板</div>
+<div id="hw-bottom-strip" style="display:none;position:fixed;left:0;right:0;bottom:78px;background:#0d1420;border-top:1px solid #17304a;padding:10px 18px;z-index:45;box-shadow:0 -8px 24px rgba(0,0,0,.18)">
+  <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;justify-content:center;color:#dbe6f3;font-size:12px">
+    <span style="color:#d4a017;font-weight:600">🖥 硬件检测</span>
+    <span id="hw-bottom-summary">等待检测</span>
+    <span id="hw-bottom-reco">-</span>
+    <span id="hw-bottom-tuning">-</span>
+  </div>
+</div>
 <!-- 需求23：主要操作按钮固定到页面底部 -->
 <div style="position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,rgba(26,26,46,0) 0%,#101828 40%);padding:14px 24px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;z-index:50;border-top:1px solid #0f3460">
   <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动后端</button>
   <button class="btn-stop" id="btn-stop-backend" onclick="ctrl('backend','stop')" disabled>⏹ 停止后端</button>
   <a class="btn-open" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
+  <a class="btn-open" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
   <a class="btn-open" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
+  <a class="btn-open" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
+  <a class="btn-open" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+  <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 硬件检测</button>
 </div>
-<style>body{padding-bottom:80px}</style>
+<style>body{padding-bottom:160px}</style>
 <script>
 function ctrl(svc, action) {
   fetch('/api/' + action + '/' + svc, {method:'POST'})
@@ -461,8 +468,10 @@ function fetchHardware() {
     .then(function(hw) {
       var el = document.getElementById('hw-info');
       var report = document.getElementById('hw-report');
+      var strip = document.getElementById('hw-bottom-strip');
       el.style.display = 'flex';
       report.style.display = 'block';
+      strip.style.display = 'block';
       document.getElementById('hw-chip').textContent = hw.apple_chip || hw.cpu_brand || 'CPU';
       document.getElementById('hw-cpu').textContent = hw.cpu_cores + ' cores / ' + hw.cpu_threads + ' perf';
       document.getElementById('hw-mem').textContent = hw.memory_gb + ' GB RAM';
@@ -474,11 +483,18 @@ function fetchHardware() {
       document.getElementById('hw-report-summary').textContent = hr.summary || '-';
       document.getElementById('hw-report-reco').textContent = hr.recommendation || ('建议并行线程: ' + (hw.recommended_workers || '-'));
       document.getElementById('hw-report-tuning').textContent = tuningText;
+      document.getElementById('hw-bottom-summary').textContent = hr.summary || '-';
+      document.getElementById('hw-bottom-reco').textContent = hr.recommendation || ('建议并行线程: ' + (hw.recommended_workers || '-'));
+      document.getElementById('hw-bottom-tuning').textContent = tuningText;
 
       document.getElementById('hw-opt').textContent = '建议并行线程: ' + (hw.recommended_workers || '-') + ' ｜ 已应用: ' + tuningText;
     })
     .catch(function() {
       document.getElementById('hw-opt').textContent = '硬件检测失败：请确认后端已启动并允许跨域访问';
+      document.getElementById('hw-bottom-strip').style.display = 'block';
+      document.getElementById('hw-bottom-summary').textContent = '硬件检测失败';
+      document.getElementById('hw-bottom-reco').textContent = '请确认后端已启动';
+      document.getElementById('hw-bottom-tuning').textContent = 'API: /api/v1/benchmark/hardware';
     })
     .finally(function() {
       btn.disabled = false;

@@ -19,14 +19,16 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 async def _startup_preload():
-    """后台预加载任务：硬件检测、LLM 连接池预热、TTS 常见短语缓存。"""
-    from app.core.hardware import detect_hardware, get_thread_pool, log_hardware_summary
+    """后台预加载任务：按需硬件检测、LLM 连接池预热、TTS 常见短语缓存。"""
+    if settings.hardware_detection_on_startup:
+        from app.core.hardware import detect_hardware, get_thread_pool, log_hardware_summary
 
-    # 1. 硬件检测（≤1s）
-    log_hardware_summary()
-    profile = detect_hardware()
-    get_thread_pool()
-    logger.info("线程池初始化完成: workers=%d", profile.recommended_workers)
+        log_hardware_summary()
+        profile = detect_hardware()
+        get_thread_pool()
+        logger.info("线程池初始化完成: workers=%d", profile.recommended_workers)
+    else:
+        logger.info("已跳过启动期硬件检测；如需检测，请在设置页手动触发。")
 
     # 2 & 3: 并行执行 LLM 预热和 TTS 缓存（充分利用多核）
     async def _preheat_llm():

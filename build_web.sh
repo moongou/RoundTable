@@ -12,6 +12,8 @@ BACKEND_STATIC_DIR="$SCRIPT_DIR/backend/static"
 
 echo "=== RoundTable Web 构建脚本 ==="
 
+BUILD_ARGS=()
+
 # 检查 Flutter
 if ! command -v flutter &> /dev/null; then
     export PATH="/Users/m3max/flutter/bin:$PATH"
@@ -19,10 +21,18 @@ fi
 
 echo "[1/3] 安装依赖..."
 cd "$FRONTEND_DIR"
-flutter pub get
+if flutter pub get; then
+    echo "依赖安装完成"
+elif [ -f ".dart_tool/package_config.json" ]; then
+    echo "依赖安装失败，改用本地缓存继续构建 (--no-pub)"
+    BUILD_ARGS+=(--no-pub)
+else
+    echo "依赖安装失败，且未找到本地缓存的 package_config.json"
+    exit 1
+fi
 
 echo "[2/3] 构建 Web..."
-flutter build web --release
+flutter build web --release "${BUILD_ARGS[@]}"
 
 echo "[3/3] 部署到后端 static 目录..."
 rm -rf "$BACKEND_STATIC_DIR"

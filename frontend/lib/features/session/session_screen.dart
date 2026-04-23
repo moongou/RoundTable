@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../models/config_models.dart';
 import '../../models/discussion_models.dart';
 import '../../services/speech_service.dart';
 import '../../services/websocket_client.dart';
@@ -13,6 +14,10 @@ import 'push_to_talk_button.dart';
 
 /// 讨论房间 - 核心界面
 class SessionScreen extends ConsumerStatefulWidget {
+  static const String defaultServerUrl = 'http://localhost:8001';
+  static const String defaultAsrProvider = 'funasr';
+  static const String defaultTtsProvider = 'edge_tts';
+
   final Topic topic;
   final List<String> characterIds;
   final String humanName;
@@ -26,6 +31,22 @@ class SessionScreen extends ConsumerStatefulWidget {
 
   @override
   ConsumerState<SessionScreen> createState() => _SessionScreenState();
+
+  static String preferAvailableChatTts(
+    String requestedProvider,
+    SpeechConfig? speechConfig,
+  ) {
+    if (requestedProvider != defaultTtsProvider) {
+      return requestedProvider;
+    }
+    for (final provider
+        in speechConfig?.ttsProviders ?? const <SpeechProviderInfo>[]) {
+      if (provider.id == 'chattts' && provider.available) {
+        return 'chattts';
+      }
+    }
+    return requestedProvider;
+  }
 }
 
 class _SessionScreenState extends ConsumerState<SessionScreen> {
@@ -52,40 +73,150 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   bool _isRecording = false;
   late TtsService _ttsService;
   late AsrService _asrService;
+  bool _voiceServicesInitialized = false;
+  String _speechServerUrl = SessionScreen.defaultServerUrl;
+  String _ttsProviderId = SessionScreen.defaultTtsProvider;
+  String _asrProviderId = SessionScreen.defaultAsrProvider;
+  String _ttsProviderUrl = '';
+  String _asrProviderUrl = '';
+  StreamSubscription<AsrResult>? _asrTranscriptionSub;
+  ProviderSubscription<AsyncValue<LocalSettings>>? _settingsSubscription;
 
   @override
   void initState() {
     super.initState();
-    _initVoiceServices();
+    final settings =
+        ref.read(localSettingsProvider).valueOrNull ?? const LocalSettings();
+    _bindVoiceServices(
+      serverUrl: settings.serverUrl,
+      ttsProvider: settings.ttsProvider,
+      asrProvider: settings.asrProvider,
+    );
+    unawaited(_refreshVoiceServices(settingsOverride: settings));
+    _settingsSubscription = ref.listenManual<AsyncValue<LocalSettings>>(
+      localSettingsProvider,
+      (previous, next) {
+        final nextSettings = next.valueOrNull;
+        if (nextSettings == null) {
+          return;
+        }
+        _bindVoiceServices(
+          serverUrl: nextSettings.serverUrl,
+          ttsProvider: nextSettings.ttsProvider,
+          asrProvider: nextSettings.asrProvider,
+        );
+        unawaited(_refreshVoiceServices(settingsOverride: nextSettings));
+      },
+    );
     _startDiscussion();
   }
 
-  void _initVoiceServices() {
-    final settings = ref.read(localSettingsProvider).valueOrNull;
-    final serverUrl = settings?.serverUrl ?? 'http://localhost:8001';
-    final ttsProvider = settings?.ttsProvider ?? 'browser';
-    final asrProvider = settings?.asrProvider ?? 'browser';
-
-    _ttsService = createTtsService(ttsProvider, serverUrl: serverUrl);
-    _asrService = createAsrService(asrProvider, serverUrl: serverUrl);
-
-    // 监听 ASR 转录结果
-    _asrService.transcriptionStream.listen((result) {
-      if (!result.isFinal) return;
-      final normalized = result.text.trim();
-      if (normalized.isNotEmpty) {
-        _hasSpokenDuringRecording = true;
-        _wsClient.sendHumanInput(
-            speaker: widget.humanName, content: normalized);
-        setState(() {
-          _messages
-              .add(ChatMessage(source: widget.humanName, content: normalized));
-          _isMyTurn = false;
-          _statusText = '等待其他人发言...';
-        });
-        _scrollToBottom();
+  String _resolveProviderUrl(
+    SpeechConfig? speechConfig,
+    String providerId, {
+    required bool asr,
+  }) {
+    final providers =
+        asr ? speechConfig?.asrProviders : speechConfig?.ttsProviders;
+    for (final provider in providers ?? const <SpeechProviderInfo>[]) {
+      if (provider.id == providerId) {
+        return provider.url.isNotEmpty ? provider.url : provider.defaultUrl;
       }
-    });
+    }
+    return '';
+  }
+
+  void _bindVoiceServices({
+    required String serverUrl,
+    required String ttsProvider,
+    required String asrProvider,
+    String ttsProviderUrl = '',
+    String asrProviderUrl = '',
+  }) {
+    if (_voiceServicesInitialized &&
+        _speechServerUrl == serverUrl &&
+        _ttsProviderId == ttsProvider &&
+        _asrProviderId == asrProvider &&
+        _ttsProviderUrl == ttsProviderUrl &&
+        _asrProviderUrl == asrProviderUrl) {
+      return;
+    }
+
+    if (_voiceServicesInitialized) {
+      _asrTranscriptionSub?.cancel();
+      try {
+        _ttsService.stop();
+      } catch (_) {}
+      try {
+        _asrService.stopListening();
+      } catch (_) {}
+      _ttsService.dispose();
+      _asrService.dispose();
+    }
+
+    _speechServerUrl = serverUrl;
+    _ttsProviderId = ttsProvider;
+    _asrProviderId = asrProvider;
+    _ttsProviderUrl = ttsProviderUrl;
+    _asrProviderUrl = asrProviderUrl;
+    _ttsService = createTtsService(
+      ttsProvider,
+      serverUrl: serverUrl,
+      providerUrl: ttsProviderUrl,
+    );
+    _asrService = createAsrService(
+      asrProvider,
+      serverUrl: serverUrl,
+      providerUrl: asrProviderUrl,
+    );
+    _asrTranscriptionSub?.cancel();
+    _asrTranscriptionSub =
+        _asrService.transcriptionStream.listen(_handleAsrResult);
+    _voiceServicesInitialized = true;
+  }
+
+  Future<void> _refreshVoiceServices({LocalSettings? settingsOverride}) async {
+    final settings = settingsOverride ??
+        ref.read(localSettingsProvider).valueOrNull ??
+        const LocalSettings();
+    SpeechConfig? speechConfig = ref.read(speechConfigProvider).valueOrNull;
+    if (speechConfig == null) {
+      try {
+        speechConfig = await ref.read(speechConfigProvider.future);
+      } catch (_) {
+        speechConfig = null;
+      }
+    }
+
+    final ttsProvider = SessionScreen.preferAvailableChatTts(
+      settings.ttsProvider,
+      speechConfig,
+    );
+    _bindVoiceServices(
+      serverUrl: settings.serverUrl,
+      ttsProvider: ttsProvider,
+      asrProvider: settings.asrProvider,
+      ttsProviderUrl:
+          _resolveProviderUrl(speechConfig, ttsProvider, asr: false),
+      asrProviderUrl:
+          _resolveProviderUrl(speechConfig, settings.asrProvider, asr: true),
+    );
+  }
+
+  void _handleAsrResult(AsrResult result) {
+    if (!result.isFinal) return;
+    final normalized = result.text.trim();
+    if (normalized.isNotEmpty) {
+      _hasSpokenDuringRecording = true;
+      _wsClient.sendHumanInput(speaker: widget.humanName, content: normalized);
+      setState(() {
+        _messages
+            .add(ChatMessage(source: widget.humanName, content: normalized));
+        _isMyTurn = false;
+        _statusText = '等待其他人发言...';
+      });
+      _scrollToBottom();
+    }
   }
 
   Future<void> _startDiscussion() async {
@@ -99,6 +230,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         topicId: widget.topic.id,
         characterIds: widget.characterIds,
         humanNames: [widget.humanName],
+        freeTopic: widget.topic.id == 'free_topic' ? widget.topic.title : '',
       );
 
       final sessionId = sessionData['session_id'] as String;
@@ -185,6 +317,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           });
         }
       case WsEventType.humanInputRequested:
+        final speaker =
+            ((event.data?['speaker'] ?? '') as Object).toString().trim();
+        if (speaker.isNotEmpty && speaker != widget.humanName) {
+          break;
+        }
         setState(() {
           _isMyTurn = true;
           _statusText = '轮到你发言了！';
@@ -308,8 +445,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   void dispose() {
     _ctrlKeyTimer?.cancel();
     _speechTimeoutTimer?.cancel();
-    _ttsService.dispose();
-    _asrService.dispose();
+    _settingsSubscription?.close();
+    _asrTranscriptionSub?.cancel();
+    if (_voiceServicesInitialized) {
+      _ttsService.dispose();
+      _asrService.dispose();
+    }
     _wsClient.dispose();
     _inputController.dispose();
     _scrollController.dispose();

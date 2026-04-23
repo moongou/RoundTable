@@ -11,11 +11,19 @@ export 'speech_contract.dart';
 
 /// 语音服务工厂：根据配置创建 TTS/ASR 实例
 TtsService createTtsService(String providerId,
-    {String serverUrl = 'http://localhost:8001'}) {
-  return impl.createWebTtsService(providerId, serverUrl: serverUrl);
+    {String serverUrl = 'http://localhost:8001', String? providerUrl}) {
+  return impl.createWebTtsService(
+    providerId,
+    serverUrl: serverUrl,
+    providerUrl: providerUrl,
+  );
 }
 
 AsrService createAsrService(String providerId,
-    {String serverUrl = 'http://localhost:8001'}) {
-  return impl.createWebAsrService(providerId, serverUrl: serverUrl);
+    {String serverUrl = 'http://localhost:8001', String? providerUrl}) {
+  return impl.createWebAsrService(
+    providerId,
+    serverUrl: serverUrl,
+    providerUrl: providerUrl,
+  );
 }

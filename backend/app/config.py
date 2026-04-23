@@ -95,6 +95,7 @@ ASR_PROVIDERS = {
 
 TTS_PROVIDERS = {
     "browser": "浏览器原生语音合成",
+    "chattts": "ChatTTS 本地服务（对话风格，优先）",
     "edge_tts": "OpenAI Edge TTS 本地服务",
     "vibevoice": "VibeVoice 本地服务（微软，高品质）",
     "fireredtts": "FireRedTTS 本地服务（支持流式）",
@@ -105,6 +106,7 @@ TTS_PROVIDERS = {
 }
 
 LOCAL_SERVICE_DEFAULTS = {
+    "chattts": {"url": "http://localhost:9998", "health": "/gradio_api/info"},
     "edge_tts": {"url": "http://localhost:5051", "health": "/v1/models"},
     "cosyvoice": {"url": "http://localhost:50000", "health": "/health"},
     "funasr": {"url": "ws://localhost:10095", "health": "/"},
@@ -155,6 +157,13 @@ VOICE_SERVICE_META = {
         "type": "tts",
         "needs_api_key": False,
         "health_path": "/v1/models",
+    },
+    "chattts": {
+        "name": "ChatTTS 本地服务（对话风格）",
+        "default_url": "http://localhost:9998",
+        "type": "tts",
+        "needs_api_key": False,
+        "health_path": "/gradio_api/info",
     },
     "vibevoice": {
         "name": "VibeVoice 微软高品质语音合成",
@@ -266,15 +275,16 @@ class Settings(BaseSettings):
     # ── 语音服务 ────────────────────────────────────────────────────────────
 
     # ASR (语音识别)
-    asr_provider: str = "browser"  # browser / funasr / openai_whisper
+    asr_provider: str = "funasr"  # browser / funasr / openai_whisper
     asr_url: str = "ws://localhost:10095"  # deprecated, use funasr_url
     funasr_url: str = "ws://localhost:10095"  # WS 模式（当前运行）；HTTP 模式改为 http://localhost:8000
     openai_whisper_api_key: str = ""  # uses openai_api_key if blank
     openai_whisper_base_url: str = "https://api.openai.com/v1"
 
     # TTS (语音合成)
-    tts_provider: str = "browser"  # browser / edge_tts / cosyvoice / openai_tts
+    tts_provider: str = "edge_tts"  # browser / edge_tts / cosyvoice / openai_tts
     tts_url: str = "http://localhost:5051"  # deprecated, use edge_tts_url
+    chattts_url: str = "http://localhost:9998"
     edge_tts_url: str = "http://localhost:5051"
     cosyvoice_url: str = "http://localhost:50000"
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
@@ -294,6 +304,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8001
     debug: bool = True
+    hardware_detection_on_startup: bool = False
 
     # ── 讨论参数 ───────────────────────────────────────────────────────────
 
@@ -341,6 +352,7 @@ class Settings(BaseSettings):
                 "json_output": True,
                 "family": "unknown",
                 "structured_output": False,
+                "multiple_system_messages": True,
             }
 
         return config
@@ -396,6 +408,7 @@ class Settings(BaseSettings):
         allowed_fields = {
             "llm_provider", "asr_provider", "tts_provider", "push_to_talk",
             "max_turns", "human_turn_timeout",
+            "hardware_detection_on_startup",
             # Voice service URLs
             "funasr_url", "edge_tts_url", "cosyvoice_url",
             "openai_whisper_api_key", "openai_whisper_base_url",

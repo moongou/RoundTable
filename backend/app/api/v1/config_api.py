@@ -100,7 +100,12 @@ async def _semantic_voice_probe(service_id: str, url: str, timeout_sec: float = 
             }
 
     # Default semantic probe for HTTP-based services
-    base = await _probe_service(url, VOICE_SERVICE_META.get(service_id, {}).get("health_path", "/"), timeout_sec=timeout_sec)
+    base = await _probe_service(
+        url,
+        LOCAL_SERVICE_DEFAULTS.get(service_id, {}).get("health")
+        or VOICE_SERVICE_META.get(service_id, {}).get("health_path", "/"),
+        timeout_sec=timeout_sec,
+    )
     base["probe_type"] = "semantic"
     base["category"] = "asr" if service_id in ASR_PROVIDERS else "tts"
 
@@ -111,7 +116,13 @@ async def _semantic_voice_probe(service_id: str, url: str, timeout_sec: float = 
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             if service_id == "edge_tts":
                 resp = await client.get(f"{url.rstrip('/')}/v1/models")
-                count = len(resp.json()) if resp.status_code == 200 and isinstance(resp.json(), list) else 0
+                payload = resp.json() if resp.status_code == 200 else []
+                if isinstance(payload, list):
+                    count = len(payload)
+                elif isinstance(payload, dict):
+                    count = len(payload.get("data", []) or payload.get("models", []))
+                else:
+                    count = 0
                 base["reachable"] = resp.status_code == 200 and count > 0
                 base["detail"] = f"models={count}, HTTP {resp.status_code}"
                 base["status_code"] = resp.status_code
@@ -126,6 +137,16 @@ async def _semantic_voice_probe(service_id: str, url: str, timeout_sec: float = 
                     count = 0
                 base["reachable"] = resp.status_code == 200 and count > 0
                 base["detail"] = f"speakers={count}, HTTP {resp.status_code}"
+                base["status_code"] = resp.status_code
+            elif service_id == "chattts":
+                resp = await client.get(f"{url.rstrip('/')}/gradio_api/info")
+                payload = resp.json() if resp.status_code == 200 else {}
+                named_endpoints = payload.get("named_endpoints", {}) if isinstance(payload, dict) else {}
+                has_seed_endpoint = "/on_audio_seed_change" in named_endpoints
+                base["reachable"] = resp.status_code == 200 and has_seed_endpoint
+                base["detail"] = (
+                    f"gradio endpoints={'ok' if has_seed_endpoint else 'missing'}, HTTP {resp.status_code}"
+                )
                 base["status_code"] = resp.status_code
             elif service_id == "openai_tts":
                 # OpenAI TTS has no dedicated voice-list endpoint; /models probe is a practical semantic check.
@@ -270,12 +291,8 @@ async def list_speech_providers():
     if _probe_ids:
         probe_coros = []
         for pid in _probe_ids:
-            url, health = _local_probes[pid]
-            if url.startswith("ws://") or url.startswith("wss://"):
-                # WebSocket 服务：用 WS 握手探测而非 HTTP GET
-                probe_coros.append(_probe_websocket_service(url, timeout_sec=2.0))
-            else:
-                probe_coros.append(_probe_service(url, health, timeout_sec=2.0))
+            url, _health = _local_probes[pid]
+            probe_coros.append(_semantic_voice_probe(pid, url, timeout_sec=2.0))
         results = await asyncio.gather(*probe_coros, return_exceptions=True)
         for pid, result in zip(_probe_ids, results):
             if isinstance(result, dict):
@@ -372,6 +389,7 @@ async def get_current_config():
         "asr_provider": settings.asr_provider,
         "tts_provider": settings.tts_provider,
         "push_to_talk": settings.push_to_talk,
+        "hardware_detection_on_startup": settings.hardware_detection_on_startup,
         "web_search_enabled": settings.web_search_enabled,
         "tavily_configured": bool(settings.tavily_api_key),
     }

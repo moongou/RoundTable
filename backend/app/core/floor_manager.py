@@ -36,6 +36,7 @@ from autogen_agentchat.messages import (
 from autogen_agentchat.teams import SelectorGroupChat
 
 from app.agents.human_proxy import put_human_input
+from app.core.rolling_summary_memory import RollingSummaryMemory
 from app.core.safety_filter import SafetyFilter
 from app.core.turn_scheduler import create_discussion_team, set_designated_speaker, parse_speaker_designation
 
@@ -75,6 +76,8 @@ class FloorManager:
         safety_filter: SafetyFilter,
         human_timeout: int = 120,
         designated_speaker_setter: Optional[Callable[[Optional[str]], None]] = None,
+        summary_memory: Optional[RollingSummaryMemory] = None,
+        human_queue_scope: str | None = None,
     ):
         self.team = team
         self.ai_agents = ai_agents
@@ -82,6 +85,8 @@ class FloorManager:
         self.safety_filter = safety_filter
         self.human_timeout = human_timeout
         self._set_designated_speaker = designated_speaker_setter or set_designated_speaker
+        self.summary_memory = summary_memory
+        self._human_queue_scope = human_queue_scope
 
         self.ai_names = {agent.name for agent in ai_agents}
         self.human_names = {agent.name for agent in human_agents}
@@ -110,6 +115,7 @@ class FloorManager:
         self._agent_to_display_name: dict[str, str] = {}
         self._speaker_message_count: dict[str, int] = {name: 0 for name in self.all_names}
         self._recent_display_speakers: list[str] = []
+        self._recent_turn_summaries: list[tuple[str, str]] = []
 
         # Stalled watchdog: detect no-progress windows and auto-recover human wait stalls.
         self._watchdog_task: Optional[asyncio.Task] = None
@@ -125,15 +131,35 @@ class FloorManager:
 
         # 暂停状态
         self._paused = False
+        self._resume_gate = asyncio.Event()
+        self._resume_gate.set()
 
     def set_paused(self, paused: bool) -> None:
         """设置暂停状态。暂停时 watchdog 停止检查，恢复时重置进度时间戳。"""
         self._paused = paused
         if paused:
+            self._resume_gate.clear()
+            try:
+                self.team.pause()
+            except RuntimeError:
+                logger.debug("team pause requested before initialization", exc_info=True)
+            except Exception:
+                logger.debug("team pause raised", exc_info=True)
             self._touch_progress("paused")
         else:
+            self._resume_gate.set()
+            try:
+                self.team.resume()
+            except RuntimeError:
+                logger.debug("team resume requested before initialization", exc_info=True)
+            except Exception:
+                logger.debug("team resume raised", exc_info=True)
             self._touch_progress("resumed")
             self._last_watchdog_action_ts = 0.0
+
+    async def _wait_until_resumed(self) -> None:
+        while self._paused:
+            await self._resume_gate.wait()
 
     def _sanitize_opening_reference(self, source: str, content: str) -> str:
         """首轮发言兜底规整：避免开场阶段出现不当引用。"""
@@ -147,6 +173,11 @@ class FloorManager:
 
         if is_moderator and is_first_turn:
             # 老师开场不引用任何人
+            text = re.sub(
+                r"[^。！？!?]*(?:同学|先生)?[，,:：]?\s*你?(?:刚才|前面|上一位)[^。！？!?]*[。！？!?]",
+                "",
+                text,
+            ).strip()
             text = re.sub(
                 r"(刚才|前面|上一位|某位同学|有同学).*?(说|提到|讲到)[^。！？!?]*[。！？!?]",
                 "",
@@ -217,11 +248,88 @@ class FloorManager:
             # 检测对从未发言者的引用（"X说/X提到/X认为"） → 替换为中性表述
             if name not in spoke_set:
                 text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?[，,:：]?\s*你?(?:刚才|前面|上一轮)[^。！？!?]*[。！？!?]?",
+                    "",
+                    text,
+                )
+                text = re.sub(
+                    rf"(刚才|前面|上一轮)\s*{re.escape(name)}(?:同学|先生)?",
+                    r"\1有同学",
+                    text,
+                )
+                text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?(?:还)?\s*(刚才说|刚才提到|说得?对?|提到|认为|觉得|讲到|说过)",
+                    r"有同学\1",
+                    text,
+                )
+                text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?这个",
+                    "这个",
+                    text,
+                )
+                text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?的这个",
+                    "这个",
+                    text,
+                )
+                text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?的(比喻|想法|观点|问题|疑问|说法|例子)",
+                    r"这个\1",
+                    text,
+                )
+                text = re.sub(
                     rf"{re.escape(name)}\s*(说得?对?|提到|认为|觉得|讲到|说过)",
                     r"有同学\1",
                     text,
                 )
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        text = re.sub(r"^[，,:：\s]+", "", text)
         return text
+
+    def _sanitize_all_references(self, source: str, content: str) -> str:
+        text = self._sanitize_opening_reference(source, content)
+        return self._sanitize_reference_attribution(source, text)
+
+    def _is_non_substantive_turn(self, content: str) -> bool:
+        normalized = re.sub(r"\s+", "", (content or "").strip())
+        return normalized in {
+            "（跳过）",
+            "(跳过)",
+            "跳过",
+            "（旁听）",
+            "(旁听)",
+            "旁听",
+            "（我先听听大家的意见）",
+            "(我先听听大家的意见)",
+            "我先听听大家的意见",
+        }
+
+    def _extract_core_viewpoint(self, content: str) -> str:
+        text = re.sub(r"（[^）]{0,24}）", "", content or "")
+        text = re.sub(r"\([^)]{0,24}\)", "", text)
+        text = re.sub(r"\s+", " ", text).strip(" ，,。！？!?；;:：")
+        if not text:
+            return ""
+        first_sentence = re.split(r"[。！？!?；;]", text, maxsplit=1)[0].strip()
+        summary = first_sentence or text
+        if len(summary) > 42:
+            summary = summary[:42].rstrip("，,；;、 ") + "…"
+        return summary
+
+    async def _record_turn_summary(self, source: str, content: str) -> None:
+        if self.summary_memory is None or source not in self.all_names:
+            return
+        text = (content or "").strip()
+        if not text or self._is_non_substantive_turn(text):
+            return
+        display_source = self._agent_to_display_name.get(source, source)
+        summary = self._extract_core_viewpoint(text)
+        if not summary:
+            return
+        self._recent_turn_summaries.append((display_source, summary))
+        if len(self._recent_turn_summaries) > 3:
+            self._recent_turn_summaries = self._recent_turn_summaries[-3:]
+        await self.summary_memory.replace_turn_summaries(self._recent_turn_summaries)
 
     def on_message(self, callback: Callable) -> "FloorManager":
         """注册消息回调。callback(source, content, msg_type)"""
@@ -252,6 +360,9 @@ class FloorManager:
         """设置 agent name → display name 映射，用于指定发言者解析。"""
         self._agent_to_display_name = dict(agent_to_display)
         self._display_name_to_agent = {v: k for k, v in agent_to_display.items()}
+
+    async def _put_human_input(self, speaker: str, text: str) -> None:
+        await put_human_input(speaker, text, session_scope=self._human_queue_scope)
 
     async def _emit_message(self, source: str, content: str, msg_type: str = "text") -> None:
         """发送消息事件。"""
@@ -331,7 +442,7 @@ class FloorManager:
                         idle_sec,
                         speaker,
                     )
-                    await put_human_input(speaker, "（跳过）")
+                    await self._put_human_input(speaker, "（跳过）")
                     await self._emit_message(
                         "系统",
                         f"{display} 同学输入超时，系统已自动跳过并继续讨论。",
@@ -374,11 +485,17 @@ class FloorManager:
         await self._set_state(FloorState.MODERATOR_OPENING, reason="discussion_start")
         self._watchdog_stop.clear()
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+        self._resume_gate.set()
+        self._recent_turn_summaries.clear()
+        if self.summary_memory is not None:
+            await self.summary_memory.clear()
 
         try:
             stream = self.team.run_stream(task=topic)
 
             async for event in stream:
+                if self._paused:
+                    await self._wait_until_resumed()
                 result = await self._process_event(event)
                 if result:
                     yield result
@@ -502,8 +619,7 @@ class FloorManager:
             logger.info("[FloorManager] 完整消息: source=%s, content_len=%d", source, len(content))
 
             # 首轮发言兜底规整：避免不当引用
-            content = self._sanitize_opening_reference(source, content)
-            content = self._sanitize_reference_attribution(source, content)
+            content = self._sanitize_all_references(source, content)
 
             # 点名解析应尽量基于原始语义，先于安全改写尝试。
             designated_pre_filter: Optional[str] = None
@@ -530,10 +646,12 @@ class FloorManager:
             self._current_streaming_source = None
 
             await self._emit_message(source, content, "text")
-            self._speaker_message_count[source] = self._speaker_message_count.get(source, 0) + 1
-            self._recent_display_speakers.append(display_source)
-            if len(self._recent_display_speakers) > 16:
-                self._recent_display_speakers = self._recent_display_speakers[-16:]
+            if not self._is_non_substantive_turn(content):
+                self._speaker_message_count[source] = self._speaker_message_count.get(source, 0) + 1
+                self._recent_display_speakers.append(display_source)
+                if len(self._recent_display_speakers) > 16:
+                    self._recent_display_speakers = self._recent_display_speakers[-16:]
+            await self._record_turn_summary(source, content)
 
             return {
                 "event_type": "message",
@@ -544,6 +662,8 @@ class FloorManager:
         if isinstance(event, UserInputRequestedEvent):
             # 等待人类输入，带超时
             speaker = self.current_speaker or ""
+            if not speaker and len(self.human_agents) == 1:
+                speaker = self.human_agents[0].name
             await self._set_state(FloorState.HUMAN_SPEAKING, reason="human_input_requested")
             return {
                 "event_type": "human_input_requested",
@@ -578,14 +698,14 @@ class FloorManager:
         # 空输入直接按跳过处理，保证流程继续。
         if not normalized_text:
             logger.info("[FloorManager] 空输入，自动跳过: %s", normalized_name)
-            await put_human_input(normalized_name, "（跳过）")
+            await self._put_human_input(normalized_name, "（跳过）")
             await self._emit_message("系统", f"{normalized_name or '该同学'}未输入有效内容，已自动跳过本轮。", "system")
             return
 
         # 跳过指令不需要安全过滤
         if normalized_text in ("（跳过）", "(跳过)", "跳过"):
             logger.info("[FloorManager] 用户主动跳过: %s", normalized_name)
-            await put_human_input(normalized_name, "（跳过）")
+            await self._put_human_input(normalized_name, "（跳过）")
             return
 
         # 安全过滤人类输入
@@ -606,11 +726,11 @@ class FloorManager:
             self._set_designated_speaker(agent_name)
 
         try:
-            await put_human_input(normalized_name, normalized_text)
+            await self._put_human_input(normalized_name, normalized_text)
             logger.info("[FloorManager] 人类输入已提交到队列: %s", normalized_name)
         except Exception as e:
             logger.warning("[FloorManager] 提交人类输入失败，自动跳过。name=%s, err=%s", normalized_name, e)
-            await put_human_input(normalized_name, "（跳过）")
+            await self._put_human_input(normalized_name, "（跳过）")
             await self._emit_message("系统", f"{normalized_name or '该同学'}输入处理异常，系统已自动跳过并继续讨论。", "system")
 
     async def request_interrupt(self, speaker: str) -> None:

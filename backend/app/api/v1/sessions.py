@@ -10,12 +10,20 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from autogen_core.models import UserMessage
 
 from app.agents.character_templates import load_all_templates
 from app.agents.human_proxy import clear_human_queues, create_human_proxy
 from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.core.floor_manager import FloorManager
+from app.core.golden_quotes import (
+    build_golden_quotes_prompt,
+    has_enough_quote_material,
+    parse_golden_quotes_response,
+)
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker
@@ -36,6 +44,18 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 # 内存中的会话存储（Phase 1 简单实现，Phase 3 迁移到数据库）
 _sessions: dict[str, SessionResponse] = {}
 _floor_managers: dict[str, FloorManager] = {}
+
+
+class GoldenQuoteMessage(BaseModel):
+    source: str
+    content: str
+    type: str = 'text'
+
+
+class GenerateGoldenQuotesRequest(BaseModel):
+    topic: str
+    messages: list[GoldenQuoteMessage] = Field(default_factory=list)
+    max_quotes: int = 4
 
 
 @router.post("/", response_model=SessionResponse)
@@ -141,10 +161,47 @@ async def create_session(request: CreateSessionRequest):
         topic=topic,
         participants=participants,
         status=DiscussionStatus.WAITING,
+        max_turns=request.max_turns,
     )
     _sessions[session_id] = session
 
     return session
+
+
+@router.post("/golden-quotes")
+async def generate_golden_quotes(request: GenerateGoldenQuotesRequest):
+    """用当前配置的 LLM 对讨论记录进行提炼，生成展示用金句。"""
+    max_quotes = max(1, min(request.max_quotes, 4))
+    messages = [message.model_dump() for message in request.messages]
+    if not has_enough_quote_material(messages):
+        return {
+            'eligible': False,
+            'quotes': [],
+            'message': '讨论材料不足，暂不生成金句',
+        }
+
+    prompt = build_golden_quotes_prompt(
+        request.topic,
+        messages,
+        max_quotes=max_quotes,
+    )
+    try:
+        model_client = create_character_client()
+        response = await model_client.create([UserMessage(content=prompt, source='user')])
+        raw_content = response.content if isinstance(response.content, str) else str(response.content)
+        quotes = parse_golden_quotes_response(raw_content, max_quotes=max_quotes)
+        return {
+            'eligible': True,
+            'quotes': quotes,
+            'message': 'ok' if quotes else '模型未返回可用金句',
+        }
+    except Exception as exc:
+        logger.exception('generate golden quotes failed')
+        return {
+            'eligible': True,
+            'quotes': [],
+            'message': f'生成失败: {exc}',
+        }
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
@@ -168,7 +225,7 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=404, detail=f"会话 '{session_id}' 不存在")
 
     # 清理资源
-    clear_human_queues()
+    clear_human_queues(session_scope=session_id)
     if session_id in _floor_managers:
         del _floor_managers[session_id]
     del _sessions[session_id]

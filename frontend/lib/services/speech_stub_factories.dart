@@ -78,10 +78,18 @@ class _NoopAsrService implements AsrService {
   }
 }
 
-TtsService createWebTtsService(String providerId, {required String serverUrl}) {
+TtsService createWebTtsService(
+  String providerId, {
+  required String serverUrl,
+  String? providerUrl,
+}) {
   return _NoopTtsService();
 }
 
-AsrService createWebAsrService(String providerId, {required String serverUrl}) {
+AsrService createWebAsrService(
+  String providerId, {
+  required String serverUrl,
+  String? providerUrl,
+}) {
   return _NoopAsrService();
 }

@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import subprocess
+import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ class HardwareProfile:
 _profile: HardwareProfile | None = None
 _thread_pool: ThreadPoolExecutor | None = None
 _runtime_tuning: dict[str, object] = {}
+_profile_lock = threading.Lock()
 
 
 def detect_hardware() -> HardwareProfile:
@@ -48,129 +50,138 @@ def detect_hardware() -> HardwareProfile:
     if _profile is not None:
         return _profile
 
-    p = HardwareProfile()
-    p.os_name = platform.system()
-    p.os_version = platform.mac_ver()[0] if p.os_name == "Darwin" else platform.version()
-    p.arch = platform.machine()
-    p.cpu_cores = os.cpu_count() or 1
+    with _profile_lock:
+        if _profile is not None:
+            return _profile
 
-    # ── CPU 品牌 & Apple Silicon ──
-    if p.os_name == "Darwin":
-        try:
-            brand = subprocess.check_output(
-                ["sysctl", "-n", "machdep.cpu.brand_string"],
-                timeout=3,
-            ).decode().strip()
-            p.cpu_brand = brand
-        except Exception:
-            p.cpu_brand = platform.processor()
+        p = HardwareProfile()
+        p.os_name = platform.system()
+        p.os_version = platform.mac_ver()[0] if p.os_name == "Darwin" else platform.version()
+        p.arch = platform.machine()
+        p.cpu_cores = os.cpu_count() or 1
 
-        # Apple Silicon 检测
-        if p.arch == "arm64":
-            p.is_apple_silicon = True
-            # 尝试获取芯片型号
+        # ── CPU 品牌 & Apple Silicon ──
+        if p.os_name == "Darwin":
             try:
-                chip = subprocess.check_output(
-                    ["sysctl", "-n", "hw.chip"],
+                brand = subprocess.check_output(
+                    ["sysctl", "-n", "machdep.cpu.brand_string"],
                     timeout=3,
+                    stderr=subprocess.DEVNULL,
                 ).decode().strip()
-                p.apple_chip = chip
+                p.cpu_brand = brand
             except Exception:
-                # 从品牌字符串提取
-                if "M1" in p.cpu_brand:
-                    p.apple_chip = "M1 Max" if "Max" in p.cpu_brand else "M1 Ultra" if "Ultra" in p.cpu_brand else "M1 Pro" if "Pro" in p.cpu_brand else "M1"
-                elif "M2" in p.cpu_brand:
-                    p.apple_chip = "M2 Max" if "Max" in p.cpu_brand else "M2 Ultra" if "Ultra" in p.cpu_brand else "M2 Pro" if "Pro" in p.cpu_brand else "M2"
-                elif "M3" in p.cpu_brand:
-                    p.apple_chip = "M3 Max" if "Max" in p.cpu_brand else "M3 Ultra" if "Ultra" in p.cpu_brand else "M3 Pro" if "Pro" in p.cpu_brand else "M3"
-                elif "M4" in p.cpu_brand:
-                    p.apple_chip = "M4 Max" if "Max" in p.cpu_brand else "M4 Ultra" if "Ultra" in p.cpu_brand else "M4 Pro" if "Pro" in p.cpu_brand else "M4"
-                else:
-                    p.apple_chip = "Apple Silicon"
+                p.cpu_brand = platform.processor()
 
-        # 物理内存
-        try:
-            mem_bytes = int(subprocess.check_output(
-                ["sysctl", "-n", "hw.memsize"],
-                timeout=3,
-            ).decode().strip())
-            p.memory_gb = round(mem_bytes / (1024**3), 1)
-        except Exception:
-            pass
+            # Apple Silicon 检测
+            if p.arch == "arm64":
+                p.is_apple_silicon = True
+                # 尝试获取芯片型号
+                try:
+                    chip = subprocess.check_output(
+                        ["sysctl", "-n", "hw.chip"],
+                        timeout=3,
+                        stderr=subprocess.DEVNULL,
+                    ).decode().strip()
+                    p.apple_chip = chip
+                except Exception:
+                    # 从品牌字符串提取
+                    if "M1" in p.cpu_brand:
+                        p.apple_chip = "M1 Max" if "Max" in p.cpu_brand else "M1 Ultra" if "Ultra" in p.cpu_brand else "M1 Pro" if "Pro" in p.cpu_brand else "M1"
+                    elif "M2" in p.cpu_brand:
+                        p.apple_chip = "M2 Max" if "Max" in p.cpu_brand else "M2 Ultra" if "Ultra" in p.cpu_brand else "M2 Pro" if "Pro" in p.cpu_brand else "M2"
+                    elif "M3" in p.cpu_brand:
+                        p.apple_chip = "M3 Max" if "Max" in p.cpu_brand else "M3 Ultra" if "Ultra" in p.cpu_brand else "M3 Pro" if "Pro" in p.cpu_brand else "M3"
+                    elif "M4" in p.cpu_brand:
+                        p.apple_chip = "M4 Max" if "Max" in p.cpu_brand else "M4 Ultra" if "Ultra" in p.cpu_brand else "M4 Pro" if "Pro" in p.cpu_brand else "M4"
+                    else:
+                        p.apple_chip = "Apple Silicon"
 
-        # GPU 核心数 (Apple Silicon)
-        try:
-            import plistlib
-            sp_out = subprocess.check_output(
-                ["system_profiler", "SPDisplaysDataType", "-xml"],
-                timeout=5,
-            )
-            sp_data = plistlib.loads(sp_out)
-            for item in sp_data:
-                for display in item.get("_items", []):
-                    cores = display.get("sppci_cores")
-                    if cores:
-                        # Format: "40" or "40-core"
-                        core_str = str(cores).replace("-core", "").strip()
-                        p.gpu_cores = int(core_str)
-        except Exception:
-            pass
+            # 物理内存
+            try:
+                mem_bytes = int(subprocess.check_output(
+                    ["sysctl", "-n", "hw.memsize"],
+                    timeout=3,
+                    stderr=subprocess.DEVNULL,
+                ).decode().strip())
+                p.memory_gb = round(mem_bytes / (1024**3), 1)
+            except Exception:
+                pass
 
-        # 性能核心数 (Apple)
-        try:
-            perf = int(subprocess.check_output(
-                ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
-                timeout=3,
-            ).decode().strip())
-            p.cpu_threads = perf
-        except Exception:
+            # GPU 核心数 (Apple Silicon)
+            try:
+                import plistlib
+                sp_out = subprocess.check_output(
+                    ["system_profiler", "SPDisplaysDataType", "-xml"],
+                    timeout=5,
+                    stderr=subprocess.DEVNULL,
+                )
+                sp_data = plistlib.loads(sp_out)
+                for item in sp_data:
+                    for display in item.get("_items", []):
+                        cores = display.get("sppci_cores")
+                        if cores:
+                            # Format: "40" or "40-core"
+                            core_str = str(cores).replace("-core", "").strip()
+                            p.gpu_cores = int(core_str)
+            except Exception:
+                pass
+
+            # 性能核心数 (Apple)
+            try:
+                perf = int(subprocess.check_output(
+                    ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+                    timeout=3,
+                    stderr=subprocess.DEVNULL,
+                ).decode().strip())
+                p.cpu_threads = perf
+            except Exception:
+                p.cpu_threads = p.cpu_cores
+        else:
+            p.cpu_brand = platform.processor()
             p.cpu_threads = p.cpu_cores
-    else:
-        p.cpu_brand = platform.processor()
-        p.cpu_threads = p.cpu_cores
-        # Linux 内存
+            # Linux 内存
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemTotal"):
+                            kb = int(line.split()[1])
+                            p.memory_gb = round(kb / (1024**2), 1)
+                            break
+            except Exception:
+                pass
+
+        # ── GPU / MPS / CUDA ──
         try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemTotal"):
-                        kb = int(line.split()[1])
-                        p.memory_gb = round(kb / (1024**2), 1)
-                        break
-        except Exception:
+            import torch
+            p.cuda_available = torch.cuda.is_available()
+            if p.cuda_available:
+                p.gpu_name = torch.cuda.get_device_name(0)
+                p.gpu_memory_gb = round(torch.cuda.get_device_properties(0).total_mem / (1024**3), 1)
+            p.mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        except ImportError:
             pass
 
-    # ── GPU / MPS / CUDA ──
-    try:
-        import torch
-        p.cuda_available = torch.cuda.is_available()
+        # ── 推荐线程池大小 ──
+        if p.is_apple_silicon:
+            # 高内存系统允许更大线程池
+            max_workers = 32 if p.memory_gb >= 64 else 16
+            p.recommended_workers = min(p.cpu_threads * 2, max_workers)
+        else:
+            max_workers = 32 if p.memory_gb >= 64 else 16
+            p.recommended_workers = min(p.cpu_cores * 2, max_workers)
+
+        # ── 优化建议 ──
+        if p.mps_available:
+            p.optimization_notes.append("MPS (Metal) GPU 加速可用，PyTorch 推理优先使用 device='mps'")
         if p.cuda_available:
-            p.gpu_name = torch.cuda.get_device_name(0)
-            p.gpu_memory_gb = round(torch.cuda.get_device_properties(0).total_mem / (1024**3), 1)
-        p.mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-    except ImportError:
-        pass
+            p.optimization_notes.append(f"CUDA GPU 可用: {p.gpu_name}, {p.gpu_memory_gb}GB 显存")
+        if p.is_apple_silicon:
+            p.optimization_notes.append(f"Apple {p.apple_chip} 检测成功，启用 {p.recommended_workers} 线程并行")
+        if p.memory_gb >= 32:
+            p.optimization_notes.append(f"内存 {p.memory_gb}GB 充裕，可并行加载多模型")
 
-    # ── 推荐线程池大小 ──
-    if p.is_apple_silicon:
-        # 高内存系统允许更大线程池
-        max_workers = 32 if p.memory_gb >= 64 else 16
-        p.recommended_workers = min(p.cpu_threads * 2, max_workers)
-    else:
-        max_workers = 32 if p.memory_gb >= 64 else 16
-        p.recommended_workers = min(p.cpu_cores * 2, max_workers)
-
-    # ── 优化建议 ──
-    if p.mps_available:
-        p.optimization_notes.append("MPS (Metal) GPU 加速可用，PyTorch 推理优先使用 device='mps'")
-    if p.cuda_available:
-        p.optimization_notes.append(f"CUDA GPU 可用: {p.gpu_name}, {p.gpu_memory_gb}GB 显存")
-    if p.is_apple_silicon:
-        p.optimization_notes.append(f"Apple {p.apple_chip} 检测成功，启用 {p.recommended_workers} 线程并行")
-    if p.memory_gb >= 32:
-        p.optimization_notes.append(f"内存 {p.memory_gb}GB 充裕，可并行加载多模型")
-
-    _profile = p
-    return p
+        _profile = p
+        return p
 
 
 def get_thread_pool() -> ThreadPoolExecutor:

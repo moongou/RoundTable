@@ -261,7 +261,7 @@ class CurrentConfig {
         apiKeyMasked: json['api_key_masked'] as String? ?? '',
         model: json['model'] as String,
         asrProvider: json['asr_provider'] as String? ?? 'funasr',
-        ttsProvider: json['tts_provider'] as String? ?? 'browser',
+        ttsProvider: json['tts_provider'] as String? ?? 'edge_tts',
         pushToTalk: json['push_to_talk'] as bool? ?? true,
         webSearchEnabled: json['web_search_enabled'] as bool? ?? false,
         tavilyConfigured: json['tavily_configured'] as bool? ?? false,

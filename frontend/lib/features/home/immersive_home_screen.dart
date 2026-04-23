@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../models/config_models.dart';
 import '../../models/discussion_models.dart';
 import '../../painters/candlelight_painter.dart';
 import '../../painters/round_table_painter.dart';
@@ -14,6 +15,19 @@ import '../../state/settings_provider.dart';
 import '../../utils/open_external_url_stub.dart'
     if (dart.library.html) '../../utils/open_external_url_web.dart';
 import '../session/immersive_session_screen.dart';
+
+const _kHomeSeatOrder = <String>[
+  'explorer',
+  'skeptic',
+  'storyteller',
+  'optimist',
+  'questioner',
+  'peacemaker',
+  'empath',
+  'rationalist',
+  'innovator',
+  'pragmatist',
+];
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 const _kBg = Color(0xFF0A0A12);
@@ -177,9 +191,13 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     }
 
     final local = ref.read(localSettingsProvider).valueOrNull;
-    final asrProvider = local?.asrProvider ?? 'browser';
+    final asrProvider =
+        local?.asrProvider ?? ImmersiveSessionScreen.defaultAsrProvider;
     final serverUrl = local?.serverUrl ?? 'http://localhost:8001';
-    if (asrProvider == 'browser') {
+    final humanName = _nameController.text.trim().isEmpty
+        ? '豆苗'
+        : _nameController.text.trim();
+    if (!_isObserverMode && asrProvider == 'browser') {
       final asr = createAsrService('browser', serverUrl: serverUrl);
       try {
         if (!asr.isAvailable) {
@@ -203,7 +221,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           topic: effectiveTopic,
           characterIds: _selectedCharacterIds.toList(),
           thinkerIds: _selectedThinkerIds.toList(),
-          humanName: _nameController.text.isEmpty ? '豆苗' : _nameController.text,
+          humanName: humanName,
           observerMode: _isObserverMode,
         ),
         transitionsBuilder: (_, a1, a2, child) => FadeTransition(
@@ -311,6 +329,9 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 
   Widget _buildLayout(Size size) {
     final isWide = size.width > 900;
+    final humanName = _nameController.text.trim().isEmpty
+        ? '豆苗'
+        : _nameController.text.trim();
     return Column(
       children: [
         _TopBar(
@@ -334,6 +355,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   canStart: _canStart,
                   pulseAnim: _pulseAnim,
                   isFreeTopicMode: _isFreeTopicMode,
+                  humanName: humanName,
+                  observerMode: _isObserverMode,
                   freeTopicController: _freeTopicController,
                   onCategoryChanged: (v) =>
                       setState(() => _selectedCategory = v),
@@ -376,6 +399,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   canStart: _canStart,
                   pulseAnim: _pulseAnim,
                   isFreeTopicMode: _isFreeTopicMode,
+                  humanName: humanName,
+                  observerMode: _isObserverMode,
                   freeTopicController: _freeTopicController,
                   onCategoryChanged: (v) =>
                       setState(() => _selectedCategory = v),
@@ -564,8 +589,8 @@ class _LogoPainter extends CustomPainter {
       ..strokeWidth = 0.8;
     canvas.drawCircle(Offset(cx, cy), r * 0.7, innerRing);
 
-    // 5 seats around the table
-    const seatCount = 5;
+    // 10 seats around the table to match the full student roster.
+    const seatCount = 10;
     for (int i = 0; i < seatCount; i++) {
       final angle = (i / seatCount) * 2 * 3.14159 - 3.14159 / 2;
       final sx = cx + (r + 4) * cos(angle);
@@ -667,6 +692,8 @@ class _WideLayout extends StatefulWidget {
   final bool canStart;
   final Animation<double> pulseAnim;
   final bool isFreeTopicMode;
+  final String humanName;
+  final bool observerMode;
   final TextEditingController freeTopicController;
   final ValueChanged<String?> onCategoryChanged;
   final ValueChanged<Topic> onTopicSelected;
@@ -688,6 +715,8 @@ class _WideLayout extends StatefulWidget {
     required this.canStart,
     required this.pulseAnim,
     required this.isFreeTopicMode,
+    required this.humanName,
+    required this.observerMode,
     required this.freeTopicController,
     required this.onCategoryChanged,
     required this.onTopicSelected,
@@ -719,8 +748,14 @@ class _WideLayoutState extends State<_WideLayout> {
   Widget build(BuildContext context) {
     final moderator =
         widget.characters.where((c) => c.id == 'moderator').firstOrNull;
-    final selectableChars =
-        widget.characters.where((c) => c.id != 'moderator').toList();
+    final seatRank = {
+      for (var i = 0; i < _kHomeSeatOrder.length; i++) _kHomeSeatOrder[i]: i,
+    };
+    final selectableChars = widget.characters
+        .where((c) => c.id != 'moderator')
+        .toList()
+      ..sort(
+          (a, b) => (seatRank[a.id] ?? 999).compareTo(seatRank[b.id] ?? 999));
     final totalWidth = MediaQuery.of(context).size.width;
 
     // Ensure right panel doesn't exceed available space
@@ -773,32 +808,17 @@ class _WideLayoutState extends State<_WideLayout> {
 
         // ── Center column ──────────────────────────────────────────────────
         Expanded(
-          child: Column(
-            children: [
-              Expanded(
-                child: Center(
-                  child: moderator != null
-                      ? _ModeratorBadge(mod: moderator)
-                      : const SizedBox.shrink(),
-                ),
-              ),
-              _CenterTable(
-                canStart: widget.canStart,
-                pulseAnim: widget.pulseAnim,
-                onStart: widget.onStart,
-                selectedCount: widget.selectedCharacterIds.length +
-                    widget.selectedThinkerIds.length,
-              ),
-              Expanded(
-                child: Center(
-                  child: _InlineCharacterRow(
-                    characters: selectableChars,
-                    selectedCharacterIds: widget.selectedCharacterIds,
-                    onCharacterToggled: widget.onCharacterToggled,
-                  ),
-                ),
-              ),
-            ],
+          child: _WideSeatingStage(
+            moderator: moderator,
+            characters: selectableChars,
+            selectedCharacterIds: widget.selectedCharacterIds,
+            thinkerCount: widget.selectedThinkerIds.length,
+            humanName: widget.humanName,
+            observerMode: widget.observerMode,
+            pulseAnim: widget.pulseAnim,
+            canStart: widget.canStart,
+            onCharacterToggled: widget.onCharacterToggled,
+            onStart: widget.onStart,
           ),
         ),
 
@@ -888,6 +908,8 @@ class _NarrowLayout extends StatelessWidget {
   final bool canStart;
   final Animation<double> pulseAnim;
   final bool isFreeTopicMode;
+  final String humanName;
+  final bool observerMode;
   final TextEditingController freeTopicController;
   final ValueChanged<String?> onCategoryChanged;
   final ValueChanged<Topic> onTopicSelected;
@@ -909,6 +931,8 @@ class _NarrowLayout extends StatelessWidget {
     required this.canStart,
     required this.pulseAnim,
     required this.isFreeTopicMode,
+    required this.humanName,
+    required this.observerMode,
     required this.freeTopicController,
     required this.onCategoryChanged,
     required this.onTopicSelected,
@@ -1246,6 +1270,9 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
   bool _listening = false;
   bool _refining = false;
   List<String> _savedTopics = const [];
+  String _asrProviderId = '';
+  String _asrProviderUrl = '';
+  String _asrServerUrl = '';
 
   @override
   void initState() {
@@ -1279,19 +1306,112 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     super.dispose();
   }
 
+  Future<({String providerId, String providerUrl, String serverUrl})>
+      _resolveAsrConfig() async {
+    final settings = ref.read(localSettingsProvider).valueOrNull;
+    final serverUrl = settings?.serverUrl ?? 'http://localhost:8001';
+    final preferredProviderId =
+        settings?.asrProvider ?? ImmersiveSessionScreen.defaultAsrProvider;
+
+    SpeechConfig? speechConfig = ref.read(speechConfigProvider).valueOrNull;
+    if (speechConfig == null) {
+      try {
+        speechConfig = await ref.read(speechConfigProvider.future);
+      } catch (_) {
+        speechConfig = null;
+      }
+    }
+
+    final providers =
+        speechConfig?.asrProviders ?? const <SpeechProviderInfo>[];
+
+    SpeechProviderInfo? selectedProvider;
+    for (final provider in providers) {
+      if (provider.id == preferredProviderId) {
+        selectedProvider = provider;
+        break;
+      }
+    }
+
+    if (selectedProvider == null || !selectedProvider.available) {
+      for (final fallbackId in <String>[
+        ImmersiveSessionScreen.defaultAsrProvider,
+        'openai_whisper',
+        'browser',
+      ]) {
+        for (final provider in providers) {
+          if (provider.id == fallbackId && provider.available) {
+            selectedProvider = provider;
+            break;
+          }
+        }
+        if (selectedProvider != null && selectedProvider.available) {
+          break;
+        }
+      }
+    }
+
+    if (selectedProvider == null || !selectedProvider.available) {
+      for (final provider in providers) {
+        if (provider.available) {
+          selectedProvider = provider;
+          break;
+        }
+      }
+    }
+
+    final providerId = selectedProvider?.id ?? preferredProviderId;
+    final providerUrl = selectedProvider == null
+        ? ''
+        : (selectedProvider.url.isNotEmpty
+            ? selectedProvider.url
+            : selectedProvider.defaultUrl);
+
+    return (
+      providerId: providerId,
+      providerUrl: providerUrl,
+      serverUrl: serverUrl,
+    );
+  }
+
+  Future<AsrService> _ensureAsr() async {
+    final config = await _resolveAsrConfig();
+    final shouldRebuild = _asr == null ||
+        _asrProviderId != config.providerId ||
+        _asrProviderUrl != config.providerUrl ||
+        _asrServerUrl != config.serverUrl;
+
+    if (!shouldRebuild) {
+      return _asr!;
+    }
+
+    await _asrSub?.cancel();
+    _asrSub = null;
+    try {
+      _asr?.dispose();
+    } catch (_) {}
+
+    _asrProviderId = config.providerId;
+    _asrProviderUrl = config.providerUrl;
+    _asrServerUrl = config.serverUrl;
+    _asr = createAsrService(
+      config.providerId,
+      serverUrl: config.serverUrl,
+      providerUrl: config.providerUrl,
+    );
+    return _asr!;
+  }
+
   Future<void> _toggleMic() async {
     if (_listening) {
       await _stopMic();
       return;
     }
     try {
-      final providerId =
-          ref.read(localSettingsProvider).valueOrNull?.asrProvider ?? 'browser';
-      _asr ??= createAsrService(providerId);
-      await _asr!.warmup();
-      await _asr!.startListening();
       _draft = '';
-      _asrSub = _asr!.transcriptionStream.listen((r) {
+      final asr = await _ensureAsr();
+      await _asrSub?.cancel();
+      _asrSub = asr.transcriptionStream.listen((r) {
         setState(() {
           _draft = r.text;
           if (r.isFinal && _draft.trim().isNotEmpty) {
@@ -1305,9 +1425,29 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
             widget.onChanged();
           }
         });
+      }, onError: (Object error, StackTrace stackTrace) {
+        if (!mounted) return;
+        setState(() => _listening = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('语音识别异常: $error')),
+        );
       });
+
+      await asr.warmup();
+      if (!asr.isAvailable) {
+        throw StateError('当前 ASR 服务不可用');
+      }
+      await asr.startListening();
+      if (!asr.isListening) {
+        throw StateError('语音识别未能成功启动');
+      }
       setState(() => _listening = true);
     } catch (e) {
+      await _asrSub?.cancel();
+      _asrSub = null;
+      if (mounted) {
+        setState(() => _listening = false);
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('语音识别启动失败: $e')),
@@ -1346,10 +1486,8 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     if (text.isEmpty || _refining) return;
     setState(() => _refining = true);
     try {
-      final providerId =
-          ref.read(localSettingsProvider).valueOrNull?.asrProvider ?? 'browser';
-      _asr ??= createAsrService(providerId);
-      final refined = await _asr!.refineTranscript(text);
+      final asr = await _ensureAsr();
+      final refined = await asr.refineTranscript(text);
       if (refined.trim().isNotEmpty) {
         widget.controller.text = refined.trim();
         widget.onChanged();
@@ -2417,6 +2555,325 @@ class _CenterTable extends StatelessWidget {
   }
 }
 
+class _WideSeatingStage extends StatelessWidget {
+  final CharacterTemplate? moderator;
+  final List<CharacterTemplate> characters;
+  final Set<String> selectedCharacterIds;
+  final int thinkerCount;
+  final String humanName;
+  final bool observerMode;
+  final Animation<double> pulseAnim;
+  final bool canStart;
+  final ValueChanged<String> onCharacterToggled;
+  final VoidCallback onStart;
+
+  const _WideSeatingStage({
+    required this.moderator,
+    required this.characters,
+    required this.selectedCharacterIds,
+    required this.thinkerCount,
+    required this.humanName,
+    required this.observerMode,
+    required this.pulseAnim,
+    required this.canStart,
+    required this.onCharacterToggled,
+    required this.onStart,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final leftSeats = characters.take((characters.length / 2).ceil()).toList();
+    final rightSeats = characters.skip(leftSeats.length).toList();
+
+    return Column(
+      children: [
+        Expanded(
+          child: Center(
+            child: moderator != null
+                ? _ModeratorBadge(mod: moderator!)
+                : const SizedBox.shrink(),
+          ),
+        ),
+        Expanded(
+          flex: 4,
+          child: Row(
+            children: [
+              Expanded(
+                child: _SeatColumn(
+                  seats: leftSeats,
+                  selectedCharacterIds: selectedCharacterIds,
+                  onCharacterToggled: onCharacterToggled,
+                  startIndex: 0,
+                  alignLeft: true,
+                ),
+              ),
+              SizedBox(
+                width: 320,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _CenterTable(
+                      canStart: canStart,
+                      pulseAnim: pulseAnim,
+                      onStart: onStart,
+                      selectedCount: selectedCharacterIds.length + thinkerCount,
+                    ),
+                    const SizedBox(height: 18),
+                    _HumanSeatBadge(
+                      humanName: humanName,
+                      observerMode: observerMode,
+                    ),
+                    if (thinkerCount > 0) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        '$thinkerCount 位思想家会在讨论中加入圆桌',
+                        style: const TextStyle(
+                          color: _kTextSecondary,
+                          fontSize: 11,
+                          letterSpacing: 0.3,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              Expanded(
+                child: _SeatColumn(
+                  seats: rightSeats,
+                  selectedCharacterIds: selectedCharacterIds,
+                  onCharacterToggled: onCharacterToggled,
+                  startIndex: leftSeats.length,
+                  alignLeft: false,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SeatColumn extends StatelessWidget {
+  final List<CharacterTemplate> seats;
+  final Set<String> selectedCharacterIds;
+  final ValueChanged<String> onCharacterToggled;
+  final int startIndex;
+  final bool alignLeft;
+
+  const _SeatColumn({
+    required this.seats,
+    required this.selectedCharacterIds,
+    required this.onCharacterToggled,
+    required this.startIndex,
+    required this.alignLeft,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final center = (seats.length - 1) / 2;
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      crossAxisAlignment:
+          alignLeft ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      children: [
+        for (var i = 0; i < seats.length; i++)
+          Padding(
+            padding: EdgeInsets.only(
+              left: alignLeft ? 0 : (4 + (center - i).abs() * 12),
+              right: alignLeft ? (4 + (center - i).abs() * 12) : 0,
+            ),
+            child: _SeatCard(
+              character: seats[i],
+              seatNumber: startIndex + i + 1,
+              selected: selectedCharacterIds.contains(seats[i].id),
+              onTap: () => onCharacterToggled(seats[i].id),
+              alignLeft: alignLeft,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _SeatCard extends StatefulWidget {
+  final CharacterTemplate character;
+  final int seatNumber;
+  final bool selected;
+  final VoidCallback onTap;
+  final bool alignLeft;
+
+  const _SeatCard({
+    required this.character,
+    required this.seatNumber,
+    required this.selected,
+    required this.onTap,
+    required this.alignLeft,
+  });
+
+  @override
+  State<_SeatCard> createState() => _SeatCardState();
+}
+
+class _SeatCardState extends State<_SeatCard> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = widget.selected;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: InkWell(
+        onTap: widget.onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: 164,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: active
+                ? _kNeonViolet.withValues(alpha: 0.18)
+                : _hovered
+                    ? _kCard
+                    : _kSurface,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: active ? _kNeonViolet.withValues(alpha: 0.85) : _kBorder,
+              width: active ? 1.4 : 1,
+            ),
+            boxShadow: active
+                ? [
+                    BoxShadow(
+                      color: _kNeonViolet.withValues(alpha: 0.22),
+                      blurRadius: 16,
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            textDirection:
+                widget.alignLeft ? TextDirection.ltr : TextDirection.rtl,
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: active ? _kNeonGold.withValues(alpha: 0.18) : _kCard,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: active ? _kNeonGold : _kBorder,
+                  ),
+                ),
+                child: Text(
+                  widget.seatNumber.toString().padLeft(2, '0'),
+                  style: TextStyle(
+                    color: active ? _kNeonGold : _kTextSecondary,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(widget.character.avatar,
+                  style: const TextStyle(fontSize: 21)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: widget.alignLeft
+                      ? CrossAxisAlignment.start
+                      : CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      widget.character.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: active ? _kTextPrimary : _kTextSecondary,
+                        fontSize: 13,
+                        fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      active ? '已入座' : '点击入座',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: active ? _kNeonViolet : _kTextSecondary,
+                        fontSize: 10,
+                        letterSpacing: 0.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HumanSeatBadge extends StatelessWidget {
+  final String humanName;
+  final bool observerMode;
+
+  const _HumanSeatBadge({
+    required this.humanName,
+    required this.observerMode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final title = observerMode ? '旁听席' : '你的席位';
+    final subtitle = observerMode ? '只观看，不进入发言轮次' : humanName;
+    final icon = observerMode
+        ? Icons.visibility_outlined
+        : Icons.person_pin_circle_outlined;
+    final color = observerMode ? _kNeonGold : _kNeonCyan;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  color: _kTextSecondary,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _StartButton extends StatefulWidget {
   final bool canStart;
   final Animation<double> pulseAnim;
@@ -2569,40 +3026,6 @@ class _ModeratorBadge extends StatelessWidget {
                 color: _kNeonGold.withValues(alpha: 0.55), fontSize: 11),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ─── Inline Character Row (below table) ──────────────────────────────────────
-class _InlineCharacterRow extends StatelessWidget {
-  final List<CharacterTemplate> characters;
-  final Set<String> selectedCharacterIds;
-  final ValueChanged<String> onCharacterToggled;
-
-  const _InlineCharacterRow({
-    required this.characters,
-    required this.selectedCharacterIds,
-    required this.onCharacterToggled,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: characters
-            .map((char) => Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: _CharChip(
-                    avatar: char.avatar,
-                    name: char.name,
-                    isSelected: selectedCharacterIds.contains(char.id),
-                    onTap: () => onCharacterToggled(char.id),
-                  ),
-                ))
-            .toList(),
       ),
     );
   }

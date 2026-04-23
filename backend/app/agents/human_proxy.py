@@ -18,10 +18,13 @@ from app.models.session import ParticipantType
 logger = logging.getLogger(__name__)
 
 
+_DEFAULT_QUEUE_SCOPE = "__global__"
+
+
 # 存储每个人类参与者的输入队列
-# 键: 显示名字 (display_name), 值: asyncio.Queue[str]
-_human_input_queues: dict[str, asyncio.Queue[str]] = {}
-_human_name_aliases: dict[str, str] = {}
+# 第一层键: session scope，第二层键: 显示名字 (display_name)
+_human_input_queues: dict[str, dict[str, asyncio.Queue[str]]] = {}
+_human_name_aliases: dict[str, dict[str, str]] = {}
 
 
 def normalize_display_name(name: str) -> str:
@@ -29,20 +32,53 @@ def normalize_display_name(name: str) -> str:
     return (name or "").strip()
 
 
-def _resolve_queue_name(name: str) -> str | None:
+def _normalize_queue_scope(session_scope: str | None) -> str:
+    normalized = normalize_display_name(session_scope or "")
+    return normalized or _DEFAULT_QUEUE_SCOPE
+
+
+def _get_scope_queues(session_scope: str | None) -> dict[str, asyncio.Queue[str]]:
+    return _human_input_queues.get(_normalize_queue_scope(session_scope), {})
+
+
+def _get_scope_aliases(session_scope: str | None) -> dict[str, str]:
+    return _human_name_aliases.get(_normalize_queue_scope(session_scope), {})
+
+
+def _ensure_scope_queues(session_scope: str | None) -> dict[str, asyncio.Queue[str]]:
+    scope = _normalize_queue_scope(session_scope)
+    return _human_input_queues.setdefault(scope, {})
+
+
+def _ensure_scope_aliases(session_scope: str | None) -> dict[str, str]:
+    scope = _normalize_queue_scope(session_scope)
+    return _human_name_aliases.setdefault(scope, {})
+
+
+def _prune_scope(session_scope: str | None) -> None:
+    scope = _normalize_queue_scope(session_scope)
+    if not _human_input_queues.get(scope):
+        _human_input_queues.pop(scope, None)
+        _human_name_aliases.pop(scope, None)
+
+
+def _resolve_queue_name(name: str, *, session_scope: str | None = None) -> str | None:
     normalized = normalize_display_name(name)
-    if normalized in _human_input_queues:
+    queues = _get_scope_queues(session_scope)
+    aliases = _get_scope_aliases(session_scope)
+
+    if normalized in queues:
         return normalized
-    if name in _human_input_queues:
+    if name in queues:
         return name
 
-    alias = _human_name_aliases.get(normalized) or _human_name_aliases.get(name)
+    alias = aliases.get(normalized) or aliases.get(name)
     if alias:
         return alias
 
     if normalized:
         normalized_no_space = normalized.replace(" ", "")
-        for key in _human_input_queues:
+        for key in queues:
             if key.replace(" ", "") == normalized_no_space:
                 return key
     return None
@@ -66,7 +102,11 @@ def safe_agent_name(name: str) -> str:
     return safe if safe else "human"
 
 
-def make_human_input_func(name: str, timeout: float = 120.0) -> Callable[[str, Optional[CancellationToken]], Awaitable[str]]:
+def make_human_input_func(
+    name: str,
+    timeout: float = 120.0,
+    session_scope: str | None = None,
+) -> Callable[[str, Optional[CancellationToken]], Awaitable[str]]:
     """为指定的人类参与者创建 input_func。
 
     该函数会阻塞等待 STT/WebSocket 将转录文本放入队列。
@@ -81,13 +121,16 @@ def make_human_input_func(name: str, timeout: float = 120.0) -> Callable[[str, O
     """
 
     async def input_func(prompt: str, cancellation_token: Optional[CancellationToken] = None) -> str:
-        queue_name = _resolve_queue_name(name)
+        queue_name = _resolve_queue_name(name, session_scope=session_scope)
         if queue_name is None:
             queue_name = normalize_display_name(name) or name or "同学"
             logger.warning("参与者 '%s' 的输入队列不存在，已自动创建并回退", name)
-            _human_input_queues[queue_name] = asyncio.Queue()
+            queues = _ensure_scope_queues(session_scope)
+            aliases = _ensure_scope_aliases(session_scope)
+            queues[queue_name] = asyncio.Queue()
+            aliases[queue_name] = queue_name
 
-        queue = _human_input_queues.get(queue_name)
+        queue = _get_scope_queues(session_scope).get(queue_name)
         if queue is None:
             logger.warning("参与者 '%s' 的输入队列获取失败，自动跳过本轮", name)
             return "（我先听听大家的意见）"
@@ -102,7 +145,11 @@ def make_human_input_func(name: str, timeout: float = 120.0) -> Callable[[str, O
     return input_func
 
 
-def create_human_proxy(display_name: str, description: str = "") -> UserProxyAgent:
+def create_human_proxy(
+    display_name: str,
+    description: str = "",
+    session_scope: str | None = None,
+) -> UserProxyAgent:
     """创建人类参与者 UserProxyAgent。
 
     Args:
@@ -119,57 +166,87 @@ def create_human_proxy(display_name: str, description: str = "") -> UserProxyAge
         description = f"学生{display_name}，真人参与者"
 
     # 输入队列以显示名为键，方便 put_human_input 按原始名称写入
-    _human_input_queues[display_name] = asyncio.Queue()
-    _human_name_aliases[display_name] = display_name
+    queues = _ensure_scope_queues(session_scope)
+    aliases = _ensure_scope_aliases(session_scope)
+    queues[display_name] = asyncio.Queue()
+    aliases[display_name] = display_name
+    aliases[agent_name] = display_name
 
     return UserProxyAgent(
         name=agent_name,
         description=description,
-        input_func=make_human_input_func(display_name),
+        input_func=make_human_input_func(display_name, session_scope=session_scope),
     )
 
 
-def get_human_queue(name: str) -> asyncio.Queue[str]:
+def get_human_queue(name: str, session_scope: str | None = None) -> asyncio.Queue[str]:
     """获取指定参与者的输入队列，用于从 WebSocket/STT 推送文本。"""
-    queue_name = _resolve_queue_name(name)
+    queue_name = _resolve_queue_name(name, session_scope=session_scope)
     if queue_name is None:
         normalized = normalize_display_name(name)
         raise KeyError(f"参与者 '{normalized or name}' 的输入队列不存在。请先调用 create_human_proxy。")
-    return _human_input_queues[queue_name]
+    return _get_scope_queues(session_scope)[queue_name]
 
 
-async def put_human_input(name: str, text: str) -> None:
+async def put_human_input(name: str, text: str, session_scope: str | None = None) -> None:
     """向指定参与者的输入队列推送文本。
 
     当 WebSocket 收到人类消息时调用此函数。
     """
     normalized_name = normalize_display_name(name)
-    queue_name = _resolve_queue_name(normalized_name)
+    queue_name = _resolve_queue_name(normalized_name or name, session_scope=session_scope)
     if queue_name is None:
         queue_name = normalized_name or name or "同学"
         logger.warning("参与者 '%s' 的输入队列不存在，已自动创建", name)
-        _human_input_queues[queue_name] = asyncio.Queue()
-        _human_name_aliases[queue_name] = queue_name
+        queues = _ensure_scope_queues(session_scope)
+        aliases = _ensure_scope_aliases(session_scope)
+        queues[queue_name] = asyncio.Queue()
+        aliases[queue_name] = queue_name
+    else:
+        queues = _get_scope_queues(session_scope)
+        aliases = _get_scope_aliases(session_scope)
 
-    queue = _human_input_queues.get(queue_name)
+    if normalized_name:
+        aliases[normalized_name] = queue_name
+    raw_name = (name or "").strip()
+    if raw_name:
+        aliases[raw_name] = queue_name
+
+    queue = queues.get(queue_name)
     if queue is None:
         raise KeyError(f"参与者 '{queue_name}' 的输入队列不存在")
     await queue.put((text or "").strip())
 
 
-def clear_human_queues(names: list[str] | None = None) -> None:
+def clear_human_queues(
+    names: list[str] | None = None,
+    session_scope: str | None = None,
+) -> None:
     """清除人类输入队列。
 
     Args:
         names: 要清除的参与者名字列表。若为 None，清除所有队列（仅在服务关闭时使用）。
     """
-    global _human_input_queues
-    if names is None:
+    if names is None and session_scope is None:
         _human_input_queues.clear()
         _human_name_aliases.clear()
+        return
+
+    scope = _normalize_queue_scope(session_scope)
+    if names is None:
+        _human_input_queues.pop(scope, None)
+        _human_name_aliases.pop(scope, None)
     else:
+        queues = _human_input_queues.get(scope, {})
+        aliases = _human_name_aliases.get(scope, {})
         for name in names:
             normalized = normalize_display_name(name)
-            queue_name = _resolve_queue_name(normalized) or normalized
-            _human_input_queues.pop(queue_name, None)
-            _human_name_aliases.pop(normalized, None)
+            queue_name = _resolve_queue_name(normalized, session_scope=session_scope) or normalized
+            queues.pop(queue_name, None)
+            aliases.pop(normalized, None)
+            safe_name = safe_agent_name(normalized) if normalized else ""
+            if safe_name:
+                aliases.pop(safe_name, None)
+            for alias in [alias for alias, target in aliases.items() if target == queue_name]:
+                aliases.pop(alias, None)
+        _prune_scope(session_scope)

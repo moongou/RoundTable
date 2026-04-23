@@ -29,6 +29,7 @@ class TTSRequest(BaseModel):
     """TTS 请求"""
 
     text: str
+    provider: Optional[str] = None
     voice: str = "alloy"
     character_id: Optional[str] = None
 
@@ -58,6 +59,14 @@ class ASRRefineResponse(BaseModel):
     """ASR 文本纠错响应"""
 
     text: str
+
+
+def _detect_audio_content_type(audio_data: bytes) -> tuple[str, str]:
+    if audio_data.startswith(b"RIFF") and audio_data[8:12] == b"WAVE":
+        return "audio/wav", "wav"
+    if audio_data.startswith(b"ID3") or (len(audio_data) >= 2 and audio_data[0] == 0xFF and (audio_data[1] & 0xE0) == 0xE0):
+        return "audio/mpeg", "mp3"
+    return "application/octet-stream", "bin"
 
 
 # ── 角色音色映射 ──────────────────────────────────────────────────────────────
@@ -108,7 +117,7 @@ async def text_to_speech(request: TTSRequest) -> Response:
         voice = _get_voice_for_character(request.character_id)
 
     try:
-        provider = create_tts_provider()
+        provider = create_tts_provider(request.provider)
         last_error: Exception | None = None
         audio_data: bytes | None = None
         for attempt in range(2):
@@ -123,11 +132,12 @@ async def text_to_speech(request: TTSRequest) -> Response:
                     continue
         if audio_data is None:
             raise last_error or RuntimeError("unknown tts error")
+        media_type, suffix = _detect_audio_content_type(audio_data)
         return Response(
             content=audio_data,
-            media_type="audio/mpeg",
+            media_type=media_type,
             headers={
-                "Content-Disposition": "inline; filename=tts_output.mp3",
+                "Content-Disposition": f"inline; filename=tts_output.{suffix}",
                 "X-Voice-Used": voice,
             },
         )

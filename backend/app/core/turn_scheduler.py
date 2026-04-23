@@ -173,6 +173,10 @@ def create_discussion_team(
             return moderator.name
 
         last_source = getattr(participant_msgs[-1], "source", None) if participant_msgs else None
+        non_moderator_msgs = [
+            m for m in participant_msgs if getattr(m, "source", None) != moderator.name
+        ]
+        is_opening_round = last_source == moderator.name and not non_moderator_msgs
 
         # ── 优先级1：检查全局指定发言者 ──
         designated = (
@@ -232,6 +236,17 @@ def create_discussion_team(
                 else:
                     logger.info("[TurnScheduler] 解析点名: %s → %s", latest_source, next_speaker)
                     return next_speaker
+
+            # 老师刚完成开场时，若没显式点到真人学生，就不要让系统直接把
+            # 首轮交给真人，避免打乱老师先点名虚拟同学/思想家的顺序。
+            if latest_source == moderator.name and is_opening_round:
+                opening_candidates = [
+                    n for n in all_names if n not in human_name_set and n != moderator.name
+                ]
+                if opening_candidates:
+                    selected = opening_candidates[0]
+                    logger.info("[TurnScheduler] moderator 开场后默认首轮交给: %s", selected)
+                    return selected
 
         # ── 优先级4：人类发言冷却期 ──
         if since_human < human_cooldown:

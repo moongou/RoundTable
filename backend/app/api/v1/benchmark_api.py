@@ -61,7 +61,11 @@ async def _benchmark_one_tts(service_id: str, url: str, rounds: int) -> dict:
         provider = create_tts_provider(service_id)
         available = await provider.is_available()
         if not available:
-            return {"service": service_id, "status": "unavailable"}
+            return {
+                "service": service_id,
+                "status": "skipped",
+                "reason": "service unavailable",
+            }
     except Exception as e:
         return {"service": service_id, "status": "error", "error": str(e)}
 
@@ -91,7 +95,11 @@ async def _benchmark_one_asr(service_id: str, url: str, rounds: int) -> dict:
         provider = create_asr_provider(service_id)
         available = await provider.is_available()
         if not available:
-            return {"service": service_id, "status": "unavailable"}
+            return {
+                "service": service_id,
+                "status": "skipped",
+                "reason": "service unavailable",
+            }
     except Exception as e:
         return {"service": service_id, "status": "error", "error": str(e)}
 
@@ -225,7 +233,7 @@ async def _benchmark_one_llm(provider_id: str, rounds: int) -> dict:
 @router.post("/tts")
 async def benchmark_tts(rounds: int = 3, services: list[str] | None = None):
     """基准测试所有或指定的 TTS 服务。跳过未配置/不可用的服务。"""
-    target_services = services or ["edge_tts", "vibevoice", "fireredtts", "openvoice", "cosyvoice"]
+    target_services = services or ["chattts", "edge_tts", "vibevoice", "fireredtts", "openvoice", "cosyvoice"]
     results = await asyncio.gather(
         *[_benchmark_one_tts(svc, LOCAL_SERVICE_DEFAULTS.get(svc, {}).get("url", ""), rounds) for svc in target_services]
     )

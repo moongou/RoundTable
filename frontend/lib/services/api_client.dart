@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../models/config_models.dart';
+import '../models/discussion_models.dart';
 
 /// REST API 客户端，用于与后端通信
 class ApiClient {
@@ -122,6 +123,27 @@ class ApiClient {
   /// 删除会话
   Future<void> deleteSession(String sessionId) async {
     await _dio.delete('/api/v1/sessions/$sessionId');
+  }
+
+  /// 让后端使用当前 LLM 配置提炼“今日金句”。
+  Future<List<String>> generateGoldenQuotes({
+    required String topic,
+    required List<ChatMessage> messages,
+    int maxQuotes = 4,
+  }) async {
+    final response = await _dio.post('/api/v1/sessions/golden-quotes', data: {
+      'topic': topic,
+      'messages': messages
+          .map((message) => {
+                'source': message.source,
+                'content': message.content,
+                'type': message.type,
+              })
+          .toList(growable: false),
+      'max_quotes': maxQuotes,
+    });
+    final data = Map<String, dynamic>.from(response.data as Map);
+    return List<String>.from(data['quotes'] ?? const <String>[]);
   }
 
   // ── 配置 API ──────────────────────────────────────────────────────────────

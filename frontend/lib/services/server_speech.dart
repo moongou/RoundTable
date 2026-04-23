@@ -18,16 +18,19 @@ import 'speech_contract.dart';
 /// 服务器端 TTS 实现：调用 POST /api/v1/voice/tts 获取音频并播放
 class ServerTtsService implements TtsService {
   final String serverUrl;
+  final String providerId;
   final Dio _dio;
   bool _isSpeaking = false;
   html.AudioElement? _audioElement;
   Completer<void>? _pendingCompleter;
 
-  ServerTtsService({this.serverUrl = 'http://localhost:8001'})
-      : _dio = Dio(BaseOptions(
+  ServerTtsService({
+    this.serverUrl = 'http://localhost:8001',
+    this.providerId = 'edge_tts',
+  }) : _dio = Dio(BaseOptions(
           baseUrl: serverUrl,
           connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 30),
+          receiveTimeout: const Duration(seconds: 10),
           responseType: ResponseType.bytes,
         ));
 
@@ -56,6 +59,7 @@ class ServerTtsService implements TtsService {
         '/api/v1/voice/tts',
         data: {
           'text': text,
+          'provider': providerId,
           'voice': voice ?? 'alloy',
           if (rate != 1.0) 'speed': rate,
         },
@@ -63,7 +67,9 @@ class ServerTtsService implements TtsService {
       );
 
       final audioBytes = Uint8List.fromList(response.data!);
-      final blob = html.Blob([audioBytes], 'audio/mpeg');
+      final contentType =
+          response.headers.value('content-type') ?? 'audio/mpeg';
+      final blob = html.Blob([audioBytes], contentType);
       final url = html.Url.createObjectUrlFromBlob(blob);
 
       _audioElement = html.AudioElement()
@@ -133,7 +139,7 @@ class ServerAsrService implements AsrService {
       : _dio = Dio(BaseOptions(
           baseUrl: serverUrl,
           connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 60),
+          receiveTimeout: const Duration(seconds: 10),
         ));
 
   @override
@@ -245,7 +251,7 @@ class ServerAsrService implements AsrService {
         return;
       }
 
-      // 上传到 ASR 端点，带 12 秒超时
+      // 上传到 ASR 端点，带 10 秒超时
       final formData = FormData.fromMap({
         'audio': MultipartFile.fromBytes(audioData, filename: 'audio.webm'),
         'format': 'webm',
@@ -253,8 +259,8 @@ class ServerAsrService implements AsrService {
 
       final response = await _dio
           .post('/api/v1/voice/asr', data: formData)
-          .timeout(const Duration(seconds: 12), onTimeout: () {
-        throw TimeoutException('语音识别请求超时（12秒），请检查网络或 ASR 服务状态');
+          .timeout(const Duration(seconds: 10), onTimeout: () {
+        throw TimeoutException('语音识别请求超时（10秒），请检查网络或 ASR 服务状态');
       });
 
       final text = response.data['text'] as String? ?? '';

@@ -320,7 +320,7 @@ class GatewayTtsService implements TtsService {
   }) : _dio = Dio(BaseOptions(
           baseUrl: gatewayUrl,
           connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 60),
+          receiveTimeout: const Duration(seconds: 10),
           responseType: ResponseType.bytes,
         ));
 
@@ -452,6 +452,7 @@ class GatewayTtsService implements TtsService {
       await completer.future;
     } catch (e) {
       _isSpeaking = false;
+      rethrow;
     }
   }
 

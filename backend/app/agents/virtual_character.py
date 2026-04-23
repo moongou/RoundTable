@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from autogen_agentchat.agents import AssistantAgent
+from autogen_core.memory import Memory
 from autogen_core.models import ChatCompletionClient
 
 from app.agents.character_templates import get_template
@@ -15,6 +18,7 @@ def create_virtual_character(
     model_client: ChatCompletionClient,
     topic: str,
     participant_names: list[str] | None = None,
+    memory: Sequence[Memory] | None = None,
 ) -> AssistantAgent:
     """从模板创建虚拟角色 Agent。
 
@@ -86,6 +90,7 @@ def create_virtual_character(
         system_message=system_message,
         description=template.description,
         model_client_stream=True,
+        memory=memory,
     )
 
 
@@ -94,6 +99,7 @@ def create_thinker_agent(
     model_client: ChatCompletionClient,
     topic: str,
     participant_names: list[str] | None = None,
+    memory: Sequence[Memory] | None = None,
 ) -> AssistantAgent:
     """从思想家数据创建 Agent。
 
@@ -170,4 +176,5 @@ def create_thinker_agent(
         system_message=system_message,
         description=description,
         model_client_stream=True,
+        memory=memory,
     )

@@ -9,6 +9,7 @@ import logging
 
 from app.config import LOCAL_SERVICE_DEFAULTS, settings
 from app.voice.base import ASRProvider, TTSProvider
+from app.voice.chattts import ChatTTSProvider
 from app.voice.cosyvoice import CosyVoiceProvider
 from app.voice.edge_tts import EdgeTTSProvider
 from app.voice.gateway import GatewayASRProvider, GatewayTTSProvider
@@ -29,12 +30,16 @@ def create_tts_provider(provider_id: str | None = None) -> TTSProvider:
     """
     pid = provider_id or settings.tts_provider
 
-    if pid == "edge_tts":
+    if pid == "chattts":
+        return ChatTTSProvider(
+            base_url=settings.chattts_url or "http://localhost:9998",
+        )
+    elif pid == "edge_tts":
         return EdgeTTSProvider(
-            base_url=settings.tts_url or "http://localhost:5051",
+            base_url=settings.edge_tts_url or settings.tts_url or "http://localhost:5051",
         )
     elif pid == "cosyvoice":
-        url = settings.tts_url or "http://localhost:50000"
+        url = settings.cosyvoice_url or "http://localhost:50000"
         return CosyVoiceProvider(base_url=url)
     elif pid == "openai_tts":
         return OpenAITTSProvider(
@@ -64,7 +69,9 @@ def create_tts_provider_with_url(provider_id: str, base_url: str = "") -> TTSPro
 
     url = base_url or LOCAL_SERVICE_DEFAULTS.get(provider_id, {}).get("url", "")
 
-    if provider_id == "edge_tts":
+    if provider_id == "chattts":
+        return ChatTTSProvider(base_url=url or "http://localhost:9998")
+    elif provider_id == "edge_tts":
         return EdgeTTSProvider(base_url=url or "http://localhost:5051")
     elif provider_id == "cosyvoice":
         return CosyVoiceProvider(base_url=url or "http://localhost:50000")

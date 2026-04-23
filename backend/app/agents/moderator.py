@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from autogen_agentchat.agents import AssistantAgent
+from autogen_core.memory import Memory
 from autogen_core.models import ChatCompletionClient
 
 MODERATOR_SYSTEM_PROMPT = """你是"李老师"，一场圆桌讨论的**主持人兼流程指挥者**。
@@ -86,6 +89,7 @@ def create_moderator(
     student_names: list[str] | None = None,
     thinker_names: list[str] | None = None,
     human_names: list[str] | None = None,
+    memory: Sequence[Memory] | None = None,
 ) -> AssistantAgent:
     """创建主持人 Agent。
 
@@ -122,4 +126,5 @@ def create_moderator(
         system_message=system_message,
         description="讨论主持人李老师，负责引导讨论流程、点名和总结观点",
         model_client_stream=True,
+        memory=memory,
     )

@@ -935,7 +935,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       if (!asr.isAvailable) {
         return {
           'service': 'browser',
-          'status': 'unavailable',
+          'status': 'skipped',
+          'reason': 'browser asr unavailable',
           'error': '浏览器原生 ASR 当前不可用',
           'note': '受浏览器实现与权限策略影响',
         };
