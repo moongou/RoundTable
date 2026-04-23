@@ -108,8 +108,8 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
         return FunASRProvider(base_url=configured_url)
     elif pid == "openai_whisper":
         return OpenAIWhisperProvider(
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key,
+            base_url=settings.openai_whisper_base_url or settings.openai_base_url,
+            api_key=settings.openai_whisper_api_key or settings.openai_api_key,
         )
     elif pid in ("capswriter", "vosk"):
         return GatewayASRProvider(service=pid)

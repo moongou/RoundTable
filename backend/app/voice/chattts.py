@@ -107,7 +107,12 @@ class ChatTTSProvider(TTSProvider):
         except Exception:
             return False
 
-    async def synthesize(self, text: str, voice: str = "alloy") -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str = "alloy",
+        speed: float = 1.0,
+    ) -> bytes:
         content = (text or "").strip()
         if not content:
             raise RuntimeError("ChatTTS text is empty")

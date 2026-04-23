@@ -22,7 +22,12 @@ class OpenAITTSProvider(TTSProvider):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
 
-    async def synthesize(self, text: str, voice: str = "alloy") -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str = "alloy",
+        speed: float = 1.0,
+    ) -> bytes:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -34,6 +39,8 @@ class OpenAITTSProvider(TTSProvider):
             "voice": voice,
             "response_format": "mp3",
         }
+        if speed != 1.0:
+            payload["speed"] = speed
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -75,10 +77,22 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   bool _runningDeepVoiceTest = false;
   Map<String, dynamic>? _deepVoiceTestResult;
 
+  // Interactive ASR/TTS diagnostics
+  AsrService? _interactiveAsrService;
+  StreamSubscription<AsrResult>? _interactiveAsrSub;
+  TtsService? _interactiveTtsService;
+  bool _interactiveAsrRunning = false;
+  bool _interactiveTtsRunning = false;
+  String _interactiveAsrText = '';
+  String? _interactiveAsrError;
+  String? _interactiveTtsStatus;
+  String? _interactiveTtsError;
+  final TextEditingController _interactiveTtsTextCtrl =
+      TextEditingController(text: '你好，这是一段设置页里的合成试听文本。');
+
   String _interactionModeLabel(LocalSettings s) {
     if (!s.pushToTalk) return '自由对话';
-    if (s.micControlMode == 'hold_ctrl') return '按住 Ctrl 说话';
-    return '双击 Ctrl 开关录音';
+    return '按住 Ctrl 说话';
   }
 
   @override
@@ -100,10 +114,14 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     _tabController.dispose();
     _serverUrlCtrl.dispose();
     _tavilyKeyCtrl.dispose();
+    _interactiveTtsTextCtrl.dispose();
     _aiScrollCtrl.dispose();
     _asrScrollCtrl.dispose();
     _ttsScrollCtrl.dispose();
     _generalScrollCtrl.dispose();
+    _interactiveAsrSub?.cancel();
+    _interactiveAsrService?.dispose();
+    _interactiveTtsService?.dispose();
     for (final c in [
       ..._apiKeyCtrl.values,
       ..._baseUrlCtrl.values,
@@ -335,22 +353,41 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ),
       );
     } catch (e) {
-      _snackErr('验证失败: $e');
+      if (!mounted) return;
+      _snackErr('校验失败: $e');
     }
   }
 
   Future<void> _testVoice(SpeechProviderInfo p) async {
-    setState(() => _testingVoice[p.id] = true);
+    setState(() {
+      _testingVoice[p.id] = true;
+      _voiceTestResult[p.id] = null;
+    });
+    final url = _voiceUrlCtrl[p.id]?.text.trim();
+    final apiKey = _voiceKeyCtrl[p.id]?.text.trim();
     try {
       final result = await ref.read(apiClientProvider).testVoiceService(
             service: p.id,
-            url: _voiceUrlCtrl[p.id]?.text.trim(),
-            apiKey: _voiceKeyCtrl[p.id]?.text.trim(),
+            url: url,
+            apiKey: apiKey,
           );
-      setState(() => _voiceTestResult[p.id] = result);
+      setState(() {
+        _voiceTestResult[p.id] = result;
+        if (result.success &&
+            result.voices.isNotEmpty &&
+            !result.voices.contains(_selectedVoice[p.id])) {
+          _selectedVoice[p.id] = result.voices.first;
+        }
+      });
     } catch (e) {
-      setState(() => _voiceTestResult[p.id] = VoiceServiceTestResult(
-          success: false, voices: [], url: '', error: e.toString()));
+      setState(() {
+        _voiceTestResult[p.id] = VoiceServiceTestResult(
+          success: false,
+          voices: const [],
+          url: url ?? p.url,
+          error: e.toString(),
+        );
+      });
     } finally {
       setState(() => _testingVoice[p.id] = false);
     }
@@ -545,6 +582,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
 
   Widget _buildAsrTab(
       LocalSettings s, AsyncValue speechAsync, AsyncValue healthAsync) {
+    final speechConfig = speechAsync.valueOrNull is SpeechConfig
+        ? speechAsync.valueOrNull as SpeechConfig
+        : null;
     return ListView(
       controller: _asrScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -553,7 +593,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         const SizedBox(height: 14),
         _buildAsrBenchmarkSection(),
         const SizedBox(height: 14),
-        _buildVoiceServiceTestSection(type: 'asr'),
+        _buildVoiceServiceTestSection(
+          type: 'asr',
+          settings: s,
+          speechConfig: speechConfig,
+        ),
         const SizedBox(height: 32),
       ],
     );
@@ -561,6 +605,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
 
   Widget _buildTtsTab(
       LocalSettings s, AsyncValue speechAsync, AsyncValue healthAsync) {
+    final speechConfig = speechAsync.valueOrNull is SpeechConfig
+        ? speechAsync.valueOrNull as SpeechConfig
+        : null;
     return ListView(
       controller: _ttsScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -569,7 +616,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         const SizedBox(height: 14),
         _buildTtsBenchmarkSection(),
         const SizedBox(height: 14),
-        _buildVoiceServiceTestSection(type: 'tts'),
+        _buildVoiceServiceTestSection(
+          type: 'tts',
+          settings: s,
+          speechConfig: speechConfig,
+        ),
         const SizedBox(height: 32),
       ],
     );
@@ -688,22 +739,23 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildVoiceServiceTestSection({required String type}) => _Section(
+  Widget _buildVoiceServiceTestSection({
+    required String type,
+    required LocalSettings settings,
+    required SpeechConfig? speechConfig,
+  }) =>
+      _Section(
         title: '独立服务测试',
         icon: Icons.science_outlined,
         children: [
           Wrap(
             spacing: 8,
             runSpacing: 8,
-            children: (type == 'asr'
-                    ? ['capswriter', 'vosk', 'funasr']
-                    : [
-                        'edge_tts',
-                        'vibevoice',
-                        'fireredtts',
-                        'openvoice',
-                        'cosyvoice'
-                      ])
+            children: _serviceTestProviderIds(
+              type: type,
+              settings: settings,
+              speechConfig: speechConfig,
+            )
                 .map((svc) => _OutBtn(
                       svc,
                       onTap: _testingVoiceService
@@ -816,8 +868,171 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                       ),
               ),
             ),
+          const SizedBox(height: 12),
+          _buildInteractiveVoiceDiagnosticCard(
+            type: type,
+            settings: settings,
+            speechConfig: speechConfig,
+          ),
         ],
       );
+
+  Widget _buildInteractiveVoiceDiagnosticCard({
+    required String type,
+    required LocalSettings settings,
+    required SpeechConfig? speechConfig,
+  }) {
+    final providerId =
+        type == 'asr' ? settings.asrProvider : settings.ttsProvider;
+    final providerUrl = _resolveSpeechProviderUrl(
+      speechConfig,
+      providerId,
+      isAsr: type == 'asr',
+    );
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.22),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: AppColors.warmGray.withValues(alpha: 0.2),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            type == 'asr' ? '实机录音测试' : '实机试听测试',
+            style: const TextStyle(
+              color: AppColors.warmWhite,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            type == 'asr'
+                ? '直接调用当前启用的 ${providerId.toUpperCase()}，你可以当场确认是不是“真能听见你说话”。'
+                : '直接调用当前启用的 ${providerId.toUpperCase()}，你可以当场确认是不是“真能播出声音”。',
+            style: const TextStyle(color: AppColors.warmGray, fontSize: 11),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            providerUrl.isEmpty ? '当前地址：跟随后端默认配置' : '当前地址：$providerUrl',
+            style: const TextStyle(color: AppColors.warmGray, fontSize: 11),
+          ),
+          const SizedBox(height: 10),
+          if (type == 'asr') ...[
+            Row(
+              children: [
+                _OutBtn(
+                  _interactiveAsrRunning ? '结束并整理文本' : '开始录一段',
+                  onTap: () =>
+                      _toggleInteractiveAsrTest(settings, speechConfig),
+                  loading: false,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _interactiveAsrRunning
+                        ? '正在监听，请说一句完整的话后再点一次结束。'
+                        : '建议先说一句完整短句，便于判断是权限问题还是服务问题。',
+                    style: const TextStyle(
+                        color: AppColors.warmGray, fontSize: 11),
+                  ),
+                ),
+              ],
+            ),
+            if (_interactiveAsrText.trim().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: SelectableText(
+                  _interactiveAsrText,
+                  style: const TextStyle(
+                    color: AppColors.warmWhite,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            if (_interactiveAsrError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '识别错误：$_interactiveAsrError',
+                  style: const TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+          ] else ...[
+            TextField(
+              controller: _interactiveTtsTextCtrl,
+              minLines: 2,
+              maxLines: 3,
+              style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
+              decoration: InputDecoration(
+                hintText: '输入一段要试听的文本…',
+                hintStyle:
+                    const TextStyle(color: AppColors.warmGray, fontSize: 12),
+                filled: true,
+                fillColor: AppColors.studyWall,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: AppColors.warmGray),
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _OutBtn(
+                  _interactiveTtsRunning ? '停止试听' : '立即试听',
+                  onTap: () =>
+                      _toggleInteractiveTtsTest(settings, speechConfig),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _interactiveTtsRunning
+                        ? '正在播放，请直接确认当前扬声器有没有声音。'
+                        : '这一步是真正的播放，不只是测速接口。',
+                    style: const TextStyle(
+                        color: AppColors.warmGray, fontSize: 11),
+                  ),
+                ),
+              ],
+            ),
+            if (_interactiveTtsStatus != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  _interactiveTtsStatus!,
+                  style: const TextStyle(
+                    color: AppColors.warmWhite,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            if (_interactiveTtsError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '试听错误：$_interactiveTtsError',
+                  style: const TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
 
   Widget _buildBenchmarkResults(Map<String, dynamic> data) {
     final results = (data['results'] as List<dynamic>?) ?? [];
@@ -1056,6 +1271,317 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     }
   }
 
+  String _resolveSpeechProviderUrl(
+    SpeechConfig? speechConfig,
+    String providerId, {
+    required bool isAsr,
+  }) {
+    final manualUrl = _voiceUrlCtrl[providerId]?.text.trim() ?? '';
+    if (manualUrl.isNotEmpty) return manualUrl;
+    final providers = isAsr
+        ? (speechConfig?.asrProviders ?? const <SpeechProviderInfo>[])
+        : (speechConfig?.ttsProviders ?? const <SpeechProviderInfo>[]);
+    for (final provider in providers) {
+      if (provider.id == providerId) {
+        if (provider.url.trim().isNotEmpty) return provider.url.trim();
+        if (provider.defaultUrl.trim().isNotEmpty) {
+          return provider.defaultUrl.trim();
+        }
+      }
+    }
+    return '';
+  }
+
+  List<String> _serviceTestProviderIds({
+    required String type,
+    required LocalSettings settings,
+    required SpeechConfig? speechConfig,
+  }) {
+    final providers = type == 'asr'
+        ? (speechConfig?.asrProviders ?? const <SpeechProviderInfo>[])
+        : (speechConfig?.ttsProviders ?? const <SpeechProviderInfo>[]);
+    final activeId =
+        type == 'asr' ? settings.asrProvider : settings.ttsProvider;
+    final ordered = <String>[];
+
+    void addProvider(String providerId) {
+      if (providerId == 'disabled' || providerId == 'browser') return;
+      if (!ordered.contains(providerId)) {
+        ordered.add(providerId);
+      }
+    }
+
+    addProvider(activeId);
+    for (final provider in providers) {
+      addProvider(provider.id);
+    }
+
+    if (ordered.isEmpty) {
+      return type == 'asr'
+          ? <String>['capswriter', 'vosk', 'funasr', 'openai_whisper']
+          : <String>[
+              'edge_tts',
+              'vibevoice',
+              'fireredtts',
+              'openvoice',
+              'cosyvoice'
+            ];
+    }
+
+    return ordered;
+  }
+
+  List<SpeechProviderInfo> _interactiveAsrCandidates(
+    LocalSettings settings,
+    SpeechConfig? speechConfig,
+  ) {
+    final providers =
+        speechConfig?.asrProviders ?? const <SpeechProviderInfo>[];
+    if (providers.isEmpty) {
+      return const <SpeechProviderInfo>[];
+    }
+
+    final ordered = <SpeechProviderInfo>[];
+
+    void addProvider(SpeechProviderInfo provider) {
+      if (provider.id == 'disabled') return;
+      if (ordered.any((item) => item.id == provider.id)) return;
+      ordered.add(provider);
+    }
+
+    for (final provider in providers) {
+      if (provider.id == settings.asrProvider) {
+        addProvider(provider);
+      }
+    }
+    for (final provider in providers) {
+      if (provider.available) {
+        addProvider(provider);
+      }
+    }
+    for (final provider in providers) {
+      addProvider(provider);
+    }
+
+    return ordered;
+  }
+
+  String? _resolveInteractiveVoice(
+      String providerId, SpeechConfig? speechConfig) {
+    final selected = _selectedVoice[providerId]?.trim();
+    if (selected != null && selected.isNotEmpty) {
+      return selected;
+    }
+    if (providerId == 'cosyvoice') {
+      return speechConfig?.cosyvoiceVoice;
+    }
+    return speechConfig?.ttsVoice;
+  }
+
+  Future<void> _stopInteractiveAsrTest() async {
+    final service = _interactiveAsrService;
+    if (service == null) return;
+
+    try {
+      await service.stopListening();
+    } catch (_) {}
+
+    // 给最后一帧最终文本一个极短的落地时间，避免页面比流式回调更早收尾。
+    await Future.delayed(const Duration(milliseconds: 150));
+
+    var refinedText = _interactiveAsrText.trim();
+    if (refinedText.isNotEmpty) {
+      try {
+        refinedText = await service.refineTranscript(refinedText);
+      } catch (_) {}
+    }
+
+    await _interactiveAsrSub?.cancel();
+    _interactiveAsrSub = null;
+    service.dispose();
+
+    if (!mounted) return;
+    setState(() {
+      _interactiveAsrService = null;
+      _interactiveAsrRunning = false;
+      _interactiveAsrText = refinedText;
+    });
+
+    if (refinedText.isEmpty && (_interactiveAsrError?.trim().isEmpty ?? true)) {
+      _snackErr('没有收到识别结果，请检查麦克风权限或 ASR 服务配置。');
+    }
+  }
+
+  Future<void> _toggleInteractiveAsrTest(
+    LocalSettings settings,
+    SpeechConfig? speechConfig,
+  ) async {
+    if (_interactiveAsrRunning) {
+      await _stopInteractiveAsrTest();
+      return;
+    }
+
+    final serverUrl = _serverUrlCtrl.text.trim().isNotEmpty
+        ? _serverUrlCtrl.text.trim()
+        : settings.serverUrl;
+    final candidates = _interactiveAsrCandidates(settings, speechConfig);
+    if (candidates.isEmpty) {
+      _snackErr('当前没有可测试的 ASR 服务。');
+      return;
+    }
+
+    Object? lastError;
+    String? startedProviderId;
+
+    for (final candidate in candidates) {
+      final providerId = candidate.id;
+      final providerUrl =
+          _resolveSpeechProviderUrl(speechConfig, providerId, isAsr: true);
+      final asr = createAsrService(
+        providerId,
+        serverUrl: serverUrl,
+        providerUrl: providerUrl,
+        preferServerProxy: providerId != 'browser',
+      );
+
+      if (!candidate.available && providerId != 'browser') {
+        asr.dispose();
+        lastError = StateError('$providerId 当前不可用');
+        continue;
+      }
+
+      await _interactiveAsrSub?.cancel();
+      _interactiveAsrSub = asr.transcriptionStream.listen(
+        (result) {
+          final nextText = result.text.trim();
+          if (nextText.isEmpty || !mounted) return;
+          setState(() {
+            _interactiveAsrText = nextText;
+            if (result.isFinal) {
+              _interactiveAsrError = null;
+            }
+          });
+        },
+        onError: (error) {
+          if (!mounted) return;
+          setState(() {
+            _interactiveAsrError = error.toString();
+          });
+        },
+      );
+
+      setState(() {
+        _interactiveAsrService = asr;
+        _interactiveAsrRunning = true;
+        _interactiveAsrText = '';
+        _interactiveAsrError = null;
+      });
+
+      try {
+        await asr.warmup();
+        if (!asr.isAvailable) {
+          throw StateError('$providerId 当前不可用');
+        }
+        await asr.startListening();
+        await Future.delayed(const Duration(milliseconds: 250));
+        if (!asr.isListening) {
+          throw StateError('语音识别启动失败');
+        }
+        startedProviderId = providerId;
+        break;
+      } catch (e) {
+        lastError = e;
+        await _interactiveAsrSub?.cancel();
+        _interactiveAsrSub = null;
+        asr.dispose();
+        if (!mounted) return;
+        setState(() {
+          _interactiveAsrService = null;
+          _interactiveAsrRunning = false;
+          _interactiveAsrError = e.toString();
+        });
+      }
+    }
+
+    if (startedProviderId == null) {
+      _snackErr('语音识别启动失败: ${lastError ?? '没有可用服务'}');
+      return;
+    }
+
+    if (startedProviderId != settings.asrProvider) {
+      _snack('当前首选 ASR 不可用，已临时切换到 ${startedProviderId.toUpperCase()} 进行测试。');
+    }
+  }
+
+  Future<void> _toggleInteractiveTtsTest(
+    LocalSettings settings,
+    SpeechConfig? speechConfig,
+  ) async {
+    if (_interactiveTtsRunning) {
+      try {
+        await _interactiveTtsService?.stop();
+      } catch (_) {}
+      _interactiveTtsService?.dispose();
+      if (!mounted) return;
+      setState(() {
+        _interactiveTtsService = null;
+        _interactiveTtsRunning = false;
+        _interactiveTtsStatus = '已停止试听';
+      });
+      return;
+    }
+
+    final sampleText = _interactiveTtsTextCtrl.text.trim();
+    if (sampleText.isEmpty) {
+      _snackErr('请先输入一段要试听的文本。');
+      return;
+    }
+
+    final serverUrl = _serverUrlCtrl.text.trim().isNotEmpty
+        ? _serverUrlCtrl.text.trim()
+        : settings.serverUrl;
+    final providerId = settings.ttsProvider;
+    final providerUrl =
+        _resolveSpeechProviderUrl(speechConfig, providerId, isAsr: false);
+    final tts = createTtsService(
+      providerId,
+      serverUrl: serverUrl,
+      providerUrl: providerUrl,
+    );
+
+    setState(() {
+      _interactiveTtsService = tts;
+      _interactiveTtsRunning = true;
+      _interactiveTtsError = null;
+      _interactiveTtsStatus = '正在播放 ${providerId.toUpperCase()} 试听…';
+    });
+
+    try {
+      await tts.speak(
+        sampleText,
+        voice: _resolveInteractiveVoice(providerId, speechConfig),
+      );
+      if (!mounted) return;
+      setState(() {
+        _interactiveTtsStatus = '试听完成，可直接判断当前 TTS 是否真正有声。';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _interactiveTtsError = e.toString();
+        _interactiveTtsStatus = null;
+      });
+    } finally {
+      tts.dispose();
+      if (mounted) {
+        setState(() {
+          _interactiveTtsService = null;
+          _interactiveTtsRunning = false;
+        });
+      }
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   //  Section builders (reused by tabs)
   // ─────────────────────────────────────────────────────────────────────────
@@ -1170,28 +1696,27 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                           fontSize: 12,
                           fontWeight: FontWeight.w600)),
                   const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      ChoiceChip(
-                        label: const Text('双击 Ctrl 开关录音'),
-                        selected: s.micControlMode == 'double_ctrl',
-                        onSelected: (_) async {
-                          await ref
-                              .read(localSettingsProvider.notifier)
-                              .setMicControlMode('double_ctrl');
-                        },
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.12),
                       ),
-                      ChoiceChip(
-                        label: const Text('按住 Ctrl 说话'),
-                        selected: s.micControlMode == 'hold_ctrl',
-                        onSelected: (_) async {
-                          await ref
-                              .read(localSettingsProvider.notifier)
-                              .setMicControlMode('hold_ctrl');
-                        },
+                    ),
+                    child: Text(
+                      '已固定为按住 Ctrl 开始、松开 Ctrl 结束。会话页右侧“讲话”按钮支持单击开始、再次单击结束；当 Ctrl 正在接管发言时，按钮只同步显示红色状态，不再响应点击。',
+                      style: TextStyle(
+                        color: AppColors.warmWhite.withValues(alpha: 0.82),
+                        fontSize: 12,
+                        height: 1.4,
                       ),
-                    ],
+                    ),
                   ),
                 ],
               ),
@@ -1495,10 +2020,19 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     final testing = _testingVoice[p.id] ?? false;
     final vResult = _voiceTestResult[p.id];
 
-    // 可用性指示点（浏览器/禁用始终绿色；本地/云服务按探测结果）
+    // 只有真正可用的服务才显示绿标；缺少 API Key、未启动或禁用时统一白标。
+    final hasRequiredApiKey = !p.needsApiKey || p.hasApiKey;
+    final isOperational =
+        p.id != 'disabled' && p.available && hasRequiredApiKey;
     final availColor =
-        p.available ? const Color(0xFF4CAF50) : const Color(0xFFBDBDBD);
-    final availTip = p.available ? '服务可用' : '服务不可用或未启动';
+        isOperational ? const Color(0xFF4CAF50) : AppColors.warmWhite;
+    final availTip = p.id == 'disabled'
+        ? '当前未启用该功能'
+        : !hasRequiredApiKey
+            ? '缺少 API Key，当前不可用'
+            : isOperational
+                ? '功能正常'
+                : '服务不可用或未启动';
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
@@ -2164,6 +2698,16 @@ class _TopicsTabState extends State<_TopicsTab> {
   bool _loading = true;
   final TextEditingController _inputCtrl = TextEditingController();
 
+  void _showSnack(String message, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: error ? Colors.red : null,
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2187,15 +2731,24 @@ class _TopicsTabState extends State<_TopicsTab> {
 
   Future<void> _add() async {
     final t = _inputCtrl.text.trim();
-    if (t.isEmpty) return;
+    if (t.isEmpty) {
+      _showSnack('请先输入一个话题。', error: true);
+      return;
+    }
+    if (_items.contains(t)) {
+      _showSnack('这个话题已经在列表里了。', error: true);
+      return;
+    }
     await SavedTopicsStore.add(t);
     _inputCtrl.clear();
     await _load();
+    _showSnack('已添加话题：$t');
   }
 
   Future<void> _remove(String t) async {
     await SavedTopicsStore.remove(t);
     await _load();
+    _showSnack('已删除话题：$t');
   }
 
   @override
@@ -2214,6 +2767,11 @@ class _TopicsTabState extends State<_TopicsTab> {
           style: TextStyle(color: AppColors.warmGray, fontSize: 12),
         ),
         const SizedBox(height: 16),
+        Text(
+          '已保存 ${_items.length} 个话题',
+          style: const TextStyle(color: AppColors.amberGold, fontSize: 12),
+        ),
+        const SizedBox(height: 8),
         Row(children: [
           Expanded(
             child: TextField(
@@ -2239,13 +2797,18 @@ class _TopicsTabState extends State<_TopicsTab> {
           ElevatedButton.icon(
             onPressed: _add,
             icon: const Icon(Icons.add, size: 16),
-            label: const Text('添加'),
+            label: const Text('添加到列表'),
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.amberGold,
               foregroundColor: Colors.black,
             ),
           ),
         ]),
+        const SizedBox(height: 8),
+        const Text(
+          '输入后按回车或点击右侧按钮即可保存，保存后会同步出现在首页自由话题候选区。',
+          style: TextStyle(color: AppColors.warmGray, fontSize: 11),
+        ),
         const SizedBox(height: 18),
         if (_items.isEmpty)
           const Padding(

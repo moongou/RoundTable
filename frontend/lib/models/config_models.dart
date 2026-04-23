@@ -306,7 +306,7 @@ class LocalSettings {
     this.asrProvider = 'funasr',
     this.ttsProvider = 'edge_tts',
     this.pushToTalk = true,
-    this.micControlMode = 'double_ctrl',
+    this.micControlMode = 'hold_ctrl',
   });
 
   LocalSettings copyWith({

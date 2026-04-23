@@ -37,6 +37,11 @@ class _TeamStub:
         self.resumed = True
 
 
+class _SafetyFilterStub:
+    async def filter_or_rewrite(self, content: str) -> str:
+        return content
+
+
 @pytest.mark.asyncio
 async def test_rolling_summary_memory_injects_recent_three_turns() -> None:
     memory = RollingSummaryMemory()
@@ -114,7 +119,7 @@ def test_sanitize_all_references_rewrites_first_turn_and_self_reference() -> Non
         team=_TeamStub(),
         ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
         human_agents=[SimpleNamespace(name='豆苗')],
-        safety_filter=SimpleNamespace(),
+        safety_filter=_SafetyFilterStub(),
     )
     floor_manager.set_display_name_map(
         {
@@ -162,6 +167,31 @@ def test_sanitize_all_references_removes_unspoken_direct_quote() -> None:
     assert sanitized == '小探同学，你怎么看？'
 
 
+def test_sanitize_all_references_rewrites_unspoken_past_attribution_clause() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+
+    floor_manager._recent_display_speakers = ['李老师', '小探']
+    sanitized = floor_manager._sanitize_all_references(
+        'explorer',
+        '豆苗刚才讲到的这个角度，也提醒我们先别急着下结论。',
+    )
+
+    assert '豆苗' not in sanitized
+    assert '有同学刚才讲到的这个角度' in sanitized
+
+
 @pytest.mark.asyncio
 async def test_skip_turn_is_not_tracked_as_spoken_reference() -> None:
     floor_manager = FloorManager(
@@ -172,7 +202,7 @@ async def test_skip_turn_is_not_tracked_as_spoken_reference() -> None:
             SimpleNamespace(name='skeptic'),
         ],
         human_agents=[SimpleNamespace(name='豆苗')],
-        safety_filter=SimpleNamespace(),
+        safety_filter=_SafetyFilterStub(),
     )
     floor_manager.set_display_name_map(
         {

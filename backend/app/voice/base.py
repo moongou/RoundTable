@@ -12,12 +12,18 @@ class TTSProvider(ABC):
     """文本转语音（TTS）提供商抽象基类。"""
 
     @abstractmethod
-    async def synthesize(self, text: str, voice: str = "alloy") -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str = "alloy",
+        speed: float = 1.0,
+    ) -> bytes:
         """将文本合成为语音音频。
 
         Args:
             text: 要合成的文本。
             voice: 语音标识（如角色音色名、alloy 等）。
+            speed: 语速倍率，默认 1.0。
 
         Returns:
             音频字节数据（MP3 格式）。

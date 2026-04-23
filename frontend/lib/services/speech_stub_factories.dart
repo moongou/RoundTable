@@ -90,6 +90,7 @@ AsrService createWebAsrService(
   String providerId, {
   required String serverUrl,
   String? providerUrl,
+  bool preferServerProxy = false,
 }) {
   return _NoopAsrService();
 }

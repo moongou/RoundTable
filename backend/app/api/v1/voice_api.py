@@ -11,9 +11,11 @@ from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.voice.factory import create_asr_provider, create_tts_provider
+from app.voice.openvoice_profiles import openvoice_profile_for_character_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +23,6 @@ router = APIRouter(prefix="/voice", tags=["voice"])
 
 
 # ── 请求/响应模型 ────────────────────────────────────────────────────────────
-
-from pydantic import BaseModel
 
 
 class TTSRequest(BaseModel):
@@ -32,6 +32,7 @@ class TTSRequest(BaseModel):
     provider: Optional[str] = None
     voice: str = "alloy"
     character_id: Optional[str] = None
+    speed: float = Field(default=1.0, ge=0.8, le=1.1)
 
 
 class TTSResponse(BaseModel):
@@ -71,16 +72,23 @@ def _detect_audio_content_type(audio_data: bytes) -> tuple[str, str]:
 
 # ── 角色音色映射 ──────────────────────────────────────────────────────────────
 
-def _get_voice_for_character(character_id: str) -> str:
+def _get_voice_for_character(character_id: str, provider_id: str | None = None) -> str:
     """根据角色 ID 获取对应的 TTS 音色。
 
     如果角色有指定的音色，返回该音色；否则返回默认音色。
     需求14：优先级 思想家 YAML > 角色模板 YAML > 默认。
     """
+    if provider_id == "openvoice":
+        profile_id = openvoice_profile_for_character_id(character_id)
+        if profile_id:
+            return profile_id
+
     try:
         from app.core.thinkers import get_thinker
         thinker = get_thinker(character_id)
         if thinker:
+            if provider_id == "openvoice":
+                return "ov:thinker_elder"
             voice = (thinker.get("voice") or "").strip()
             if voice:
                 return voice
@@ -90,6 +98,10 @@ def _get_voice_for_character(character_id: str) -> str:
         from app.agents.character_templates import load_all_templates
         templates = load_all_templates()
         if character_id in templates:
+            if provider_id == "openvoice":
+                profile_id = openvoice_profile_for_character_id(character_id)
+                if profile_id:
+                    return profile_id
             tpl = templates[character_id]
             voice = getattr(tpl, "voice", "") or ""
             if voice:
@@ -114,7 +126,7 @@ async def text_to_speech(request: TTSRequest) -> Response:
     # 确定音色：角色指定的 > 请求指定的 > 默认值
     voice = request.voice
     if request.character_id:
-        voice = _get_voice_for_character(request.character_id)
+        voice = _get_voice_for_character(request.character_id, request.provider)
 
     try:
         provider = create_tts_provider(request.provider)
@@ -122,7 +134,11 @@ async def text_to_speech(request: TTSRequest) -> Response:
         audio_data: bytes | None = None
         for attempt in range(2):
             try:
-                audio_data = await provider.synthesize(request.text, voice=voice)
+                audio_data = await provider.synthesize(
+                    request.text,
+                    voice=voice,
+                    speed=request.speed,
+                )
                 break
             except Exception as e:
                 last_error = e
@@ -152,6 +168,7 @@ async def text_to_speech(request: TTSRequest) -> Response:
 async def speech_to_text(
     audio: UploadFile = File(...),
     format: str = Form("wav"),
+    provider: Optional[str] = Form(None),
 ) -> ASRResponse:
     """将语音音频转录为文本。
 
@@ -166,15 +183,18 @@ async def speech_to_text(
     if not audio_data:
         raise HTTPException(status_code=400, detail="音频数据为空")
 
+    provider_id = (provider or "").strip() or None
+    effective_provider = provider_id or settings.asr_provider
+
     try:
-        provider = create_asr_provider()
+        provider_impl = create_asr_provider(provider_id)
         # 先检查服务是否可用，避免直接抛出 500
-        if not await provider.is_available():
+        if not await provider_impl.is_available():
             raise HTTPException(
                 status_code=503,
-                detail=f"语音识别服务 ({settings.asr_provider}) 当前不可用，请检查服务是否已启动或在设置中切换其他服务。",
+                detail=f"语音识别服务 ({effective_provider}) 当前不可用，请检查服务是否已启动或在设置中切换其他服务。",
             )
-        text = await provider.transcribe(audio_data, format=format)
+        text = await provider_impl.transcribe(audio_data, format=format)
         return ASRResponse(
             text=text,
             confidence=0.9,  # 本地服务无法提供准确置信度

@@ -105,6 +105,7 @@ class FunASRProvider(ASRProvider):
         async with websockets.connect(
             self.base_url,
             subprotocols=["binary"],
+            proxy=None,
             open_timeout=8.0,
             close_timeout=2.0,
         ) as ws:
@@ -231,6 +232,7 @@ class FunASRProvider(ASRProvider):
                 async with websockets.connect(
                     self.base_url,
                     subprotocols=["binary"],
+                    proxy=None,
                     open_timeout=3.0,
                     close_timeout=1.0,
                 ):

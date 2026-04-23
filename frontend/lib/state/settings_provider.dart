@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -26,6 +27,62 @@ const _prefsKeyTtsProvider = 'tts_provider';
 const _prefsKeyPushToTalk = 'push_to_talk';
 const _prefsKeyMicControlMode = 'mic_control_mode';
 
+bool _hasStoredString(SharedPreferences prefs, String key) {
+  final value = prefs.getString(key);
+  return value != null && value.trim().isNotEmpty;
+}
+
+String _normalizeMicControlMode(String? mode) {
+  return mode?.trim() == 'hold_ctrl' ? 'hold_ctrl' : 'hold_ctrl';
+}
+
+@visibleForTesting
+LocalSettings resolveInitialLocalSettings({
+  required String serverUrl,
+  required String? storedLlmProvider,
+  required String? storedAsrProvider,
+  required String? storedTtsProvider,
+  required bool hasStoredPushToTalk,
+  required bool? storedPushToTalk,
+  required String? storedMicControlMode,
+  CurrentConfig? remoteConfig,
+}) {
+  final normalizedLlmProvider = storedLlmProvider?.trim();
+  final normalizedAsrProvider = storedAsrProvider?.trim();
+  final normalizedTtsProvider = storedTtsProvider?.trim();
+  final normalizedMicControlMode = storedMicControlMode?.trim();
+
+  return LocalSettings(
+    serverUrl: serverUrl,
+    llmProvider: normalizedLlmProvider?.isNotEmpty == true
+        ? normalizedLlmProvider!
+        : 'openai',
+    asrProvider: normalizedAsrProvider?.isNotEmpty == true
+        ? normalizedAsrProvider!
+        : (remoteConfig?.asrProvider.trim().isNotEmpty == true
+            ? remoteConfig!.asrProvider.trim()
+            : 'funasr'),
+    ttsProvider: normalizedTtsProvider?.isNotEmpty == true
+        ? normalizedTtsProvider!
+        : (remoteConfig?.ttsProvider.trim().isNotEmpty == true
+            ? remoteConfig!.ttsProvider.trim()
+            : 'edge_tts'),
+    pushToTalk: hasStoredPushToTalk
+        ? (storedPushToTalk ?? true)
+        : (remoteConfig?.pushToTalk ?? true),
+    micControlMode: _normalizeMicControlMode(normalizedMicControlMode),
+  );
+}
+
+Future<CurrentConfig?> _loadRemoteCurrentConfig(String serverUrl) async {
+  try {
+    final apiClient = ApiClient(baseUrl: serverUrl);
+    return await apiClient.getCurrentConfig();
+  } catch (_) {
+    return null;
+  }
+}
+
 /// 本地设置 Provider（异步加载）
 final localSettingsProvider =
     AsyncNotifierProvider<LocalSettingsNotifier, LocalSettings>(
@@ -36,15 +93,28 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
   @override
   Future<LocalSettings> build() async {
     final prefs = await SharedPreferences.getInstance();
-    return LocalSettings(
-      serverUrl: prefs.getString(_prefsKeyServerUrl) ?? 'http://localhost:8001',
-      llmProvider: prefs.getString(_prefsKeyLlmProvider) ?? 'openai',
-      // 默认 FunASR 流式（ws://localhost:10095）—— 浏览器原生 Web Speech API
-      // 在本地/无网情况下会立即触发 onend，造成“麦克风一打开就关”。
-      asrProvider: prefs.getString(_prefsKeyAsrProvider) ?? 'funasr',
-      ttsProvider: prefs.getString(_prefsKeyTtsProvider) ?? 'edge_tts',
-      pushToTalk: prefs.getBool(_prefsKeyPushToTalk) ?? true,
-      micControlMode: prefs.getString(_prefsKeyMicControlMode) ?? 'double_ctrl',
+    final serverUrl =
+        prefs.getString(_prefsKeyServerUrl) ?? 'http://localhost:8001';
+    final hasStoredAsrProvider = _hasStoredString(prefs, _prefsKeyAsrProvider);
+    final hasStoredTtsProvider = _hasStoredString(prefs, _prefsKeyTtsProvider);
+    final hasStoredPushToTalk = prefs.containsKey(_prefsKeyPushToTalk);
+
+    CurrentConfig? remoteConfig;
+    if (!hasStoredAsrProvider ||
+        !hasStoredTtsProvider ||
+        !hasStoredPushToTalk) {
+      remoteConfig = await _loadRemoteCurrentConfig(serverUrl);
+    }
+
+    return resolveInitialLocalSettings(
+      serverUrl: serverUrl,
+      storedLlmProvider: prefs.getString(_prefsKeyLlmProvider),
+      storedAsrProvider: prefs.getString(_prefsKeyAsrProvider),
+      storedTtsProvider: prefs.getString(_prefsKeyTtsProvider),
+      hasStoredPushToTalk: hasStoredPushToTalk,
+      storedPushToTalk: prefs.getBool(_prefsKeyPushToTalk),
+      storedMicControlMode: prefs.getString(_prefsKeyMicControlMode),
+      remoteConfig: remoteConfig,
     );
   }
 
@@ -83,11 +153,12 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     state = AsyncData(state.value!.copyWith(pushToTalk: enabled));
   }
 
-  /// 更新麦克风控制模式（double_ctrl | hold_ctrl）
+  /// 更新麦克风控制模式（当前统一为 hold_ctrl）
   Future<void> setMicControlMode(String mode) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsKeyMicControlMode, mode);
-    state = AsyncData(state.value!.copyWith(micControlMode: mode));
+    final normalizedMode = _normalizeMicControlMode(mode);
+    await prefs.setString(_prefsKeyMicControlMode, normalizedMode);
+    state = AsyncData(state.value!.copyWith(micControlMode: normalizedMode));
   }
 }
 

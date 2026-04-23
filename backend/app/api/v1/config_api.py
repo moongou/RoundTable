@@ -25,10 +25,40 @@ from app.config import (
     VOICE_SERVICE_META,
     settings,
 )
+from app.voice.openvoice_profiles import list_openvoice_profile_ids
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config", tags=["config"])
+
+
+def _has_real_api_key(value: str) -> bool:
+    key = (value or "").strip()
+    return bool(key and key not in {"sk-xxx", "your-api-key"} and not key.startswith("sk-xxx"))
+
+
+async def _probe_openai_voice_service(service_id: str) -> bool:
+    url = settings.get_voice_service_url(service_id) or VOICE_SERVICE_META.get(service_id, {}).get("default_url", "")
+    if not url:
+        return False
+
+    if service_id == "openai_whisper":
+        api_key = settings.openai_whisper_api_key or settings.openai_api_key
+    else:
+        api_key = settings.openai_api_key
+
+    if not _has_real_api_key(api_key):
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(
+                f"{url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            return 200 <= resp.status_code < 300
+    except Exception:
+        return False
 
 
 async def _probe_service(url: str, health_path: str, timeout_sec: float = 3.0) -> dict:
@@ -71,6 +101,7 @@ async def _semantic_voice_probe(service_id: str, url: str, timeout_sec: float = 
             async with websockets.connect(
                 url,
                 subprotocols=["binary"],
+                proxy=None,
                 open_timeout=timeout_sec,
                 close_timeout=timeout_sec,
             ) as ws:
@@ -183,6 +214,7 @@ async def _probe_websocket_service(url: str, timeout_sec: float = 3.0) -> dict:
         async with websockets.connect(
             url,
             subprotocols=["binary"],
+            proxy=None,
             open_timeout=timeout_sec,
             close_timeout=timeout_sec,
         ):
@@ -300,13 +332,18 @@ async def list_speech_providers():
             else:
                 _probe_results[pid] = False
 
+    _remote_probe_results = {
+        "openai_whisper": await _probe_openai_voice_service("openai_whisper"),
+        "openai_tts": await _probe_openai_voice_service("openai_tts"),
+    }
+
     def _available(pid: str) -> bool:
         if pid in ("browser", "disabled"):
             return True
         if pid == "openai_whisper":
-            return bool(settings.openai_whisper_api_key or settings.openai_api_key)
+            return _remote_probe_results.get(pid, False)
         if pid == "openai_tts":
-            return bool(settings.openai_api_key)
+            return _remote_probe_results.get(pid, False)
         return _probe_results.get(pid, False)
 
     return {
@@ -715,6 +752,8 @@ async def test_voice_service(body: dict):
                         voices = ["default", "中文女声", "中文男声"]
                 elif service in ("openai_tts",):
                     voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+                elif service == "openvoice":
+                    voices = list_openvoice_profile_ids()
                 elif service == "funasr":
                     voices = []  # ASR has no voice list
 

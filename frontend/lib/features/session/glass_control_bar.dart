@@ -82,7 +82,9 @@ class _GlassControlBarState extends State<GlassControlBar> {
         const SizedBox(width: 6),
         Flexible(
           child: Text(
-            widget.isRecording ? '正在录音... 双击 Ctrl 或点击结束按钮' : '按住麦克风讲话',
+            widget.isRecording
+                ? '正在录音... 松开 Ctrl 或点击结束按钮'
+                : '轮到你时按住 Ctrl 或点击“讲话”',
             style: TextStyle(
               color: widget.isRecording
                   ? const Color(0xFF00FFCC)

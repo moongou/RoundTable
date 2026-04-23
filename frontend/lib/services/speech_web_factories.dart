@@ -31,7 +31,14 @@ AsrService createWebAsrService(
   String providerId, {
   required String serverUrl,
   String? providerUrl,
+  bool preferServerProxy = false,
 }) {
+  if (preferServerProxy &&
+      providerId != 'browser' &&
+      providerId != 'disabled') {
+    return ServerAsrService(serverUrl: serverUrl, providerId: providerId);
+  }
+
   switch (providerId) {
     case 'browser':
       return BrowserAsrService();
@@ -58,7 +65,7 @@ AsrService createWebAsrService(
             : 'ws://localhost:10095',
       );
     case 'openai_whisper':
-      return ServerAsrService(serverUrl: serverUrl);
+      return ServerAsrService(serverUrl: serverUrl, providerId: providerId);
     default:
       return BrowserAsrService();
   }

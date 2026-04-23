@@ -22,7 +22,12 @@ class EdgeTTSProvider(TTSProvider):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
 
-    async def synthesize(self, text: str, voice: str = "alloy") -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str = "alloy",
+        speed: float = 1.0,
+    ) -> bytes:
         # 如果已经是 Azure 神经语音名称（含 Neural 或以 zh- 开头），直接使用；
         # 否则从 OpenAI 格式映射到默认中文语音。
         _openai_to_azure = {
@@ -48,6 +53,8 @@ class EdgeTTSProvider(TTSProvider):
             "voice": tts_voice,
             "response_format": "mp3",
         }
+        if speed != 1.0:
+            payload["speed"] = speed
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(

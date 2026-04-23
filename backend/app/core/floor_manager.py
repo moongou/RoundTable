@@ -248,6 +248,16 @@ class FloorManager:
             # 检测对从未发言者的引用（"X说/X提到/X认为"） → 替换为中性表述
             if name not in spoke_set:
                 text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?(?:还)?\s*刚才(说|提到|讲到)的",
+                    r"有同学刚才\1的",
+                    text,
+                )
+                text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?(?:还)?\s*刚才(说|提到|讲到)过的",
+                    r"有同学刚才\1过的",
+                    text,
+                )
+                text = re.sub(
                     rf"{re.escape(name)}(?:同学|先生)?[，,:：]?\s*你?(?:刚才|前面|上一轮)[^。！？!?]*[。！？!?]?",
                     "",
                     text,

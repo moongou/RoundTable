@@ -21,13 +21,20 @@ class CosyVoiceProvider(TTSProvider):
     def __init__(self, base_url: str = "http://localhost:50000"):
         self.base_url = base_url.rstrip("/")
 
-    async def synthesize(self, text: str, voice: str = "alloy") -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str = "alloy",
+        speed: float = 1.0,
+    ) -> bytes:
         # CosyVoice 典型接口: POST /tts with {"text": ..., "speaker": ...}
         # 如果该接口格式不对，需要根据实际服务调整
         payload = {
             "text": text,
             "speaker": voice,
         }
+        if speed != 1.0:
+            payload["speed"] = speed
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(

@@ -126,6 +126,7 @@ class ServerTtsService implements TtsService {
 /// 服务器端 ASR 实现：录音后上传到 POST /api/v1/voice/asr 获取转录文本
 class ServerAsrService implements AsrService {
   final String serverUrl;
+  final String? providerId;
   final Dio _dio;
   bool _isListening = false;
   final StreamController<AsrResult> _controller =
@@ -135,8 +136,10 @@ class ServerAsrService implements AsrService {
   final List<html.Blob> _chunks = [];
   DateTime? _recordingStartTime;
 
-  ServerAsrService({this.serverUrl = 'http://localhost:8001'})
-      : _dio = Dio(BaseOptions(
+  ServerAsrService({
+    this.serverUrl = 'http://localhost:8001',
+    this.providerId,
+  }) : _dio = Dio(BaseOptions(
           baseUrl: serverUrl,
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
@@ -255,6 +258,8 @@ class ServerAsrService implements AsrService {
       final formData = FormData.fromMap({
         'audio': MultipartFile.fromBytes(audioData, filename: 'audio.webm'),
         'format': 'webm',
+        if (providerId?.trim().isNotEmpty == true)
+          'provider': providerId!.trim(),
       });
 
       final response = await _dio

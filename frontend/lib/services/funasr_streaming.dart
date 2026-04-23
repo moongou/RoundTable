@@ -6,6 +6,7 @@
 ///
 /// 对应本项目需求 5b："从 LOCALHOST:9999 面板上找到合适作为流式语音识别的
 /// 工具，然后改造本项目为流式输入输出"。
+// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
 import 'dart:async';
@@ -39,6 +40,7 @@ class FunasrStreamingAsrService implements AsrService {
   js.JsObject? _audioContext;
   js.JsObject? _sourceNode;
   js.JsObject? _processorNode;
+  Completer<void>? _finalResultCompleter;
 
   final StringBuffer _onlineBuf = StringBuffer();
   String _lastOffline = '';
@@ -78,6 +80,7 @@ class FunasrStreamingAsrService implements AsrService {
     if (_isListening) return;
     _onlineBuf.clear();
     _lastOffline = '';
+    _finalResultCompleter = Completer<void>();
 
     try {
       final md = html.window.navigator.mediaDevices;
@@ -111,6 +114,9 @@ class FunasrStreamingAsrService implements AsrService {
       _ws!.onMessage.listen(_onWsMessage);
       _ws!.onClose.listen((_) {
         _isListening = false;
+        if (!(_finalResultCompleter?.isCompleted ?? true)) {
+          _finalResultCompleter!.complete();
+        }
       });
 
       await openC.future.timeout(const Duration(seconds: 5));
@@ -201,9 +207,15 @@ class FunasrStreamingAsrService implements AsrService {
         if (!_controller.isClosed) {
           _controller.add(AsrResult(text: _lastOffline, isFinal: true));
         }
+        if (!(_finalResultCompleter?.isCompleted ?? true)) {
+          _finalResultCompleter!.complete();
+        }
       } else if (isFinal && _lastOffline.isNotEmpty) {
         if (!_controller.isClosed) {
           _controller.add(AsrResult(text: _lastOffline, isFinal: true));
+        }
+        if (!(_finalResultCompleter?.isCompleted ?? true)) {
+          _finalResultCompleter!.complete();
         }
       }
     }
@@ -220,7 +232,11 @@ class FunasrStreamingAsrService implements AsrService {
       }
     } catch (_) {}
 
-    await Future.delayed(const Duration(milliseconds: 1200));
+    await _finalResultCompleter?.future.timeout(
+      const Duration(milliseconds: 1800),
+      onTimeout: () {},
+    );
+    await Future.delayed(const Duration(milliseconds: 150));
     await _cleanupAudio();
 
     try {

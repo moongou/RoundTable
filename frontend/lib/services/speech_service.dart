@@ -19,11 +19,16 @@ TtsService createTtsService(String providerId,
   );
 }
 
-AsrService createAsrService(String providerId,
-    {String serverUrl = 'http://localhost:8001', String? providerUrl}) {
+AsrService createAsrService(
+  String providerId, {
+  String serverUrl = 'http://localhost:8001',
+  String? providerUrl,
+  bool preferServerProxy = false,
+}) {
   return impl.createWebAsrService(
     providerId,
     serverUrl: serverUrl,
     providerUrl: providerUrl,
+    preferServerProxy: preferServerProxy,
   );
 }

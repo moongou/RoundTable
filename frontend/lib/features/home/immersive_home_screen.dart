@@ -1374,8 +1374,63 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     );
   }
 
-  Future<AsrService> _ensureAsr() async {
-    final config = await _resolveAsrConfig();
+  Future<List<({String providerId, String providerUrl, String serverUrl})>>
+      _resolveAsrCandidates() async {
+    final primary = await _resolveAsrConfig();
+    final candidates =
+        <({String providerId, String providerUrl, String serverUrl})>[
+      primary,
+    ];
+    final seen = <String>{
+      '${primary.providerId}|${primary.providerUrl}|${primary.serverUrl}',
+    };
+
+    SpeechConfig? speechConfig;
+    try {
+      speechConfig = await ref.read(speechConfigProvider.future);
+    } catch (_) {
+      speechConfig = null;
+    }
+
+    final providers =
+        speechConfig?.asrProviders ?? const <SpeechProviderInfo>[];
+    for (final provider in providers) {
+      if (!provider.available) continue;
+      final candidate = (
+        providerId: provider.id,
+        providerUrl:
+            provider.url.isNotEmpty ? provider.url : provider.defaultUrl,
+        serverUrl: primary.serverUrl,
+      );
+      final key =
+          '${candidate.providerId}|${candidate.providerUrl}|${candidate.serverUrl}';
+      if (seen.add(key)) {
+        candidates.add(candidate);
+      }
+    }
+
+    return candidates;
+  }
+
+  Future<void> _disposeAsr() async {
+    await _asrSub?.cancel();
+    _asrSub = null;
+    try {
+      await _asr?.stopListening();
+    } catch (_) {}
+    try {
+      _asr?.dispose();
+    } catch (_) {}
+    _asr = null;
+    _asrProviderId = '';
+    _asrProviderUrl = '';
+    _asrServerUrl = '';
+  }
+
+  Future<AsrService> _ensureAsr({
+    ({String providerId, String providerUrl, String serverUrl})? configOverride,
+  }) async {
+    final config = configOverride ?? await _resolveAsrConfig();
     final shouldRebuild = _asr == null ||
         _asrProviderId != config.providerId ||
         _asrProviderUrl != config.providerUrl ||
@@ -1402,6 +1457,43 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     return _asr!;
   }
 
+  Future<void> _startListeningWithConfig(
+    ({String providerId, String providerUrl, String serverUrl}) config,
+  ) async {
+    final asr = await _ensureAsr(configOverride: config);
+    await _asrSub?.cancel();
+    _asrSub = asr.transcriptionStream.listen((r) {
+      setState(() {
+        _draft = r.text;
+        if (r.isFinal && _draft.trim().isNotEmpty) {
+          final sep = widget.controller.text.isEmpty ? '' : ' ';
+          widget.controller.text =
+              '${widget.controller.text}$sep${_draft.trim()}';
+          widget.controller.selection = TextSelection.fromPosition(
+            TextPosition(offset: widget.controller.text.length),
+          );
+          _draft = '';
+          widget.onChanged();
+        }
+      });
+    }, onError: (Object error, StackTrace stackTrace) {
+      if (!mounted) return;
+      setState(() => _listening = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('语音识别异常: $error')),
+      );
+    });
+
+    await asr.warmup();
+    if (!asr.isAvailable) {
+      throw StateError('${config.providerId} 当前不可用');
+    }
+    await asr.startListening();
+    if (!asr.isListening) {
+      throw StateError('${config.providerId} 未能成功启动');
+    }
+  }
+
   Future<void> _toggleMic() async {
     if (_listening) {
       await _stopMic();
@@ -1409,42 +1501,35 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     }
     try {
       _draft = '';
-      final asr = await _ensureAsr();
-      await _asrSub?.cancel();
-      _asrSub = asr.transcriptionStream.listen((r) {
-        setState(() {
-          _draft = r.text;
-          if (r.isFinal && _draft.trim().isNotEmpty) {
-            final sep = widget.controller.text.isEmpty ? '' : ' ';
-            widget.controller.text =
-                '${widget.controller.text}$sep${_draft.trim()}';
-            widget.controller.selection = TextSelection.fromPosition(
-              TextPosition(offset: widget.controller.text.length),
-            );
-            _draft = '';
-            widget.onChanged();
-          }
-        });
-      }, onError: (Object error, StackTrace stackTrace) {
-        if (!mounted) return;
-        setState(() => _listening = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('语音识别异常: $error')),
-        );
-      });
-
-      await asr.warmup();
-      if (!asr.isAvailable) {
-        throw StateError('当前 ASR 服务不可用');
+      final candidates = await _resolveAsrCandidates();
+      Object? lastError;
+      String? startedProviderId;
+      for (final config in candidates) {
+        try {
+          await _startListeningWithConfig(config);
+          startedProviderId = config.providerId;
+          break;
+        } catch (error) {
+          lastError = error;
+          await _disposeAsr();
+        }
       }
-      await asr.startListening();
-      if (!asr.isListening) {
-        throw StateError('语音识别未能成功启动');
+      if (startedProviderId == null) {
+        throw lastError ?? StateError('当前没有可用的 ASR 服务');
       }
       setState(() => _listening = true);
+      final preferredConfig = await _resolveAsrConfig();
+      if (mounted && startedProviderId != preferredConfig.providerId) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '当前首选 ASR 启动失败，已临时切换到 ${startedProviderId.toUpperCase()}。',
+            ),
+          ),
+        );
+      }
     } catch (e) {
-      await _asrSub?.cancel();
-      _asrSub = null;
+      await _disposeAsr();
       if (mounted) {
         setState(() => _listening = false);
       }
@@ -2673,16 +2758,24 @@ class _SeatColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final center = (seats.length - 1) / 2;
+    double tableArcInset(int index) {
+      if (center <= 0) return 12;
+      final normalized = ((index - center).abs() / center).clamp(0.0, 1.0);
+      return 10 + (1 - normalized) * 28;
+    }
+
     return Column(
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment:
           alignLeft ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
         for (var i = 0; i < seats.length; i++)
           Padding(
             padding: EdgeInsets.only(
-              left: alignLeft ? 0 : (4 + (center - i).abs() * 12),
-              right: alignLeft ? (4 + (center - i).abs() * 12) : 0,
+              left: alignLeft ? 0 : tableArcInset(i),
+              right: alignLeft ? tableArcInset(i) : 0,
+              top: 4,
+              bottom: 4,
             ),
             child: _SeatCard(
               character: seats[i],
@@ -2730,8 +2823,8 @@ class _SeatCardState extends State<_SeatCard> {
         borderRadius: BorderRadius.circular(18),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          width: 164,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          width: 156,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
             color: active
                 ? _kNeonViolet.withValues(alpha: 0.18)

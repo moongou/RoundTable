@@ -23,9 +23,15 @@ const processes = {
 
 // 是否正在停止中（kill 后端口可能短暂残留，此时强制上报 running=false）
 let _backendStopping = false;
+const logTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
 
 function log(service, line) {
-  const entry = { t: new Date().toISOString().slice(11, 19), line };
+  const entry = { t: logTimeFormatter.format(new Date()), line };
   processes[service].logs.push(entry);
   if (processes[service].logs.length > 300) processes[service].logs.shift();
   sseClients[service]?.forEach(res => {
@@ -282,11 +288,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .hw-info .hw-chip{color:#d4a017;font-weight:600;font-size:12px}
   .hw-info .hw-sep{color:#333}
   .hw-opt{font-size:11px;color:#80cbc4;max-width:780px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
-  .hw-report{display:none;width:100%;background:#11192f;border:1px solid #1b335f;border-radius:10px;padding:10px 12px;font-size:11px;line-height:1.65;color:#b9c2d6}
-  .hw-report .title{color:#d4a017;font-weight:700;margin-bottom:4px}
-  .hw-report .row{display:flex;gap:8px;flex-wrap:wrap}
-  .hw-report .k{color:#7f90b5}
-  .hw-report .v{color:#dbe4ff}
   .footer{margin-top:24px;color:#444;font-size:12px}
 </style>
 </head>
@@ -345,23 +346,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <span class="hw-sep">|</span>
       <span id="hw-gpu"></span>
     </div>
-    <div class="hw-report" id="hw-report" style="margin-top:10px">
-      <div class="title">硬件检测报告</div>
-      <div class="row"><span class="k">摘要:</span><span class="v" id="hw-report-summary">-</span></div>
-      <div class="row"><span class="k">推荐:</span><span class="v" id="hw-report-reco">-</span></div>
-      <div class="row"><span class="k">已应用优化:</span><span class="v" id="hw-report-tuning">-</span></div>
-    </div>
   </div>
 </div>
 <div class="footer">RoundTable Dev Panel · 使用 <kbd>Ctrl+C</kbd> 停止面板</div>
-<div id="hw-bottom-strip" style="display:none;position:fixed;left:0;right:0;bottom:78px;background:#0d1420;border-top:1px solid #17304a;padding:10px 18px;z-index:45;box-shadow:0 -8px 24px rgba(0,0,0,.18)">
-  <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;justify-content:center;color:#dbe6f3;font-size:12px">
-    <span style="color:#d4a017;font-weight:600">🖥 硬件检测</span>
-    <span id="hw-bottom-summary">等待检测</span>
-    <span id="hw-bottom-reco">-</span>
-    <span id="hw-bottom-tuning">-</span>
-  </div>
-</div>
 <!-- 需求23：主要操作按钮固定到页面底部 -->
 <div style="position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,rgba(26,26,46,0) 0%,#101828 40%);padding:14px 24px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;z-index:50;border-top:1px solid #0f3460">
   <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动后端</button>
@@ -371,7 +358,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <a class="btn-open" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
   <a class="btn-open" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
   <a class="btn-open" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
-  <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 硬件检测</button>
+  <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 检测并打开报告</button>
 </div>
 <style>body{padding-bottom:160px}</style>
 <script>
@@ -456,22 +443,72 @@ function renderHealth(data) {
   summary.style.color = ok === total ? '#4caf50' : ok > 0 ? '#ff9800' : '#ef5350';
 }
 function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-setTimeout(refreshHealth, 500);
-setInterval(refreshHealth, 30000);
+refreshHealth();
+
+function writeHardwareReport(win, title, bodyHtml) {
+  if (!win) return;
+  win.document.open();
+  win.document.write(
+    '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>' + escHtml(title) + '</title>' +
+    '<style>' +
+    'body{margin:0;padding:24px;background:#0f172a;color:#e2e8f0;font-family:SFMono-Regular,Menlo,monospace;line-height:1.7}' +
+    'h1{margin:0 0 16px;color:#fbbf24;font-size:24px}' +
+    '.card{background:#11192f;border:1px solid #1b335f;border-radius:14px;padding:18px 20px;margin-bottom:16px}' +
+    '.title{color:#fbbf24;font-size:14px;font-weight:700;margin-bottom:8px}' +
+    '.row{margin-bottom:8px;color:#dbe4ff}' +
+    '.label{color:#7f90b5;margin-right:8px}' +
+    '.muted{color:#94a3b8;font-size:12px}' +
+    '</style></head><body>' + bodyHtml + '</body></html>'
+  );
+  win.document.close();
+}
+
+function openHardwareReportWindow() {
+  var win = window.open('', '_blank', 'width=860,height=760');
+  if (!win) {
+    showToast('浏览器拦截了硬件报告弹窗，请允许新窗口后重试。');
+    return null;
+  }
+  writeHardwareReport(
+    win,
+    'RoundTable 硬件检测报告',
+    '<h1>🖥 RoundTable 硬件检测报告</h1><div class="card"><div class="title">正在检测</div><div class="muted">请稍候，面板正在向后端请求硬件信息与优化建议。</div></div>'
+  );
+  return win;
+}
+
+function buildHardwareReportBody(hw, tuningText) {
+  var hr = hw.hardware_report || {};
+  return '' +
+    '<h1>🖥 RoundTable 硬件检测报告</h1>' +
+    '<div class="card">' +
+      '<div class="title">硬件摘要</div>' +
+      '<div class="row"><span class="label">芯片</span>' + escHtml(hw.apple_chip || hw.cpu_brand || 'CPU') + '</div>' +
+      '<div class="row"><span class="label">CPU</span>' + escHtml((hw.cpu_cores || '-') + ' cores / ' + (hw.cpu_threads || '-') + ' threads') + '</div>' +
+      '<div class="row"><span class="label">内存</span>' + escHtml((hw.memory_gb || '-') + ' GB RAM') + '</div>' +
+      '<div class="row"><span class="label">GPU</span>' + escHtml(hw.mps_available ? ('MPS ✓' + (hw.gpu_cores ? (' ' + hw.gpu_cores + ' cores') : '')) : hw.cuda_available ? 'CUDA ✓' : 'CPU only') + '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="title">优化建议</div>' +
+      '<div class="row"><span class="label">摘要</span>' + escHtml(hr.summary || '-') + '</div>' +
+      '<div class="row"><span class="label">推荐</span>' + escHtml(hr.recommendation || ('建议并行线程: ' + (hw.recommended_workers || '-'))) + '</div>' +
+      '<div class="row"><span class="label">已应用优化</span>' + escHtml(tuningText) + '</div>' +
+    '</div>' +
+    '<div class="muted">数据来源：/api/v1/benchmark/hardware?apply_tuning=true</div>';
+}
+
 // Fetch hardware info
 function fetchHardware() {
   var btn = document.getElementById('btn-hw-detect');
+  var reportWindow = openHardwareReportWindow();
+  if (!reportWindow) return;
   btn.disabled = true;
   btn.textContent = '检测中...';
   fetch('http://localhost:8001/api/v1/benchmark/hardware?apply_tuning=true')
     .then(function(r){ return r.json(); })
     .then(function(hw) {
       var el = document.getElementById('hw-info');
-      var report = document.getElementById('hw-report');
-      var strip = document.getElementById('hw-bottom-strip');
       el.style.display = 'flex';
-      report.style.display = 'block';
-      strip.style.display = 'block';
       document.getElementById('hw-chip').textContent = hw.apple_chip || hw.cpu_brand || 'CPU';
       document.getElementById('hw-cpu').textContent = hw.cpu_cores + ' cores / ' + hw.cpu_threads + ' perf';
       document.getElementById('hw-mem').textContent = hw.memory_gb + ' GB RAM';
@@ -480,28 +517,27 @@ function fetchHardware() {
       var rt = hw.runtime_tuning || {};
       var hr = hw.hardware_report || {};
       var tuningText = 'workers=' + (rt.workers || '-') + ', prefetch=' + (rt.prefetch_batch || '-') + ', ASR预热=' + (rt.asr_warmup_interval_ms || '-') + 'ms, 设备=' + (rt.device || '-');
-      document.getElementById('hw-report-summary').textContent = hr.summary || '-';
-      document.getElementById('hw-report-reco').textContent = hr.recommendation || ('建议并行线程: ' + (hw.recommended_workers || '-'));
-      document.getElementById('hw-report-tuning').textContent = tuningText;
-      document.getElementById('hw-bottom-summary').textContent = hr.summary || '-';
-      document.getElementById('hw-bottom-reco').textContent = hr.recommendation || ('建议并行线程: ' + (hw.recommended_workers || '-'));
-      document.getElementById('hw-bottom-tuning').textContent = tuningText;
 
       document.getElementById('hw-opt').textContent = '建议并行线程: ' + (hw.recommended_workers || '-') + ' ｜ 已应用: ' + tuningText;
+      writeHardwareReport(
+        reportWindow,
+        'RoundTable 硬件检测报告',
+        buildHardwareReportBody(hw, tuningText)
+      );
     })
     .catch(function() {
       document.getElementById('hw-opt').textContent = '硬件检测失败：请确认后端已启动并允许跨域访问';
-      document.getElementById('hw-bottom-strip').style.display = 'block';
-      document.getElementById('hw-bottom-summary').textContent = '硬件检测失败';
-      document.getElementById('hw-bottom-reco').textContent = '请确认后端已启动';
-      document.getElementById('hw-bottom-tuning').textContent = 'API: /api/v1/benchmark/hardware';
+      writeHardwareReport(
+        reportWindow,
+        'RoundTable 硬件检测报告',
+        '<h1>🖥 RoundTable 硬件检测报告</h1><div class="card"><div class="title">检测失败</div><div class="row">请确认后端已经启动，并且接口 /api/v1/benchmark/hardware 可以正常访问。</div><div class="muted">API: /api/v1/benchmark/hardware?apply_tuning=true</div></div>'
+      );
     })
     .finally(function() {
       btn.disabled = false;
-      btn.textContent = '🖥 硬件检测';
+      btn.textContent = '🖥 检测并打开报告';
     });
 }
-setTimeout(fetchHardware, 2000);
 </script>
 </body>
 </html>`;

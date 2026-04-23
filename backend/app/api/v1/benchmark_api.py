@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 import time
 from dataclasses import asdict
 
 import httpx
 from fastapi import APIRouter
 
+from app.api.v1.config_api import _semantic_voice_probe
 from app.config import (
     AVAILABLE_PROVIDERS,
     LOCAL_SERVICE_DEFAULTS,
@@ -29,6 +34,82 @@ router = APIRouter(prefix="/benchmark")
 _TEST_TEXT_SHORT = "你好，欢迎参加圆桌讨论。"
 _TEST_TEXT_LONG = "在这个充满挑战和机遇的时代，教育不仅是知识的传递，更是思辨能力的培养。让我们一起探讨如何激发孩子们的创造力和批判性思维。"
 _LLM_TEST_PROMPT = "简述什么是批判性思维，不超过20个字"
+
+
+def _synthesize_silent_wav(duration_sec: int = 2, sample_rate: int = 16000) -> bytes:
+    import struct
+
+    samples = sample_rate * duration_sec
+    wav_data = b'RIFF' + struct.pack('<I', 36 + samples * 2) + b'WAVEfmt '
+    wav_data += struct.pack('<IHHIIHH', 16, 1, 1, sample_rate, sample_rate * 2, 2, 16)
+    wav_data += b'data' + struct.pack('<I', samples * 2)
+    wav_data += b'\x00' * (samples * 2)
+    return wav_data
+
+
+def _convert_audio_with_ffmpeg(audio_bytes: bytes, src_suffix: str, dst_suffix: str) -> bytes:
+    src_path = ""
+    dst_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=src_suffix, delete=False) as src_file:
+            src_file.write(audio_bytes)
+            src_path = src_file.name
+        with tempfile.NamedTemporaryFile(suffix=dst_suffix, delete=False) as dst_file:
+            dst_path = dst_file.name
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            src_path,
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            dst_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "ffmpeg conversion failed")
+        with open(dst_path, "rb") as audio_file:
+            return audio_file.read()
+    finally:
+        for path in (src_path, dst_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+async def _build_asr_test_audio(text: str = _TEST_TEXT_SHORT) -> tuple[bytes, str]:
+    from app.voice.factory import create_tts_provider
+
+    try:
+        tts = create_tts_provider("edge_tts")
+        audio = b""
+        last_error: Exception | None = None
+        for _ in range(3):
+            try:
+                audio = await tts.synthesize(text)
+                break
+            except Exception as e:
+                last_error = e
+                await asyncio.sleep(0.2)
+        if not audio:
+            raise last_error or RuntimeError("edge_tts returned empty audio")
+        if shutil.which("ffmpeg"):
+            try:
+                return _convert_audio_with_ffmpeg(audio, ".mp3", ".wav"), "wav"
+            except Exception as e:
+                logger.warning("ASR benchmark 音频转码失败，回退到 mp3: %s", e)
+        return audio, "mp3"
+    except Exception as e:
+        logger.warning("ASR benchmark TTS 样本生成失败，回退到静音 WAV: %s", e)
+        return _synthesize_silent_wav(), "wav"
 
 
 async def _measure_latency(coro, rounds: int = 3) -> dict:
@@ -103,27 +184,19 @@ async def _benchmark_one_asr(service_id: str, url: str, rounds: int) -> dict:
     except Exception as e:
         return {"service": service_id, "status": "error", "error": str(e)}
 
-    # 先用 TTS 生成一段测试音频
-    test_audio = None
-    try:
-        from app.voice.factory import create_tts_provider
-        tts = create_tts_provider("edge_tts")
-        test_audio = await tts.synthesize(_TEST_TEXT_SHORT)
-    except Exception:
-        # 使用静音 WAV 作为 fallback
-        import struct
-        sr = 16000
-        duration = 2
-        samples = sr * duration
-        test_audio = b'RIFF' + struct.pack('<I', 36 + samples * 2) + b'WAVEfmt '
-        test_audio += struct.pack('<IHHIIHH', 16, 1, 1, sr, sr * 2, 2, 16)
-        test_audio += b'data' + struct.pack('<I', samples * 2)
-        test_audio += b'\x00' * (samples * 2)
+    test_audio, test_format = await _build_asr_test_audio()
 
     async def transcribe():
-        return await provider.transcribe(test_audio)
+        return await provider.transcribe(test_audio, format=test_format)
 
     result = await _measure_latency(transcribe, rounds)
+    if (result.get("rounds") or 0) <= 0:
+        return {
+            "service": service_id,
+            "status": "error",
+            "latency": result,
+            "error": result.get("error", "asr benchmark failed"),
+        }
     return {
         "service": service_id,
         "status": "ok",
@@ -251,7 +324,7 @@ async def benchmark_tts(rounds: int = 3, services: list[str] | None = None):
 @router.post("/asr")
 async def benchmark_asr(rounds: int = 3, services: list[str] | None = None):
     """基准测试所有或指定的 ASR 服务。"""
-    target_services = services or ["browser", "capswriter", "vosk", "funasr"]
+    target_services = services or ["browser", "capswriter", "vosk", "funasr", "openai_whisper"]
     results = await asyncio.gather(
         *[_benchmark_one_asr(svc, LOCAL_SERVICE_DEFAULTS.get(svc, {}).get("url", ""), rounds) for svc in target_services]
     )
@@ -352,15 +425,22 @@ async def test_voice_service(service_id: str, service_type: str, text: str = _TE
 
     # 健康检查
     try:
-        svc_info = LOCAL_SERVICE_DEFAULTS.get(service_id, {})
-        url = svc_info.get("url", "")
-        health = svc_info.get("health", "/health")
-        if url:
+        url = settings.get_voice_service_url(service_id) or LOCAL_SERVICE_DEFAULTS.get(service_id, {}).get("url", "")
+        health = (
+            LOCAL_SERVICE_DEFAULTS.get(service_id, {}).get("health")
+            or VOICE_SERVICE_META.get(service_id, {}).get("health_path", "/health")
+        )
+        if url and service_id != "openai_whisper":
             async with httpx.AsyncClient(timeout=5.0) as client:
                 t0 = time.perf_counter()
-                resp = await client.get(f"{url}{health}")
-                result["health_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-                result["health_status"] = resp.json() if resp.status_code == 200 else {"error": resp.status_code}
+                if url.startswith(("ws://", "wss://")):
+                    probe = await _semantic_voice_probe(service_id, url, timeout_sec=3.0)
+                    result["health_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+                    result["health_status"] = probe
+                else:
+                    resp = await client.get(f"{url}{health}")
+                    result["health_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+                    result["health_status"] = resp.json() if resp.status_code == 200 else {"error": resp.status_code}
     except Exception as e:
         result["health_status"] = {"error": str(e)}
 
@@ -405,12 +485,11 @@ async def deep_test_voice_service(service_id: str, service_type: str):
         try:
             from app.voice.factory import create_tts_provider, create_asr_provider
 
-            tts = create_tts_provider("edge_tts")
-            audio = await tts.synthesize(sample_text)
+            audio, audio_format = await _build_asr_test_audio(sample_text)
 
             asr = create_asr_provider(service_id)
             t0 = time.perf_counter()
-            recognized = await asr.transcribe(audio)
+            recognized = await asr.transcribe(audio, format=audio_format)
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
             normalized_expected = sample_text.replace("。", "").replace("，", "")

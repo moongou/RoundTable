@@ -46,6 +46,7 @@ class GatewayStreamingAsrService implements AsrService {
   js.JsObject? _processorNode;
   js.JsObject? _sourceNode;
   Completer<void>? _stopCompleter;
+  Completer<void>? _finalResultCompleter;
   bool _disposed = false;
 
   // 预热的 WebSocket 连接
@@ -101,6 +102,7 @@ class GatewayStreamingAsrService implements AsrService {
     try {
       _isListening = true;
       _stopCompleter = Completer<void>();
+      _finalResultCompleter = Completer<void>();
 
       // 1. 获取麦克风
       final mediaDevices = html.window.navigator.mediaDevices;
@@ -151,6 +153,15 @@ class GatewayStreamingAsrService implements AsrService {
             case 'result':
             case 'final':
               _controller.add(AsrResult(text: text, isFinal: true));
+              if (!(_finalResultCompleter?.isCompleted ?? true)) {
+                _finalResultCompleter!.complete();
+              }
+              break;
+            case 'error':
+              _controller.addError(data['error'] ?? '语音识别服务返回错误');
+              if (!(_finalResultCompleter?.isCompleted ?? true)) {
+                _finalResultCompleter!.complete();
+              }
               break;
           }
         } catch (_) {}
@@ -158,6 +169,9 @@ class GatewayStreamingAsrService implements AsrService {
 
       _ws!.onClose.listen((_) {
         _isListening = false;
+        if (!(_finalResultCompleter?.isCompleted ?? true)) {
+          _finalResultCompleter!.complete();
+        }
         if (_stopCompleter != null && !_stopCompleter!.isCompleted) {
           _stopCompleter!.complete();
         }
@@ -165,6 +179,9 @@ class GatewayStreamingAsrService implements AsrService {
 
       _ws!.onError.listen((_) {
         _isListening = false;
+        if (!(_finalResultCompleter?.isCompleted ?? true)) {
+          _finalResultCompleter!.complete();
+        }
       });
     } catch (e) {
       _isListening = false;
@@ -242,10 +259,14 @@ class GatewayStreamingAsrService implements AsrService {
 
       // 发送 eof 获取最终结果
       if (_ws != null && _ws!.readyState == html.WebSocket.OPEN) {
-        _ws!.sendString('eof');
-        // 等待最终结果(最多2秒)
+        _ws!.sendString(jsonEncode({'type': 'eof'}));
+        await _finalResultCompleter?.future.timeout(
+          const Duration(milliseconds: 1800),
+          onTimeout: () {},
+        );
+        // 等待服务端主动收尾，避免在最终文本返回前就关闭连接。
         await _stopCompleter?.future.timeout(
-          const Duration(seconds: 2),
+          const Duration(milliseconds: 1200),
           onTimeout: () {},
         );
       }
