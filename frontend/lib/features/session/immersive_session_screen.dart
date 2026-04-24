@@ -114,6 +114,39 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
         normalizeSpeakerLabel(completedSpeaker);
   }
 
+  static bool shouldApplyHumanStateStatus({
+    required String newState,
+    required String humanName,
+    required String currentSpeaker,
+    required bool isMyTurn,
+    required bool isRecording,
+    required bool isCompletingHumanTurn,
+    required bool isFinalizingSpeech,
+  }) {
+    if (newState != 'human_turn_waiting' && newState != 'human_speaking') {
+      return true;
+    }
+    if (isCompletingHumanTurn || isFinalizingSpeech) {
+      return false;
+    }
+
+    final normalizedHuman = normalizeSpeakerLabel(humanName);
+    final normalizedCurrent = normalizeSpeakerLabel(currentSpeaker);
+
+    if (newState == 'human_speaking') {
+      return isMyTurn ||
+          isRecording ||
+          (normalizedCurrent.isNotEmpty &&
+              normalizedCurrent == normalizedHuman);
+    }
+
+    return isMyTurn;
+  }
+
+  static String humanTurnIdleReminderText() {
+    return '还在等你开口；如果你暂时不想说，可以手动点“跳过”';
+  }
+
   static Duration humanSubtitleHoldDurationFor(String text) {
     final chars = text.trim().runes.length;
     final holdMs = (chars * 65).clamp(1800, 5200).toInt();
@@ -496,7 +529,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   Timer? _pendingHumanTurnGuardTimer;
   Timer? _ttsPumpGuardTimer;
   Timer? _deferredAutoSkipTimer;
-  DateTime? _humanTurnActivatedAt;
 
   // 参与者
   List<SeatedParticipant> _participants = [];
@@ -658,6 +690,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _asrTranscriptionSub = _asrService.transcriptionStream.listen((result) {
       final chunk = result.text.trim();
       if (chunk.isEmpty) return;
+      final shouldStreamUserSubtitles =
+          ref.read(localSettingsProvider).valueOrNull?.streamUserSubtitles ??
+              true;
       if (_awaitingAsrFirstPacket && _asrListenStartAt != null) {
         final firstPacketMs =
             DateTime.now().difference(_asrListenStartAt!).inMilliseconds;
@@ -685,7 +720,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         if (_sttPartialText.trim().isNotEmpty) {
           _lastNonEmptySttText = _sttPartialText.trim();
         }
-        if (_isRecording) {
+        if (_isRecording && shouldStreamUserSubtitles) {
           _centerSpeaker = widget.humanName;
           _centerMessage = _sttPartialText;
         }
@@ -1073,9 +1108,31 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   String _friendlyStateText(String state, String label) {
     switch (state) {
       case 'human_turn_waiting':
-        return _isPaused ? '暂停中...' : _humanTurnWaitingPrompt();
+        if (_isPaused) {
+          return '暂停中...';
+        }
+        final normalizedHuman =
+            ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
+        final normalizedCurrent =
+            ImmersiveSessionScreen.normalizeSpeakerLabel(_currentSpeaker);
+        if (_isMyTurn ||
+            (normalizedCurrent.isNotEmpty &&
+                normalizedCurrent == normalizedHuman)) {
+          return '轮到你了：按住 Ctrl 或点击“讲话”开始';
+        }
+        return _humanTurnWaitingPrompt();
       case 'human_speaking':
-        return '正在听你说……';
+        final normalizedHuman =
+            ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
+        final normalizedCurrent =
+            ImmersiveSessionScreen.normalizeSpeakerLabel(_currentSpeaker);
+        if (_isMyTurn ||
+            _isRecording ||
+            (normalizedCurrent.isNotEmpty &&
+                normalizedCurrent == normalizedHuman)) {
+          return '正在听你说……';
+        }
+        return _currentSpeaker.isEmpty ? '有人正在说话……' : '$_currentSpeaker 正在说话……';
       case 'ai_speaking':
         return _currentSpeaker.isEmpty ? '思考中……' : '$_currentSpeaker 思考中……';
       case 'selecting_speaker':
@@ -1267,7 +1324,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           ..clear()
           ..addAll(quotes);
         if (_lastErrorMessage == null) {
-          _statusText = _discussionEnded ? '讨论已结束，右上角可手动查看金句' : 'AI 已整理出今日金句';
+          _statusText = _discussionEnded ? '讨论已结束，可手动查看今日金句' : 'AI 已整理出今日金句';
         }
       });
     } catch (error) {
@@ -1275,10 +1332,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         debugPrint('golden quote generation failed: $error');
       }
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _isGeneratingGoldenQuotes = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isGeneratingGoldenQuotes = false;
+        });
+      }
     }
   }
 
@@ -1615,7 +1673,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _commander.markHumanTurnActivated(speaker: activateSpeaker);
     _deferredAutoSkipTimer?.cancel();
     _deferredAutoSkipTimer = null;
-    _humanTurnActivatedAt = DateTime.now();
     setState(() {
       _isMyTurn = true;
       // 需求4：新一轮/举手批准，解锁麦克风
@@ -1640,37 +1697,20 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         reason: 'activate-human-turn', includeAsrWarmup: true);
   }
 
-  Duration _remainingAutoSkipGuard() {
-    final started = _humanTurnActivatedAt;
-    if (started == null) return Duration.zero;
-    final elapsed = DateTime.now().difference(started);
-    if (elapsed >= ImmersiveSessionScreen.humanTurnAutoSkipWindow) {
-      return Duration.zero;
-    }
-    return ImmersiveSessionScreen.humanTurnAutoSkipWindow - elapsed;
-  }
-
-  bool _scheduleAutoSkipWhenGuardReady({
-    required String reason,
-    bool addUserMessage = true,
-  }) {
-    final remain = _remainingAutoSkipGuard();
-    if (remain <= Duration.zero) {
-      return false;
-    }
+  void _handleAutoSkipReminder({String? reason}) {
+    _cancelTurnCountdown();
     _deferredAutoSkipTimer?.cancel();
-    _deferredAutoSkipTimer = Timer(remain, () {
-      if (!mounted) return;
-      if (_isMyTurn && !_isRecording) {
-        _onSkipTurn(
-          reason: '$reason（保底等待后执行）',
-          addUserMessage: addUserMessage,
-          isAuto: false,
-        );
-      }
+    _deferredAutoSkipTimer = null;
+    if (!mounted) {
+      return;
+    }
+    final reminder = reason?.trim().isNotEmpty == true
+        ? reason!.trim()
+        : ImmersiveSessionScreen.humanTurnIdleReminderText();
+    setState(() {
+      _statusText = ImmersiveSessionScreen.humanTurnIdleReminderText();
     });
-    _showStatusToast('已进入保底发言窗口，${remain.inSeconds}秒后才会自动跳过');
-    return true;
+    _showStatusToast('$reminder；系统不会替你跳过');
   }
 
   void _cancelPendingHumanTurnGuard() {
@@ -1679,7 +1719,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }
 
   void _scheduleTtsPumpGuard(
-      {Duration delay = const Duration(milliseconds: 900)}) {
+      {Duration delay = const Duration(milliseconds: 240)}) {
     _ttsPumpGuardTimer?.cancel();
     _ttsPumpGuardTimer = Timer(delay, () {
       if (!mounted) return;
@@ -1790,6 +1830,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         thinkerIds: widget.thinkerIds,
         humanNames: humanNames,
         freeTopic: widget.topic.id == 'free_topic' ? widget.topic.title : '',
+        freeTopicDetail:
+            widget.topic.id == 'free_topic' ? widget.topic.description : '',
       );
 
       final sessionId = sessionData['session_id'] as String;
@@ -2223,6 +2265,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         if (data != null) {
           final newState = data['new_state'] ?? '';
           final newLabel = data['new_label'] ?? newState;
+          if (!ImmersiveSessionScreen.shouldApplyHumanStateStatus(
+            newState: newState,
+            humanName: widget.humanName,
+            currentSpeaker: _currentSpeaker,
+            isMyTurn: _isMyTurn,
+            isRecording: _isRecording,
+            isCompletingHumanTurn: _isCompletingHumanTurn,
+            isFinalizingSpeech: _isFinalizingSpeech,
+          )) {
+            break;
+          }
           if (newState == 'interrupted') {
             setState(() => _statusText = '有人想补充一句……');
           } else if (newState == 'human_turn_waiting' && _isPaused) {
@@ -2654,13 +2707,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     bool isAuto = false,
   }) {
     if (isAuto) {
-      final blocked = _scheduleAutoSkipWhenGuardReady(
-        reason: reason ?? '自动跳过',
-        addUserMessage: addUserMessage,
-      );
-      if (blocked) {
-        return;
-      }
+      _handleAutoSkipReminder(reason: reason);
+      return;
     }
     _cancelTurnCountdown();
     _cancelMaxSpeechTimer();
@@ -2688,7 +2736,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     if (reason != null && reason.isNotEmpty) {
       _showStatusToast(reason);
     }
-    _humanTurnActivatedAt = null;
     _humanSubtitleLockUntil = null;
     _humanSubtitleLockTimer?.cancel();
     _awaitingAsrFirstPacket = false;
@@ -2724,7 +2771,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       setState(() => _turnCountdown--);
       if (_turnCountdown <= 0) {
         timer.cancel();
-        _onSkipTurn(reason: '30秒未开始语音发言，已自动跳过', isAuto: true);
+        _onSkipTurn(
+          reason: '30秒还没开始语音发言',
+          isAuto: true,
+        );
       }
     });
   }
@@ -2963,7 +3013,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _pushSeriesSample(_prefetchHitRateSeries, _prefetchHitRatePercent);
       if (!mounted) return;
       // 确保 TTS 完全停止后再播放下一条
-      await Future.delayed(const Duration(milliseconds: 160));
+      await Future.delayed(const Duration(milliseconds: 40));
       if (_ttsQueue.isEmpty) {
         _ttsPlaying = false;
         _buildParticipants();
@@ -2983,7 +3033,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           !_isMyTurn &&
           !_isRecording;
       if (shouldContinue) {
-        _scheduleTtsPumpGuard(delay: const Duration(milliseconds: 600));
+        _scheduleTtsPumpGuard(delay: const Duration(milliseconds: 180));
         Future.microtask(_playNextTts);
       }
     }
@@ -5403,12 +5453,12 @@ class _EndingQuotesScreenState extends State<_EndingQuotesScreen> {
   @override
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.sizeOf(context);
-    final compactLayout = screenSize.width < 960 || screenSize.height < 820;
+    final compactLayout = screenSize.width < 900 || screenSize.height < 820;
     final display = widget.quotes.isEmpty
-        ? const ['今夜的话题已经落灯，真正留下来的，是那些被重新炼亮的一句话。']
+        ? const ['今夜的话题落下以后，真正留住人的，往往就是这一句。']
         : widget.quotes.take(4).toList(growable: false);
     return Scaffold(
-      backgroundColor: const Color(0xFF0A0E1A),
+      backgroundColor: const Color(0xFF081018),
       body: SafeArea(
         child: Stack(
           children: [
@@ -5416,21 +5466,40 @@ class _EndingQuotesScreenState extends State<_EndingQuotesScreen> {
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
                     colors: [
-                      const Color(0xFF11182B),
-                      const Color(0xFF0A0E1A),
-                      const Color(0xFF13111E),
+                      const Color(0xFF122033),
+                      const Color(0xFF081018),
+                      const Color(0xFF140E18),
                     ],
-                    stops: const [0.0, 0.45, 1.0],
+                    stops: const [0.0, 0.48, 1.0],
                   ),
                 ),
               ),
             ),
             Positioned(
-              left: -80,
-              top: 48,
+              left: -60,
+              top: 24,
+              child: IgnorePointer(
+                child: Container(
+                  width: 260,
+                  height: 260,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        const Color(0xFFF2C46D).withValues(alpha: 0.18),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              right: -30,
+              bottom: 10,
               child: IgnorePointer(
                 child: Container(
                   width: 220,
@@ -5439,7 +5508,7 @@ class _EndingQuotesScreenState extends State<_EndingQuotesScreen> {
                     shape: BoxShape.circle,
                     gradient: RadialGradient(
                       colors: [
-                        const Color(0xFFE5B25D).withValues(alpha: 0.12),
+                        const Color(0xFF7FD7C4).withValues(alpha: 0.16),
                         Colors.transparent,
                       ],
                     ),
@@ -5447,213 +5516,165 @@ class _EndingQuotesScreenState extends State<_EndingQuotesScreen> {
                 ),
               ),
             ),
-            Positioned(
-              right: -40,
-              bottom: 24,
-              child: IgnorePointer(
+            Center(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: compactLayout ? 680 : 920,
+                  maxHeight: compactLayout ? screenSize.height - 32 : 760,
+                ),
                 child: Container(
-                  width: 180,
-                  height: 180,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
-                      colors: [
-                        Colors.white.withValues(alpha: 0.06),
-                        Colors.transparent,
-                      ],
-                    ),
+                  margin: EdgeInsets.symmetric(
+                    horizontal: compactLayout ? 18 : 24,
+                    vertical: compactLayout ? 16 : 24,
                   ),
-                ),
-              ),
-            ),
-            Padding(
-              padding: compactLayout
-                  ? const EdgeInsets.fromLTRB(24, 24, 24, 18)
-                  : const EdgeInsets.fromLTRB(40, 44, 40, 36),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  padding: compactLayout
+                      ? const EdgeInsets.fromLTRB(22, 24, 22, 18)
+                      : const EdgeInsets.fromLTRB(40, 36, 40, 24),
+                  decoration: BoxDecoration(
+                    borderRadius:
+                        BorderRadius.circular(compactLayout ? 28 : 36),
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        const Color(0xFFF4E7C7).withValues(alpha: 0.10),
+                        const Color(0xFF112235).withValues(alpha: 0.88),
+                        const Color(0xFF172535).withValues(alpha: 0.94),
+                      ],
+                      stops: const [0.0, 0.26, 1.0],
+                    ),
+                    border: Border.all(
+                      color: const Color(0xFFF4D38B).withValues(alpha: 0.22),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.26),
+                        blurRadius: 42,
+                        offset: const Offset(0, 24),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'DISCUSSION DISTILLATE',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.34),
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 2.8,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            Text(
-                              '今日金句',
-                              style: TextStyle(
-                                color: Color(0xFFE5B25D),
-                                fontSize: compactLayout ? 24 : 30,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 10,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 520),
-                              child: Text(
-                                '这些句子由 AI 根据整场讨论重新提炼，不是现场原句摘录。',
-                                style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.64),
-                                  fontSize: compactLayout ? 12 : 13,
-                                  height: 1.7,
-                                ),
-                              ),
-                            ),
-                          ],
+                      Container(
+                        width: compactLayout ? 88 : 104,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(999),
+                          gradient: LinearGradient(
+                            colors: [
+                              const Color(0xFFF4D38B),
+                              const Color(0xFF7FD7C4).withValues(alpha: 0.9),
+                            ],
+                          ),
                         ),
                       ),
-                      // 需求六/九：朗读开关，点击后由思想家朗读每一句。
-                      const SizedBox(width: 20),
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(28),
-                          color: Colors.white.withValues(alpha: 0.04),
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.08),
-                          ),
+                      SizedBox(height: compactLayout ? 18 : 24),
+                      Text(
+                        '今日金句',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: const Color(0xFFFFE8B5),
+                          fontSize: compactLayout ? 28 : 36,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: compactLayout ? 4.0 : 6.0,
+                          height: 1.1,
                         ),
-                        child: TextButton.icon(
-                          onPressed: _toggleRead,
-                          style: TextButton.styleFrom(
-                            foregroundColor: _reading
-                                ? const Color(0xFFE5B25D)
-                                : Colors.white70,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 12,
+                      ),
+                      SizedBox(height: compactLayout ? 8 : 10),
+                      Text(
+                        '把今晚最值得带走的话，安静地留在中间。',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color:
+                              const Color(0xFFE8F4F1).withValues(alpha: 0.78),
+                          fontSize: compactLayout ? 12 : 13,
+                          height: 1.6,
+                        ),
+                      ),
+                      SizedBox(height: compactLayout ? 16 : 20),
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          _EndingQuotesActionButton(
+                            icon: _reading
+                                ? Icons.stop_circle
+                                : Icons.volume_up_rounded,
+                            label: _reading ? '停止朗读' : '思想家朗读',
+                            active: _reading,
+                            onPressed: _toggleRead,
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: compactLayout ? 18 : 24),
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 760),
+                            child: ListView.separated(
+                              padding: EdgeInsets.zero,
+                              physics: const BouncingScrollPhysics(),
+                              itemCount: display.length,
+                              separatorBuilder: (_, __) =>
+                                  SizedBox(height: compactLayout ? 12 : 16),
+                              itemBuilder: (context, index) {
+                                return TweenAnimationBuilder<double>(
+                                  duration:
+                                      Duration(milliseconds: 420 + index * 90),
+                                  curve: Curves.easeOutCubic,
+                                  tween: Tween(begin: 0.0, end: 1.0),
+                                  builder: (_, t, child) => Opacity(
+                                    opacity: t,
+                                    child: Transform.translate(
+                                      offset: Offset(0, (1 - t) * 18),
+                                      child: child,
+                                    ),
+                                  ),
+                                  child: _EndingQuoteCard(
+                                    index: index,
+                                    quote: display[index],
+                                  ),
+                                );
+                              },
                             ),
                           ),
-                          icon: Icon(
-                            _reading ? Icons.stop_circle : Icons.volume_up,
+                        ),
+                      ),
+                      SizedBox(height: compactLayout ? 16 : 20),
+                      SizedBox(
+                        width: compactLayout ? double.infinity : 220,
+                        child: FilledButton.icon(
+                          onPressed: widget.onExit,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFF4D38B),
+                            foregroundColor: const Color(0xFF152334),
+                            padding: EdgeInsets.symmetric(
+                              horizontal: compactLayout ? 18 : 24,
+                              vertical: compactLayout ? 14 : 16,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(999),
+                            ),
                           ),
-                          label: Text(_reading ? '停止朗读' : '思想家朗读'),
+                          icon: const Icon(Icons.check_circle_outline_rounded),
+                          label: Text(
+                            '结束',
+                            style: TextStyle(
+                              fontSize: compactLayout ? 15 : 16,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.2,
+                            ),
+                          ),
                         ),
                       ),
                     ],
                   ),
-                  SizedBox(height: compactLayout ? 16 : 26),
-                  Container(
-                    padding: compactLayout
-                        ? const EdgeInsets.fromLTRB(18, 16, 18, 16)
-                        : const EdgeInsets.fromLTRB(24, 22, 24, 22),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.035),
-                      borderRadius: BorderRadius.circular(28),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.08),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.18),
-                          blurRadius: 24,
-                          offset: const Offset(0, 12),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: compactLayout ? 36 : 42,
-                          height: compactLayout ? 36 : 42,
-                          decoration: BoxDecoration(
-                            color:
-                                const Color(0xFFE5B25D).withValues(alpha: 0.14),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Icon(
-                            Icons.auto_awesome,
-                            color: Color(0xFFE5B25D),
-                            size: compactLayout ? 18 : 20,
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Text(
-                            '一句话，不重复现场，而是把今晚最有光的想法重新炼成一句能被记住的话。',
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.72),
-                              fontSize: compactLayout ? 12 : 13,
-                              height: 1.7,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(height: compactLayout ? 14 : 24),
-                  Expanded(
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        final columns = display.length <= 2 ? 1 : 2;
-                        final columnSpacing = compactLayout ? 12.0 : 16.0;
-                        final rowSpacing = compactLayout ? 12.0 : 16.0;
-                        final rows = (display.length / columns).ceil();
-                        final itemWidth = columns == 1
-                            ? constraints.maxWidth
-                            : (constraints.maxWidth -
-                                    columnSpacing * (columns - 1)) /
-                                columns;
-                        final itemHeight = rows == 1
-                            ? constraints.maxHeight
-                            : (constraints.maxHeight -
-                                    rowSpacing * (rows - 1)) /
-                                rows;
-
-                        return Align(
-                          alignment: Alignment.topCenter,
-                          child: Wrap(
-                            spacing: columnSpacing,
-                            runSpacing: rowSpacing,
-                            children: [
-                              for (var i = 0; i < display.length; i++)
-                                SizedBox(
-                                  width: itemWidth,
-                                  height: itemHeight,
-                                  child: TweenAnimationBuilder<double>(
-                                    duration:
-                                        Duration(milliseconds: 420 + i * 80),
-                                    curve: Curves.easeOutCubic,
-                                    tween: Tween(begin: 0.0, end: 1.0),
-                                    builder: (_, t, child) => Opacity(
-                                      opacity: t,
-                                      child: Transform.translate(
-                                        offset: Offset(0, (1 - t) * 18),
-                                        child: child,
-                                      ),
-                                    ),
-                                    child: _EndingQuoteCard(
-                                      index: i,
-                                      quote: display[i],
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Positioned(
-              right: 24,
-              top: 24,
-              child: IconButton(
-                icon: const Icon(Icons.close, color: Colors.white70),
-                onPressed: widget.onExit,
+                ),
               ),
             ),
           ],
@@ -5673,137 +5694,160 @@ class _EndingQuoteCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final compact =
-            constraints.maxHeight < 190 || constraints.maxWidth < 320;
-        final stacked = constraints.maxWidth < 260;
-        final badgeWidth = stacked ? 56.0 : (compact ? 56.0 : 64.0);
-        final quoteFontSize = constraints.maxWidth < 220
-            ? 15.0
-            : compact
-                ? 18.0
-                : 24.0;
-        final quoteLineHeight = constraints.maxWidth < 220
-            ? 1.35
-            : compact
-                ? 1.45
-                : 1.75;
+        final compact = constraints.maxWidth < 560;
+        final quoteFontSize = compact ? 18.0 : 24.0;
+        final lineHeight = compact ? 1.65 : 1.8;
 
-        final badge = Container(
-          width: badgeWidth,
-          padding: EdgeInsets.symmetric(
-            vertical: compact ? 6 : 8,
-            horizontal: stacked ? 6 : 0,
-          ),
+        return Container(
+          width: double.infinity,
+          padding: compact
+              ? const EdgeInsets.fromLTRB(18, 18, 18, 18)
+              : const EdgeInsets.fromLTRB(28, 24, 28, 24),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            color: const Color(0xFFE5B25D).withValues(alpha: 0.10),
-            border: Border.all(
-              color: const Color(0xFFE5B25D).withValues(alpha: 0.24),
+            borderRadius: BorderRadius.circular(compact ? 22 : 28),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                const Color(0xFFF7E4B7).withValues(alpha: 0.13),
+                Colors.white.withValues(alpha: 0.05),
+                const Color(0xFF7FD7C4).withValues(alpha: 0.05),
+              ],
             ),
+            border: Border.all(
+              color: const Color(0xFFF4D38B).withValues(alpha: 0.18),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.14),
+                blurRadius: 22,
+                offset: const Offset(0, 12),
+              ),
+            ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                '第 ${index + 1}',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.55),
-                  fontSize: compact ? 10 : 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1.2,
+              Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 12 : 14,
+                  vertical: compact ? 6 : 7,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF4D38B).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(
+                    color: const Color(0xFFF4D38B).withValues(alpha: 0.18),
+                  ),
+                ),
+                child: Text(
+                  '第 ${index + 1} 句',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: const Color(0xFFFFE8B5),
+                    fontSize: compact ? 11 : 12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.4,
+                  ),
                 ),
               ),
-              SizedBox(height: compact ? 2 : 4),
+              SizedBox(height: compact ? 14 : 18),
               Text(
-                '句',
+                '“',
+                textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: const Color(0xFFE5B25D),
-                  fontSize: compact ? 14 : 16,
+                  color: const Color(0xFFF4D38B),
+                  fontSize: compact ? 26 : 34,
                   fontWeight: FontWeight.w700,
+                  height: 1,
+                ),
+              ),
+              SizedBox(height: compact ? 4 : 6),
+              Text(
+                quote,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: const Color(0xFFF9F6F0),
+                  fontSize: quoteFontSize,
+                  height: lineHeight,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              SizedBox(height: compact ? 14 : 18),
+              Container(
+                width: compact ? 84 : 112,
+                height: 3,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  gradient: LinearGradient(
+                    colors: [
+                      const Color(0xFFF4D38B),
+                      const Color(0xFF7FD7C4).withValues(alpha: 0.9),
+                    ],
+                  ),
                 ),
               ),
             ],
           ),
         );
-
-        final quoteBlock = Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              '“',
-              style: TextStyle(
-                color: const Color(0xFFE5B25D).withValues(alpha: 0.85),
-                fontSize: compact ? 22 : 28,
-                height: 1,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            SizedBox(height: compact ? 4 : 6),
-            Text(
-              quote,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: quoteFontSize,
-                height: quoteLineHeight,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            SizedBox(height: compact ? 8 : 12),
-            Container(
-              width: compact ? 56 : 72,
-              height: 2,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(99),
-                gradient: LinearGradient(
-                  colors: [
-                    const Color(0xFFE5B25D).withValues(alpha: 0.7),
-                    Colors.white.withValues(alpha: 0.1),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        );
-
-        return Container(
-          padding: compact
-              ? const EdgeInsets.fromLTRB(16, 14, 16, 14)
-              : const EdgeInsets.fromLTRB(22, 20, 22, 22),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Colors.white.withValues(alpha: 0.07),
-                Colors.white.withValues(alpha: 0.03),
-              ],
-            ),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.08),
-            ),
-          ),
-          child: stacked
-              ? Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    badge,
-                    SizedBox(height: compact ? 10 : 14),
-                    quoteBlock,
-                  ],
-                )
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    badge,
-                    SizedBox(width: compact ? 14 : 18),
-                    Expanded(child: quoteBlock),
-                  ],
-                ),
-        );
       },
+    );
+  }
+}
+
+class _EndingQuotesActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onPressed;
+
+  const _EndingQuotesActionButton({
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        gradient: LinearGradient(
+          colors: active
+              ? [
+                  const Color(0xFFF4D38B).withValues(alpha: 0.20),
+                  const Color(0xFF7FD7C4).withValues(alpha: 0.16),
+                ]
+              : [
+                  Colors.white.withValues(alpha: 0.06),
+                  Colors.white.withValues(alpha: 0.03),
+                ],
+        ),
+        border: Border.all(
+          color: active
+              ? const Color(0xFFF4D38B).withValues(alpha: 0.34)
+              : Colors.white.withValues(alpha: 0.08),
+        ),
+      ),
+      child: TextButton.icon(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          foregroundColor: active
+              ? const Color(0xFFFFE8B5)
+              : Colors.white.withValues(alpha: 0.84),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+        ),
+        icon: Icon(icon, size: 18),
+        label: Text(
+          label,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.6,
+          ),
+        ),
+      ),
     );
   }
 }

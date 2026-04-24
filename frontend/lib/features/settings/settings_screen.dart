@@ -280,11 +280,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       'edge_tts': 'edge_tts_url',
       'cosyvoice': 'cosyvoice_url',
       'openai_whisper': 'openai_whisper_base_url',
-      'openai_tts': 'openai_base_url',
     };
     const keyMap = {
       'openai_whisper': 'openai_whisper_api_key',
-      'openai_tts': 'openai_api_key',
     };
     if (url.isNotEmpty && urlMap.containsKey(p.id)) {
       updates[urlMap[p.id]!] = url;
@@ -1538,61 +1536,85 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         title: '交互方式',
         icon: Icons.touch_app_outlined,
         children: [
+          const Text('麦克风启动方式',
+              style: TextStyle(
+                  color: AppColors.warmWhite,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              ChoiceChip(
+                label: const Text('自动开启麦克风'),
+                selected: s.micActivationMode == 'auto',
+                onSelected: (_) => ref
+                    .read(localSettingsProvider.notifier)
+                    .setMicActivationMode('auto'),
+                selectedColor: AppColors.amberGold,
+                backgroundColor: AppColors.studyWall,
+                labelStyle: TextStyle(
+                  color: s.micActivationMode == 'auto'
+                      ? Colors.black
+                      : AppColors.warmWhite,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+                side: BorderSide(
+                  color: s.micActivationMode == 'auto'
+                      ? AppColors.amberGold
+                      : AppColors.warmGray.withValues(alpha: 0.45),
+                ),
+              ),
+              ChoiceChip(
+                label: const Text('用户手动开启'),
+                selected: s.micActivationMode == 'manual',
+                onSelected: (_) => ref
+                    .read(localSettingsProvider.notifier)
+                    .setMicActivationMode('manual'),
+                selectedColor: AppColors.amberGold,
+                backgroundColor: AppColors.studyWall,
+                labelStyle: TextStyle(
+                  color: s.micActivationMode == 'manual'
+                      ? Colors.black
+                      : AppColors.warmWhite,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+                side: BorderSide(
+                  color: s.micActivationMode == 'manual'
+                      ? AppColors.amberGold
+                      : AppColors.warmGray.withValues(alpha: 0.45),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '当前仅保存偏好，后续升级会再接入会话录音逻辑。',
+            style: TextStyle(
+              color: AppColors.warmGray.withValues(alpha: 0.92),
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: 6),
           SwitchListTile(
-            title: const Text('按住说话（Push-to-Talk）',
+            title: const Text('流式显示用户字幕',
                 style: TextStyle(color: AppColors.warmWhite)),
-            subtitle: const Text('双击 Ctrl：开始/结束录音  ·  可切换按住 Ctrl 模式',
-                style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
-            value: s.pushToTalk,
-            onChanged: (v) async {
-              ref.read(localSettingsProvider.notifier).setPushToTalk(v);
-              await ref
-                  .read(apiClientProvider)
-                  .updateConfig({'push_to_talk': v});
+            subtitle: const Text(
+              '开启后，用户发言会实时滚动显示识别字幕；自由话题页的麦克风草稿也遵循这个设置。',
+              style: TextStyle(color: AppColors.warmGray, fontSize: 11),
+            ),
+            value: s.streamUserSubtitles,
+            onChanged: (v) {
+              ref
+                  .read(localSettingsProvider.notifier)
+                  .setStreamUserSubtitles(v);
             },
             contentPadding: EdgeInsets.zero,
             activeThumbColor: AppColors.amberGold,
             dense: true,
-          ),
-          const SizedBox(height: 8),
-          Opacity(
-            opacity: s.pushToTalk ? 1.0 : 0.45,
-            child: IgnorePointer(
-              ignoring: !s.pushToTalk,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Ctrl 控制模式',
-                      style: TextStyle(
-                          color: AppColors.warmWhite,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 6),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.05),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.12),
-                      ),
-                    ),
-                    child: Text(
-                      '已固定为按住 Ctrl 开始、松开 Ctrl 结束。会话页右侧“讲话”按钮支持单击开始、再次单击结束；当 Ctrl 正在接管发言时，按钮只同步显示红色状态，不再响应点击。',
-                      style: TextStyle(
-                        color: AppColors.warmWhite.withValues(alpha: 0.82),
-                        fontSize: 12,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ),
         ],
       );
@@ -2571,9 +2593,10 @@ class _TopicsTab extends StatefulWidget {
 }
 
 class _TopicsTabState extends State<_TopicsTab> {
-  List<String> _items = const [];
+  List<SavedTopicItem> _items = const [];
   bool _loading = true;
   final TextEditingController _inputCtrl = TextEditingController();
+  final TextEditingController _originalCtrl = TextEditingController();
 
   void _showSnack(String message, {bool error = false}) {
     if (!mounted) return;
@@ -2594,7 +2617,19 @@ class _TopicsTabState extends State<_TopicsTab> {
   @override
   void dispose() {
     _inputCtrl.dispose();
+    _originalCtrl.dispose();
     super.dispose();
+  }
+
+  String _formatSavedAt(DateTime? value) {
+    if (value == null) {
+      return '时间未记录';
+    }
+    final month = value.month.toString().padLeft(2, '0');
+    final day = value.day.toString().padLeft(2, '0');
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '${value.year}-$month-$day $hour:$minute';
   }
 
   Future<void> _load() async {
@@ -2608,22 +2643,28 @@ class _TopicsTabState extends State<_TopicsTab> {
 
   Future<void> _add() async {
     final topic = _inputCtrl.text.trim();
+    final originalContent = _originalCtrl.text.trim();
     if (topic.isEmpty) {
       _showSnack('请输入要保存的话题', error: true);
       return;
     }
-    await SavedTopicsStore.add(topic);
+    await SavedTopicsStore.add(
+      topic,
+      originalContent: originalContent,
+    );
     _inputCtrl.clear();
+    _originalCtrl.clear();
     await _load();
     _showSnack('已添加到常用话题');
   }
 
-  Future<void> _remove(String topic) async {
+  Future<void> _remove(SavedTopicItem topic) async {
     await SavedTopicsStore.remove(topic);
     await _load();
     _showSnack('已删除话题');
   }
 
+  @override
   Widget build(BuildContext context) {
     if (_loading) {
       return const Center(
@@ -2634,9 +2675,13 @@ class _TopicsTabState extends State<_TopicsTab> {
       children: [
         Text('常用话题管理', style: AppTheme.calligraphyStyleDark(fontSize: 16)),
         const SizedBox(height: 4),
-        const Text(
-          '此处保存的话题会出现在首页「自由话题」输入框上方，点击即可直接使用。',
-          style: TextStyle(color: AppColors.warmGray, fontSize: 12),
+        Text(
+          '此处保存的话题会出现在首页「自由话题」输入框上方；如果保存时已经经过 AI 整理，这里优先显示整理后的话题，并在下方保留原始描述。',
+          style: TextStyle(
+            color: AppColors.warmGray.withValues(alpha: 0.92),
+            fontSize: 12,
+            height: 1.45,
+          ),
         ),
         const SizedBox(height: 16),
         Text(
@@ -2644,42 +2689,68 @@ class _TopicsTabState extends State<_TopicsTab> {
           style: const TextStyle(color: AppColors.amberGold, fontSize: 12),
         ),
         const SizedBox(height: 8),
-        Row(children: [
-          Expanded(
-            child: TextField(
-              controller: _inputCtrl,
-              style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
-              decoration: InputDecoration(
-                hintText: '添加一个话题…',
-                hintStyle:
-                    const TextStyle(color: AppColors.warmGray, fontSize: 12),
-                filled: true,
-                fillColor: AppColors.studyWall,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: AppColors.warmGray),
-                ),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              ),
-              onSubmitted: (_) => _add(),
+        TextField(
+          controller: _inputCtrl,
+          style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
+          decoration: InputDecoration(
+            labelText: '话题内容',
+            hintText: '添加一个话题…',
+            labelStyle: const TextStyle(color: AppColors.warmGray),
+            hintStyle: const TextStyle(color: AppColors.warmGray, fontSize: 12),
+            filled: true,
+            fillColor: AppColors.studyWall,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: AppColors.warmGray),
             ),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           ),
-          const SizedBox(width: 10),
-          ElevatedButton.icon(
-            onPressed: _add,
-            icon: const Icon(Icons.add, size: 16),
-            label: const Text('添加到列表'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.amberGold,
-              foregroundColor: Colors.black,
-            ),
-          ),
-        ]),
+          onSubmitted: (_) => _add(),
+        ),
         const SizedBox(height: 8),
-        const Text(
-          '输入后按回车或点击右侧按钮即可保存，保存后会同步出现在首页自由话题候选区。',
-          style: TextStyle(color: AppColors.warmGray, fontSize: 11),
+        TextField(
+          controller: _originalCtrl,
+          minLines: 2,
+          maxLines: 3,
+          style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
+          decoration: InputDecoration(
+            labelText: '原始话题内容（可选）',
+            hintText: '如果你想保留自由话题最初的长描述，可以填在这里。',
+            labelStyle: const TextStyle(color: AppColors.warmGray),
+            hintStyle: const TextStyle(color: AppColors.warmGray, fontSize: 12),
+            filled: true,
+            fillColor: AppColors.studyWall,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: AppColors.warmGray),
+            ),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            ElevatedButton.icon(
+              onPressed: _add,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('添加到列表'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.amberGold,
+                foregroundColor: Colors.black,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '保存后会同步出现在首页自由话题候选区；首页只显示整理后的主标题，设置页会额外保留原始内容与保存时间。',
+          style: TextStyle(
+            color: AppColors.warmGray.withValues(alpha: 0.92),
+            fontSize: 11,
+            height: 1.45,
+          ),
         ),
         const SizedBox(height: 18),
         if (_items.isEmpty)
@@ -2691,33 +2762,103 @@ class _TopicsTabState extends State<_TopicsTab> {
             ),
           )
         else
-          ..._items.map(
-            (t) => Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: AppColors.studyWall,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                    color: AppColors.warmGray.withValues(alpha: 0.4)),
-              ),
-              child: Row(children: [
-                const Icon(Icons.bookmark,
-                    color: AppColors.amberGold, size: 16),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(t,
+          ..._items.asMap().entries.map(
+            (entry) {
+              final index = entry.key;
+              final t = entry.value;
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                decoration: BoxDecoration(
+                  color: AppColors.studyWall,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: AppColors.warmGray.withValues(alpha: 0.4)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.amberGold.withValues(alpha: 0.14),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            '话题 ${(index + 1).toString().padLeft(2, '0')}',
+                            style: const TextStyle(
+                              color: AppColors.amberGold,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _formatSavedAt(t.savedAt),
+                            style: const TextStyle(
+                              color: AppColors.warmGray,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline,
+                              color: AppColors.warmGray, size: 18),
+                          tooltip: '删除',
+                          onPressed: () => _remove(t),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      '话题内容',
+                      style: TextStyle(
+                        color: AppColors.warmGray,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      t.title,
                       style: const TextStyle(
-                          color: AppColors.warmWhite, fontSize: 13)),
+                        color: AppColors.warmWhite,
+                        fontSize: 13,
+                        height: 1.45,
+                      ),
+                    ),
+                    if (t.hasOriginalContent) ...[
+                      const SizedBox(height: 10),
+                      const Text(
+                        '原始话题内容',
+                        style: TextStyle(
+                          color: AppColors.warmGray,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        t.originalContent,
+                        style: const TextStyle(
+                          color: AppColors.warmWhite,
+                          fontSize: 12,
+                          height: 1.5,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline,
-                      color: AppColors.warmGray, size: 18),
-                  tooltip: '删除',
-                  onPressed: () => _remove(t),
-                ),
-              ]),
-            ),
+              );
+            },
           ),
         const SizedBox(height: 32),
       ],

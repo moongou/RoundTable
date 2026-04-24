@@ -1,11 +1,28 @@
 """话题相关 API"""
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-from app.core.topics import get_all_topics, get_topic_by_id, get_topic_categories
+from app.core.topics import (
+    FREE_TOPIC_CATEGORY_ID,
+    build_free_topic_brief,
+    get_all_topics,
+    get_topic_by_id,
+    get_topic_categories,
+)
 from app.models.session import Topic
 
 router = APIRouter(prefix="/topics", tags=["topics"])
+
+
+class FreeTopicRefineRequest(BaseModel):
+    text: str
+
+
+class FreeTopicRefineResponse(BaseModel):
+    title: str
+    description: str
+    category: str = FREE_TOPIC_CATEGORY_ID
 
 
 @router.get("/", response_model=list[Topic])
@@ -21,6 +38,13 @@ async def list_topics(category: str | None = None):
 async def list_categories():
     """获取所有话题分类及其话题数量。"""
     return get_topic_categories()
+
+
+@router.post("/refine-free-topic", response_model=FreeTopicRefineResponse)
+async def refine_free_topic(request: FreeTopicRefineRequest):
+    """把自由话题的长描述提炼成一句适合展示的标题。"""
+    result = build_free_topic_brief(request.text)
+    return FreeTopicRefineResponse(**result)
 
 
 @router.get("/{topic_id}", response_model=Topic)

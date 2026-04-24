@@ -129,6 +129,7 @@ class FloorManager:
         self._min_human_turn_window_sec = 8.0
         self._human_turn_started_mono = 0.0
         self._last_human_input_requested_speaker = ""
+        self._human_turn_idle_notice_sent = False
 
         # 暂停状态
         self._paused = False
@@ -401,8 +402,10 @@ class FloorManager:
         if new_state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
             if old_state not in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
                 self._human_turn_started_mono = time.monotonic()
+                self._human_turn_idle_notice_sent = False
         else:
             self._human_turn_started_mono = 0.0
+            self._human_turn_idle_notice_sent = False
         self._touch_progress("set_state")
         if self._on_state_change:
             await self._on_state_change(old_state, new_state, reason, recovery)
@@ -445,26 +448,23 @@ class FloorManager:
                     # Rate-limit watchdog actions to avoid repeated queue writes.
                     if now - self._last_watchdog_action_ts < 6.0:
                         continue
+                    if self._human_turn_idle_notice_sent:
+                        continue
                     self._last_watchdog_action_ts = now
+                    self._human_turn_idle_notice_sent = True
                     speaker = self.current_speaker
                     display = self._agent_to_display_name.get(speaker, speaker)
                     logger.warning(
-                        "[FloorManager] human turn stalled for %.1fs, auto-skip speaker=%s",
+                        "[FloorManager] human turn stalled for %.1fs, manual input still required speaker=%s",
                         idle_sec,
                         speaker,
                     )
-                    await self._put_human_input(speaker, "（跳过）")
                     await self._emit_message(
                         "系统",
-                        f"{display} 同学输入超时，系统已自动跳过并继续讨论。",
+                        f"{display} 同学，如果你暂时不想发言，可以手动点“跳过”；系统不会替你跳过。",
                         "system",
                     )
-                    await self._set_state(
-                        FloorState.SELECTING_SPEAKER,
-                        reason="watchdog_human_autoskip",
-                        recovery=True,
-                    )
-                    self._touch_progress("watchdog_human_autoskip")
+                    self._touch_progress("watchdog_human_wait_notice")
                 continue
 
             # Non-human hard stalls: publish a diagnostic system message for observability.

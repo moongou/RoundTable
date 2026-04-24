@@ -27,7 +27,7 @@ from app.core.golden_quotes import (
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker
-from app.core.topics import get_topic_by_id
+from app.core.topics import FREE_TOPIC_CATEGORY_ID, FREE_TOPIC_CATEGORY_NAME, get_topic_by_id
 from app.core.turn_scheduler import create_discussion_team
 from app.models.session import (
     CreateSessionRequest,
@@ -79,14 +79,15 @@ async def create_session(request: CreateSessionRequest):
             raise HTTPException(status_code=404, detail=f"话题 '{effective_topic_id}' 不存在")
     elif request.free_topic:
         # 用户自由发起的话题
+        free_topic_detail = request.free_topic_detail.strip() or request.free_topic
         topic = TopicModel(
             id="free_topic",
             title=request.free_topic,
-            description=f"由用户发起的自由讨论话题：{request.free_topic}",
-            category="free",
+            description=f"由用户发起的自由讨论话题：{free_topic_detail}",
+            category=FREE_TOPIC_CATEGORY_ID,
             age_range="8-12",
             guide_questions=[],
-            tags=["自由话题"],
+            tags=[FREE_TOPIC_CATEGORY_NAME, "自由话题"],
         )
     else:
         raise HTTPException(

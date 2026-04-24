@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,7 @@ from app.core.floor_manager import FloorManager
 from app.core.floor_manager import FloorState
 from app.core.rolling_summary_memory import RollingSummaryMemory
 from app.core.turn_scheduler import create_discussion_team
+from app.core.turn_scheduler import parse_speaker_designation
 
 
 class _ModelContextStub:
@@ -259,6 +261,46 @@ async def test_human_proxy_queues_are_session_scoped_and_agent_alias_aware() -> 
     assert get_human_queue('豆苗', session_scope='session-b') is queue_b
 
 
+@pytest.mark.asyncio
+async def test_watchdog_human_turn_only_reminds_and_does_not_enqueue_skip() -> None:
+    clear_human_queues()
+    session_scope = 'watchdog-manual-skip'
+    create_human_proxy('豆苗', session_scope=session_scope)
+    queue = get_human_queue('豆苗', session_scope=session_scope)
+    messages: list[tuple[str, str, str]] = []
+
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+        human_queue_scope=session_scope,
+    )
+    floor_manager.set_display_name_map({'moderator': '李老师', '豆苗': '豆苗'})
+
+    async def _collect_message(source: str, content: str, msg_type: str) -> None:
+        messages.append((source, content, msg_type))
+
+    floor_manager.on_message(_collect_message)
+    floor_manager.current_speaker = '豆苗'
+    floor_manager.state = FloorState.HUMAN_TURN_WAITING
+    floor_manager._human_turn_started_mono = time.monotonic() - 10.0
+    floor_manager._last_progress_ts = time.monotonic() - 10.0
+    floor_manager._human_stall_timeout_sec = 0.01
+    floor_manager._min_human_turn_window_sec = 0.0
+    floor_manager._stall_check_interval_sec = 0.01
+
+    task = asyncio.create_task(floor_manager._watchdog_loop())
+    await asyncio.sleep(0.05)
+    floor_manager._watchdog_stop.set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert queue.empty()
+    assert any('系统不会替你跳过' in content for _, content, _ in messages)
+
+
 def test_turn_scheduler_prefers_ai_after_moderator_opening() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
@@ -288,6 +330,13 @@ def test_turn_scheduler_prefers_ai_after_moderator_opening() -> None:
 
     assert selector(opening_without_designation) == 'explorer'
     assert selector(opening_with_ai_designation) == 'explorer'
+
+
+def test_parse_speaker_designation_supports_natural_follow_up_questions() -> None:
+    participants = ['李老师', '小探', '豆苗']
+
+    assert parse_speaker_designation('豆苗你有没有过这种小失误啊？', participants) == '豆苗'
+    assert parse_speaker_designation('我也想请小探再补充一下。', participants) == '小探'
 
 
 @pytest.mark.asyncio

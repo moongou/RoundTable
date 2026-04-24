@@ -103,5 +103,8 @@ void main() {
       ),
       findsOneWidget,
     );
+    expect(find.text('自动开启麦克风', skipOffstage: false), findsOneWidget);
+    expect(find.text('用户手动开启', skipOffstage: false), findsOneWidget);
+    expect(find.text('按住说话（Push-to-Talk）', skipOffstage: false), findsNothing);
   });
 }

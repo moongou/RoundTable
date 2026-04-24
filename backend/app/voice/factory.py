@@ -13,7 +13,6 @@ from app.voice.chattts import ChatTTSProvider
 from app.voice.cosyvoice import CosyVoiceProvider
 from app.voice.edge_tts import EdgeTTSProvider
 from app.voice.gateway import GatewayASRProvider, GatewayTTSProvider
-from app.voice.openai_tts import OpenAITTSProvider
 from app.voice.openai_whisper import OpenAIWhisperProvider
 
 logger = logging.getLogger(__name__)
@@ -42,9 +41,9 @@ def create_tts_provider(provider_id: str | None = None) -> TTSProvider:
         url = settings.cosyvoice_url or "http://localhost:50000"
         return CosyVoiceProvider(base_url=url)
     elif pid == "openai_tts":
-        return OpenAITTSProvider(
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key,
+        logger.warning("TTS provider openai_tts 已移除，自动回退到 edge_tts")
+        return EdgeTTSProvider(
+            base_url=settings.edge_tts_url or settings.tts_url or "http://localhost:5051",
         )
     elif pid in ("vibevoice", "fireredtts", "openvoice"):
         return GatewayTTSProvider(service=pid)
@@ -76,10 +75,8 @@ def create_tts_provider_with_url(provider_id: str, base_url: str = "") -> TTSPro
     elif provider_id == "cosyvoice":
         return CosyVoiceProvider(base_url=url or "http://localhost:50000")
     elif provider_id == "openai_tts":
-        return OpenAITTSProvider(
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key,
-        )
+        logger.warning("TTS provider openai_tts 已移除，独立测试自动回退到 edge_tts")
+        return EdgeTTSProvider(base_url=url or "http://localhost:5051")
     elif provider_id in ("vibevoice", "fireredtts", "openvoice"):
         return GatewayTTSProvider(service=provider_id)
     else:

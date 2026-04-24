@@ -162,6 +162,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         topic_id = (config.get("topic_id") or "").strip()
         free_topic = (config.get("free_topic") or "").strip()
+        free_topic_detail = (config.get("free_topic_detail") or "").strip()
         character_ids = config.get("character_ids", ["explorer", "skeptic"])
         thinker_ids = config.get("thinker_ids", [])
         human_names = config.get("human_names", ["豆苗"])
@@ -193,15 +194,16 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         if topic is None and free_topic:
             from app.models.session import Topic as TopicModel  # noqa: PLC0415
+            from app.core.topics import FREE_TOPIC_CATEGORY_ID, FREE_TOPIC_CATEGORY_NAME  # noqa: PLC0415
 
             topic = TopicModel(
                 id="free_topic",
                 title=free_topic,
-                description=f"由用户发起的自由讨论话题：{free_topic}",
-                category="free",
+                description=f"由用户发起的自由讨论话题：{free_topic_detail or free_topic}",
+                category=FREE_TOPIC_CATEGORY_ID,
                 age_range="8-12",
                 guide_questions=[],
-                tags=["自由话题"],
+                tags=[FREE_TOPIC_CATEGORY_NAME, "自由话题"],
             )
 
         if not topic:

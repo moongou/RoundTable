@@ -144,6 +144,61 @@ void main() {
     );
   });
 
+  test('human state text is ignored while finalizing or after speaker moved on',
+      () {
+    expect(
+      ImmersiveSessionScreen.shouldApplyHumanStateStatus(
+        newState: 'human_turn_waiting',
+        humanName: '豆苗',
+        currentSpeaker: '豆苗',
+        isMyTurn: false,
+        isRecording: false,
+        isCompletingHumanTurn: true,
+        isFinalizingSpeech: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldApplyHumanStateStatus(
+        newState: 'human_speaking',
+        humanName: '豆苗',
+        currentSpeaker: '苏格拉底',
+        isMyTurn: false,
+        isRecording: false,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldApplyHumanStateStatus(
+        newState: 'human_speaking',
+        humanName: '豆苗',
+        currentSpeaker: '豆苗',
+        isMyTurn: true,
+        isRecording: true,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldApplyHumanStateStatus(
+        newState: 'human_turn_waiting',
+        humanName: '豆苗',
+        currentSpeaker: '豆苗',
+        isMyTurn: false,
+        isRecording: false,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+      ),
+      isFalse,
+    );
+  });
+
   test('human subtitle hold gives long replies enough dwell time', () {
     expect(
       ImmersiveSessionScreen.humanSubtitleHoldDurationFor('短句').inMilliseconds,

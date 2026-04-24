@@ -40,7 +40,7 @@ class Topic(BaseModel):
     id: str
     title: str
     description: str
-    category: str  # science/ethics/society/literature/health/education/tech/life
+    category: str  # science/ethics/society/literature/health/education/tech/life/spark
     age_range: str = "8-12"  # 适合年龄
     guide_questions: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
@@ -83,6 +83,7 @@ class CreateSessionRequest(BaseModel):
 
     topic_id: str = ""  # 可选：预设话题ID（为空时使用 free_topic）
     free_topic: str = ""  # 可选：用户自由发起的话题文本
+    free_topic_detail: str = ""  # 可选：自由话题的原始详细描述
     character_ids: list[str] = Field(default_factory=lambda: ["explorer", "skeptic"])
     thinker_ids: list[str] = Field(default_factory=list)  # 额外的思想家角色
     human_names: list[str] = Field(default_factory=lambda: ["豆苗"])

@@ -93,6 +93,7 @@ class ApiClient {
     List<String> thinkerIds = const [],
     int maxTurns = 30,
     String freeTopic = '',
+    String freeTopicDetail = '',
   }) async {
     final data = <String, dynamic>{
       'topic_id': topicId,
@@ -103,9 +104,21 @@ class ApiClient {
     };
     if (freeTopic.isNotEmpty) {
       data['free_topic'] = freeTopic;
+      if (freeTopicDetail.isNotEmpty) {
+        data['free_topic_detail'] = freeTopicDetail;
+      }
     }
     final response = await _dio.post('/api/v1/sessions/', data: data);
     return Map<String, dynamic>.from(response.data);
+  }
+
+  /// 把自由话题的长描述提炼成一句更适合展示的标题。
+  Future<Map<String, dynamic>> refineFreeTopic(String text) async {
+    final response = await _dio.post(
+      '/api/v1/topics/refine-free-topic',
+      data: {'text': text},
+    );
+    return Map<String, dynamic>.from(response.data as Map);
   }
 
   /// 获取会话详情

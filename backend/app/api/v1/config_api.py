@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/config", tags=["config"])
 
 
+def _effective_tts_provider_id() -> str:
+    current = (settings.tts_provider or "").strip().lower()
+    if current == "openai_tts" or current not in TTS_PROVIDERS:
+        return "edge_tts"
+    return current
+
+
 def _has_real_api_key(value: str) -> bool:
     key = (value or "").strip()
     return bool(key and key not in {"sk-xxx", "your-api-key"} and not key.startswith("sk-xxx"))
@@ -179,16 +186,6 @@ async def _semantic_voice_probe(service_id: str, url: str, timeout_sec: float = 
                     f"gradio endpoints={'ok' if has_seed_endpoint else 'missing'}, HTTP {resp.status_code}"
                 )
                 base["status_code"] = resp.status_code
-            elif service_id == "openai_tts":
-                # OpenAI TTS has no dedicated voice-list endpoint; /models probe is a practical semantic check.
-                headers = {}
-                key = settings.openai_api_key
-                if key:
-                    headers["Authorization"] = f"Bearer {key}"
-                resp = await client.get(f"{(settings.openai_base_url or 'https://api.openai.com/v1').rstrip('/')}/models", headers=headers)
-                base["reachable"] = 200 <= resp.status_code < 300
-                base["detail"] = f"OpenAI models HTTP {resp.status_code}"
-                base["status_code"] = resp.status_code
             elif service_id == "openai_whisper":
                 key = settings.openai_whisper_api_key or settings.openai_api_key
                 if key:
@@ -268,7 +265,7 @@ def _health_category_for_service(service_id: str) -> str:
 
 def _health_candidate_service_ids(*, current_only: bool) -> list[str]:
     if current_only:
-        candidate_ids = [settings.asr_provider, settings.tts_provider]
+        candidate_ids = [settings.asr_provider, _effective_tts_provider_id()]
         if settings.llm_provider == "ollama":
             candidate_ids.append("ollama")
     else:
@@ -359,9 +356,6 @@ async def list_speech_providers():
         if service_id == "openai_whisper":
             key = settings.openai_whisper_api_key or settings.openai_api_key
             api_key = "***" if key else ""
-        elif service_id == "openai_tts":
-            key = settings.openai_api_key
-            api_key = "***" if key else ""
         return {
             "url": url,
             "default_url": meta.get("default_url", ""),
@@ -381,7 +375,7 @@ async def list_speech_providers():
             or VOICE_SERVICE_META.get(pid, {}).get("health_path", "/health"),
         )
         for pid in list(ASR_PROVIDERS.keys()) + list(TTS_PROVIDERS.keys())
-        if pid not in ("browser", "disabled", "openai_whisper", "openai_tts")
+        if pid not in ("browser", "disabled", "openai_whisper")
         and LOCAL_SERVICE_DEFAULTS.get(pid)
     }
     # 去重（asr+tts 字典合并后同一 pid 只探测一次）
@@ -401,7 +395,6 @@ async def list_speech_providers():
 
     _remote_probe_results = {
         "openai_whisper": await _probe_openai_voice_service("openai_whisper"),
-        "openai_tts": await _probe_openai_voice_service("openai_tts"),
     }
 
     def _available(pid: str) -> bool:
@@ -409,9 +402,9 @@ async def list_speech_providers():
             return True
         if pid == "openai_whisper":
             return _remote_probe_results.get(pid, False)
-        if pid == "openai_tts":
-            return _remote_probe_results.get(pid, False)
         return _probe_results.get(pid, False)
+
+    active_tts_provider = _effective_tts_provider_id()
 
     return {
         "asr": [
@@ -428,7 +421,7 @@ async def list_speech_providers():
             {
                 "id": pid,
                 "name": name,
-                "is_active": pid == settings.tts_provider,
+                "is_active": pid == active_tts_provider,
                 "available": _available(pid),
                 **voice_service_detail(pid),
             }
@@ -471,7 +464,7 @@ async def get_current_config():
         "api_key_masked": mask_key(api_key),
         "model": getattr(settings, f"{provider}_model", ""),
         "asr_provider": settings.asr_provider,
-        "tts_provider": settings.tts_provider,
+        "tts_provider": _effective_tts_provider_id(),
         "push_to_talk": settings.push_to_talk,
         "hardware_detection_on_startup": settings.hardware_detection_on_startup,
         "web_search_enabled": settings.web_search_enabled,
@@ -546,7 +539,7 @@ async def validate_current_config():
 
     await asyncio.gather(
         validate_voice_item(f"ASR（{settings.asr_provider}）", settings.asr_provider),
-        validate_voice_item(f"TTS（{settings.tts_provider}）", settings.tts_provider),
+        validate_voice_item(f"TTS（{_effective_tts_provider_id()}）", _effective_tts_provider_id()),
     )
 
     all_ok = all(c.get("ok", False) for c in checks)
@@ -740,7 +733,7 @@ async def test_voice_service(body: dict):
     """测试语音服务连接，尝试获取可用音色/模型列表。
 
     Body:
-        service: 服务 ID (funasr / edge_tts / cosyvoice / openai_tts / openai_whisper)
+        service: 服务 ID (funasr / edge_tts / cosyvoice / openai_whisper)
         url: 服务 URL（可选，为空时使用当前配置）
         api_key: API Key（可选，仅部分服务需要）
     """
@@ -774,7 +767,7 @@ async def test_voice_service(body: dict):
                 headers: dict = {}
                 if api_key:
                     headers["Authorization"] = f"Bearer {api_key}"
-                elif service in ("openai_whisper", "openai_tts"):
+                elif service == "openai_whisper":
                     key = settings.openai_whisper_api_key or settings.openai_api_key
                     if key:
                         headers["Authorization"] = f"Bearer {key}"
@@ -797,8 +790,6 @@ async def test_voice_service(body: dict):
                             voices = raw if isinstance(raw, list) else list(raw.get("speakers", []))
                     except Exception:
                         voices = ["default", "中文女声", "中文男声"]
-                elif service in ("openai_tts",):
-                    voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
                 elif service == "openvoice":
                     voices = list_openvoice_profile_ids()
                 elif service == "funasr":

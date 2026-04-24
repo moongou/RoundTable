@@ -17,11 +17,12 @@ TtsService createWebTtsService(
     case 'chattts':
     case 'edge_tts':
     case 'cosyvoice':
-    case 'openai_tts':
     case 'vibevoice':
     case 'fireredtts':
     case 'openvoice':
       return ServerTtsService(serverUrl: serverUrl, providerId: providerId);
+    case 'openai_tts':
+      return ServerTtsService(serverUrl: serverUrl, providerId: 'edge_tts');
     default:
       return BrowserTtsService();
   }

@@ -101,7 +101,6 @@ TTS_PROVIDERS = {
     "fireredtts": "FireRedTTS 本地服务（支持流式）",
     "openvoice": "OpenVoice 本地服务（支持变声）",
     "cosyvoice": "CosyVoice 本地服务",
-    "openai_tts": "OpenAI TTS API",
     "disabled": "禁用语音合成（纯文本显示）",
 }
 
@@ -193,13 +192,6 @@ VOICE_SERVICE_META = {
         "needs_api_key": False,
         "health_path": "/health",
     },
-    "openai_tts": {
-        "name": "OpenAI TTS API",
-        "default_url": "https://api.openai.com/v1",
-        "type": "tts",
-        "needs_api_key": True,
-        "health_path": "/models",
-    },
 }
 
 
@@ -282,7 +274,7 @@ class Settings(BaseSettings):
     openai_whisper_base_url: str = "https://api.openai.com/v1"
 
     # TTS (语音合成)
-    tts_provider: str = "edge_tts"  # browser / edge_tts / cosyvoice / openai_tts
+    tts_provider: str = "edge_tts"  # browser / edge_tts / cosyvoice / local services
     tts_url: str = "http://localhost:5051"  # deprecated, use edge_tts_url
     chattts_url: str = "http://localhost:9998"
     edge_tts_url: str = "http://localhost:5051"
@@ -435,7 +427,6 @@ class Settings(BaseSettings):
             "edge_tts": self.edge_tts_url,
             "cosyvoice": self.cosyvoice_url,
             "openai_whisper": self.openai_whisper_base_url,
-            "openai_tts": self.openai_base_url,
         }
         url = url_map.get(sid, "")
         if url:

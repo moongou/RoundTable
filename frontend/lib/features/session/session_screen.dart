@@ -231,6 +231,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         characterIds: widget.characterIds,
         humanNames: [widget.humanName],
         freeTopic: widget.topic.id == 'free_topic' ? widget.topic.title : '',
+        freeTopicDetail:
+            widget.topic.id == 'free_topic' ? widget.topic.description : '',
       );
 
       final sessionId = sessionData['session_id'] as String;

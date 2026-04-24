@@ -298,6 +298,8 @@ class LocalSettings {
   final String asrProvider;
   final String ttsProvider;
   final bool pushToTalk;
+  final bool streamUserSubtitles;
+  final String micActivationMode;
   final String micControlMode;
 
   const LocalSettings({
@@ -306,6 +308,8 @@ class LocalSettings {
     this.asrProvider = 'funasr',
     this.ttsProvider = 'edge_tts',
     this.pushToTalk = true,
+    this.streamUserSubtitles = true,
+    this.micActivationMode = 'manual',
     this.micControlMode = 'hold_ctrl',
   });
 
@@ -315,6 +319,8 @@ class LocalSettings {
     String? asrProvider,
     String? ttsProvider,
     bool? pushToTalk,
+    bool? streamUserSubtitles,
+    String? micActivationMode,
     String? micControlMode,
   }) =>
       LocalSettings(
@@ -323,6 +329,8 @@ class LocalSettings {
         asrProvider: asrProvider ?? this.asrProvider,
         ttsProvider: ttsProvider ?? this.ttsProvider,
         pushToTalk: pushToTalk ?? this.pushToTalk,
+        streamUserSubtitles: streamUserSubtitles ?? this.streamUserSubtitles,
+        micActivationMode: micActivationMode ?? this.micActivationMode,
         micControlMode: micControlMode ?? this.micControlMode,
       );
 }

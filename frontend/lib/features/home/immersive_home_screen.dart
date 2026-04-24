@@ -39,6 +39,212 @@ const _kNeonGold = Color(0xFFFFCC44);
 const _kNeonViolet = Color(0xFFAA88FF);
 const _kTextPrimary = Color(0xFFEEEEFF);
 const _kTextSecondary = Color(0xFF8888AA);
+const _kSparkCategoryId = 'spark';
+const _kSparkCategoryName = '火花';
+
+class FreeTopicDraftValue {
+  final String title;
+  final String sourceText;
+  final bool isCondensed;
+
+  const FreeTopicDraftValue({
+    this.title = '',
+    this.sourceText = '',
+    this.isCondensed = false,
+  });
+
+  factory FreeTopicDraftValue.raw(String text) {
+    final normalized = text.trim();
+    return FreeTopicDraftValue(
+      title: normalized,
+      sourceText: normalized,
+      isCondensed: false,
+    );
+  }
+
+  bool get hasText => effectiveTitle.isNotEmpty;
+
+  String get effectiveTitle => title.trim();
+
+  String get effectiveSourceText {
+    final normalizedSource = sourceText.trim();
+    if (normalizedSource.isNotEmpty) {
+      return normalizedSource;
+    }
+    return effectiveTitle;
+  }
+}
+
+bool _isSparkCategoryId(String? categoryId) {
+  return categoryId?.trim().toLowerCase() == _kSparkCategoryId;
+}
+
+bool _isSparkCategoryLabel(String label) {
+  final normalized = label.trim().toLowerCase();
+  return normalized == _kSparkCategoryId || label.trim() == _kSparkCategoryName;
+}
+
+List<Map<String, dynamic>> mergeHomeTopicCategoriesWithSpark(
+  List<Map<String, dynamic>> categories,
+) {
+  final merged =
+      categories.map((item) => Map<String, dynamic>.from(item)).toList();
+  merged.removeWhere(
+    (item) => _isSparkCategoryId(item['id']?.toString()),
+  );
+
+  final sparkCategory = <String, dynamic>{
+    'id': _kSparkCategoryId,
+    'name': _kSparkCategoryName,
+    'count': 0,
+  };
+  final techIndex = merged.indexWhere((item) {
+    final id = (item['id'] as String? ?? '').trim().toLowerCase();
+    final name = (item['name'] as String? ?? '').trim();
+    return id == 'tech' || name == '科技';
+  });
+  if (techIndex >= 0) {
+    merged.insert(techIndex + 1, sparkCategory);
+  } else {
+    merged.add(sparkCategory);
+  }
+  return merged;
+}
+
+List<Topic> buildHomeSparkTopicsFromSavedItems(
+  Iterable<SavedTopicItem> items,
+) {
+  final topics = <Topic>[];
+  for (final rawItem in items) {
+    final item = rawItem.normalized();
+    if (item.normalizedTitle.isEmpty) {
+      continue;
+    }
+    final savedIdSuffix = item.savedAt != null
+        ? item.savedAt!.millisecondsSinceEpoch.toString()
+        : item.normalizedTitle
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^a-z0-9\u4e00-\u9fa5]+'), '_');
+    topics.add(
+      Topic(
+        id: 'spark_saved_$savedIdSuffix',
+        title: item.normalizedTitle,
+        description: item.hasOriginalContent
+            ? item.normalizedOriginalContent
+            : item.normalizedTitle,
+        category: _kSparkCategoryId,
+        tags: const [_kSparkCategoryName, '自由话题'],
+      ),
+    );
+  }
+  return topics;
+}
+
+Topic normalizeHomeTopicForDiscussion(Topic topic) {
+  if (!_isSparkCategoryId(topic.category)) {
+    return topic;
+  }
+  return Topic(
+    id: 'free_topic',
+    title: topic.title,
+    description: topic.description,
+    category: _kSparkCategoryId,
+    ageRange: topic.ageRange,
+    guideQuestions: topic.guideQuestions,
+    tags: topic.tags,
+  );
+}
+
+String resolveHomeAsrProviderUrl({
+  required String providerId,
+  required String url,
+  required String defaultUrl,
+}) {
+  final normalizedProviderId = providerId.trim().toLowerCase();
+  final trimmedUrl = url.trim();
+  final trimmedDefaultUrl = defaultUrl.trim();
+
+  if (normalizedProviderId != 'capswriter' && normalizedProviderId != 'vosk') {
+    return trimmedUrl.isNotEmpty ? trimmedUrl : trimmedDefaultUrl;
+  }
+
+  for (final candidate in [trimmedUrl, trimmedDefaultUrl]) {
+    final uri = Uri.tryParse(candidate);
+    if (candidate.isEmpty || uri == null) {
+      continue;
+    }
+    if (uri.port == 6666) {
+      return candidate;
+    }
+  }
+
+  final fallback = trimmedUrl.isNotEmpty ? trimmedUrl : trimmedDefaultUrl;
+  final fallbackUri = Uri.tryParse(fallback);
+  if (fallbackUri != null && fallbackUri.host.isNotEmpty) {
+    return Uri(
+      scheme: fallbackUri.scheme.isEmpty ? 'http' : fallbackUri.scheme,
+      host: fallbackUri.host,
+      port: 6666,
+    ).toString();
+  }
+
+  return 'http://localhost:6666';
+}
+
+bool shouldPreferServerProxyForHomeAsr(String providerId) {
+  switch (providerId.trim().toLowerCase()) {
+    case 'capswriter':
+      return true;
+    default:
+      return false;
+  }
+}
+
+String resolvePreferredHomeAsrProviderId({
+  required String preferredProviderId,
+  required List<SpeechProviderInfo> providers,
+}) {
+  final normalizedPreferred = preferredProviderId.trim();
+  if (providers.isEmpty) {
+    return normalizedPreferred;
+  }
+
+  SpeechProviderInfo? findProvider(String providerId) {
+    for (final provider in providers) {
+      if (provider.id == providerId) {
+        return provider;
+      }
+    }
+    return null;
+  }
+
+  final preferred = findProvider(normalizedPreferred);
+  if (preferred != null &&
+      preferred.available &&
+      normalizedPreferred != 'browser') {
+    return preferred.id;
+  }
+
+  final fallbackOrder = normalizedPreferred == 'browser'
+      ? <String>['capswriter', 'funasr', 'vosk', 'openai_whisper', 'browser']
+      : <String>[
+          normalizedPreferred,
+          ImmersiveSessionScreen.defaultAsrProvider,
+          'capswriter',
+          'vosk',
+          'openai_whisper',
+          'browser',
+        ];
+
+  for (final providerId in fallbackOrder) {
+    final candidate = findProvider(providerId);
+    if (candidate != null && candidate.available) {
+      return candidate.id;
+    }
+  }
+
+  return preferred?.id ?? normalizedPreferred;
+}
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 class ImmersiveHomeScreen extends ConsumerStatefulWidget {
@@ -52,6 +258,7 @@ class ImmersiveHomeScreen extends ConsumerStatefulWidget {
 class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     with TickerProviderStateMixin {
   List<Topic> _topics = [];
+  List<Topic> _sparkTopics = [];
   List<CharacterTemplate> _characters = [];
   List<Map<String, dynamic>> _thinkers = [];
   List<Map<String, dynamic>> _categories = [];
@@ -64,6 +271,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
   final TextEditingController _nameController =
       TextEditingController(text: '豆苗');
   final TextEditingController _freeTopicController = TextEditingController();
+  FreeTopicDraftValue _freeTopicDraft = const FreeTopicDraftValue();
   bool _isFreeTopicMode = false;
   // 需求16：旁听模式开关
   bool _isObserverMode = false;
@@ -109,6 +317,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       final apiClient = ref.read(apiClientProvider);
       final topicsData = await apiClient.getTopics();
       final charsData = await apiClient.getCharacters();
+      final savedSparkTopics = await SavedTopicsStore.load();
       List<Map<String, dynamic>> thinkersData = [];
       List<Map<String, dynamic>> categoriesData = [];
       try {
@@ -117,10 +326,11 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       } catch (_) {}
       setState(() {
         _topics = topicsData.map((t) => Topic.fromJson(t)).toList();
+        _sparkTopics = buildHomeSparkTopicsFromSavedItems(savedSparkTopics);
         _characters =
             charsData.map((c) => CharacterTemplate.fromJson(c)).toList();
         _thinkers = thinkersData;
-        _categories = categoriesData;
+        _categories = mergeHomeTopicCategoriesWithSpark(categoriesData);
         _loading = false;
       });
       _entranceCtrl.forward();
@@ -134,6 +344,21 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     }
   }
 
+  Future<void> _refreshSparkTopics() async {
+    final savedSparkTopics = await SavedTopicsStore.load();
+    if (!mounted) return;
+    final nextSparkTopics =
+        buildHomeSparkTopicsFromSavedItems(savedSparkTopics);
+    setState(() {
+      _sparkTopics = nextSparkTopics;
+      if (_selectedCategory == _kSparkCategoryId &&
+          _selectedTopic != null &&
+          !nextSparkTopics.any((topic) => topic.id == _selectedTopic!.id)) {
+        _selectedTopic = null;
+      }
+    });
+  }
+
   void _openDevPanel(BuildContext context) {
     final host = Uri.base.host;
     openExternalUrl('http://$host:8888');
@@ -141,12 +366,54 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 
   bool get _canStart =>
       (_selectedTopic != null ||
-          (_isFreeTopicMode && _freeTopicController.text.trim().isNotEmpty)) &&
+          (_isFreeTopicMode &&
+              (_freeTopicDraft.hasText ||
+                  _freeTopicController.text.trim().isNotEmpty))) &&
       (_selectedCharacterIds.isNotEmpty || _selectedThinkerIds.isNotEmpty);
 
   List<Topic> get _filteredTopics {
     if (_selectedCategory == null) return _topics;
+    if (_isSparkCategoryId(_selectedCategory)) return _sparkTopics;
     return _topics.where((t) => t.category == _selectedCategory).toList();
+  }
+
+  void _handleCategoryChanged(String? categoryId) {
+    if (_isSparkCategoryId(categoryId)) {
+      _refreshSparkTopics();
+    }
+    setState(() {
+      if (_isSparkCategoryId(categoryId)) {
+        _selectedCategory = _kSparkCategoryId;
+        _selectedTopic = null;
+      } else {
+        _selectedCategory = categoryId;
+      }
+      if (_isFreeTopicMode) {
+        _isFreeTopicMode = false;
+      }
+    });
+  }
+
+  void _toggleFreeTopicMode() {
+    setState(() {
+      _isFreeTopicMode = !_isFreeTopicMode;
+      if (_isFreeTopicMode) {
+        _selectedTopic = null;
+        _selectedCategory = _kSparkCategoryId;
+      } else if (_isSparkCategoryId(_selectedCategory)) {
+        _selectedCategory = null;
+      }
+    });
+  }
+
+  void _handleFreeTopicTextChanged() {
+    setState(() {});
+  }
+
+  void _handleFreeTopicDraftChanged(FreeTopicDraftValue draft) {
+    setState(() {
+      _freeTopicDraft = draft;
+    });
   }
 
   Future<void> _startDiscussion() async {
@@ -155,15 +422,22 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     if (_isFreeTopicMode) {
       final freeText = _freeTopicController.text.trim();
       if (freeText.isEmpty) return;
+      final freeTitle = _freeTopicDraft.effectiveTitle.isNotEmpty
+          ? _freeTopicDraft.effectiveTitle
+          : freeText;
+      final freeDetail = _freeTopicDraft.effectiveSourceText.isNotEmpty
+          ? _freeTopicDraft.effectiveSourceText
+          : freeText;
       effectiveTopic = Topic(
         id: 'free_topic',
-        title: freeText,
-        description: '由用户发起的自由讨论话题：$freeText',
-        category: 'free',
+        title: freeTitle,
+        description: freeDetail,
+        category: _kSparkCategoryId,
+        tags: const [_kSparkCategoryName, '自由话题'],
       );
     } else {
       if (_selectedTopic == null) return;
-      effectiveTopic = _selectedTopic!;
+      effectiveTopic = normalizeHomeTopicForDiscussion(_selectedTopic!);
     }
 
     final local = ref.read(localSettingsProvider).valueOrNull;
@@ -334,17 +608,14 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   humanName: humanName,
                   observerMode: _isObserverMode,
                   freeTopicController: _freeTopicController,
-                  onCategoryChanged: (v) =>
-                      setState(() => _selectedCategory = v),
+                  onCategoryChanged: _handleCategoryChanged,
                   onTopicSelected: (t) => setState(() {
                     _selectedTopic = t;
                     _isFreeTopicMode = false;
                   }),
-                  onFreeTopicModeToggled: () => setState(() {
-                    _isFreeTopicMode = !_isFreeTopicMode;
-                    if (_isFreeTopicMode) _selectedTopic = null;
-                  }),
-                  onFreeTopicChanged: () => setState(() {}),
+                  onFreeTopicModeToggled: _toggleFreeTopicMode,
+                  onFreeTopicChanged: _handleFreeTopicTextChanged,
+                  onFreeTopicDraftChanged: _handleFreeTopicDraftChanged,
                   onCharacterToggled: (id) => setState(() {
                     if (_selectedCharacterIds.contains(id)) {
                       _selectedCharacterIds.remove(id);
@@ -378,17 +649,14 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   humanName: humanName,
                   observerMode: _isObserverMode,
                   freeTopicController: _freeTopicController,
-                  onCategoryChanged: (v) =>
-                      setState(() => _selectedCategory = v),
+                  onCategoryChanged: _handleCategoryChanged,
                   onTopicSelected: (t) => setState(() {
                     _selectedTopic = t;
                     _isFreeTopicMode = false;
                   }),
-                  onFreeTopicModeToggled: () => setState(() {
-                    _isFreeTopicMode = !_isFreeTopicMode;
-                    if (_isFreeTopicMode) _selectedTopic = null;
-                  }),
-                  onFreeTopicChanged: () => setState(() {}),
+                  onFreeTopicModeToggled: _toggleFreeTopicMode,
+                  onFreeTopicChanged: _handleFreeTopicTextChanged,
+                  onFreeTopicDraftChanged: _handleFreeTopicDraftChanged,
                   onCharacterToggled: (id) => setState(() {
                     if (_selectedCharacterIds.contains(id)) {
                       _selectedCharacterIds.remove(id);
@@ -675,6 +943,7 @@ class _WideLayout extends StatefulWidget {
   final ValueChanged<Topic> onTopicSelected;
   final VoidCallback onFreeTopicModeToggled;
   final VoidCallback onFreeTopicChanged;
+  final ValueChanged<FreeTopicDraftValue> onFreeTopicDraftChanged;
   final ValueChanged<String> onCharacterToggled;
   final ValueChanged<String> onThinkerToggled;
   final VoidCallback onStart;
@@ -698,6 +967,7 @@ class _WideLayout extends StatefulWidget {
     required this.onTopicSelected,
     required this.onFreeTopicModeToggled,
     required this.onFreeTopicChanged,
+    required this.onFreeTopicDraftChanged,
     required this.onCharacterToggled,
     required this.onThinkerToggled,
     required this.onStart,
@@ -753,6 +1023,7 @@ class _WideLayoutState extends State<_WideLayout> {
                 onToggle: widget.onFreeTopicModeToggled,
                 controller: widget.freeTopicController,
                 onChanged: widget.onFreeTopicChanged,
+                onDraftChanged: widget.onFreeTopicDraftChanged,
               ),
               // 预设话题列表（非自由话题模式时显示）
               if (!widget.isFreeTopicMode)
@@ -891,6 +1162,7 @@ class _NarrowLayout extends StatelessWidget {
   final ValueChanged<Topic> onTopicSelected;
   final VoidCallback onFreeTopicModeToggled;
   final VoidCallback onFreeTopicChanged;
+  final ValueChanged<FreeTopicDraftValue> onFreeTopicDraftChanged;
   final ValueChanged<String> onCharacterToggled;
   final ValueChanged<String> onThinkerToggled;
   final VoidCallback onStart;
@@ -914,6 +1186,7 @@ class _NarrowLayout extends StatelessWidget {
     required this.onTopicSelected,
     required this.onFreeTopicModeToggled,
     required this.onFreeTopicChanged,
+    required this.onFreeTopicDraftChanged,
     required this.onCharacterToggled,
     required this.onThinkerToggled,
     required this.onStart,
@@ -939,6 +1212,7 @@ class _NarrowLayout extends StatelessWidget {
             onToggle: onFreeTopicModeToggled,
             controller: freeTopicController,
             onChanged: onFreeTopicChanged,
+            onDraftChanged: onFreeTopicDraftChanged,
           ),
           const SizedBox(height: 14),
           if (!isFreeTopicMode)
@@ -1123,18 +1397,25 @@ class _LeftPanelState extends State<_LeftPanel> {
                   ),
                 ),
                 Expanded(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(10, 0, 10, 16),
-                    child: Column(
-                      children: widget.topics
-                          .map((topic) => _TopicRow(
-                                topic: topic,
-                                isSelected: widget.selectedTopicId == topic.id,
-                                onTap: () => widget.onTopicSelected(topic),
-                              ))
-                          .toList(),
-                    ),
-                  ),
+                  child: widget.topics.isEmpty
+                      ? _TopicEmptyState(
+                          isSparkCategory:
+                              _isSparkCategoryId(widget.selectedCategory),
+                        )
+                      : SingleChildScrollView(
+                          padding: const EdgeInsets.fromLTRB(10, 0, 10, 16),
+                          child: Column(
+                            children: widget.topics
+                                .map((topic) => _TopicRow(
+                                      topic: topic,
+                                      isSelected:
+                                          widget.selectedTopicId == topic.id,
+                                      onTap: () =>
+                                          widget.onTopicSelected(topic),
+                                    ))
+                                .toList(),
+                          ),
+                        ),
                 ),
               ],
             ),
@@ -1151,12 +1432,14 @@ class _FreeTopicToggle extends StatelessWidget {
   final VoidCallback onToggle;
   final TextEditingController controller;
   final VoidCallback onChanged;
+  final ValueChanged<FreeTopicDraftValue> onDraftChanged;
 
   const _FreeTopicToggle({
     required this.isActive,
     required this.onToggle,
     required this.controller,
     required this.onChanged,
+    required this.onDraftChanged,
   });
 
   @override
@@ -1218,6 +1501,7 @@ class _FreeTopicToggle extends StatelessWidget {
               controller: controller,
               height: (screenH / 3).clamp(180.0, 360.0),
               onChanged: onChanged,
+              onDraftChanged: onDraftChanged,
             ),
           ],
         ],
@@ -1230,10 +1514,12 @@ class _FreeTopicInput extends ConsumerStatefulWidget {
   final TextEditingController controller;
   final double height;
   final VoidCallback onChanged;
+  final ValueChanged<FreeTopicDraftValue> onDraftChanged;
   const _FreeTopicInput(
       {required this.controller,
       required this.height,
-      required this.onChanged});
+      required this.onChanged,
+      required this.onDraftChanged});
 
   @override
   ConsumerState<_FreeTopicInput> createState() => _FreeTopicInputState();
@@ -1245,15 +1531,44 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
   String _draft = '';
   bool _listening = false;
   bool _refining = false;
-  List<String> _savedTopics = const [];
+  List<SavedTopicItem> _savedTopics = const [];
   String _asrProviderId = '';
   String _asrProviderUrl = '';
   String _asrServerUrl = '';
+  String _submissionSourceText = '';
 
   @override
   void initState() {
     super.initState();
+    _submissionSourceText = widget.controller.text.trim();
     _loadSaved();
+  }
+
+  void _publishDraft({
+    String? title,
+    String? sourceText,
+    bool condensed = false,
+  }) {
+    final normalizedTitle = (title ?? widget.controller.text).trim();
+    final normalizedSource = (sourceText ?? _submissionSourceText).trim();
+    widget.onDraftChanged(
+      FreeTopicDraftValue(
+        title: normalizedTitle,
+        sourceText:
+            normalizedSource.isNotEmpty ? normalizedSource : normalizedTitle,
+        isCondensed: condensed &&
+            normalizedSource.isNotEmpty &&
+            normalizedSource != normalizedTitle,
+      ),
+    );
+  }
+
+  void _syncRawDraftFromController() {
+    _submissionSourceText = widget.controller.text.trim();
+    _publishDraft(
+      title: widget.controller.text,
+      sourceText: _submissionSourceText,
+    );
   }
 
   Future<void> _loadSaved() async {
@@ -1263,9 +1578,13 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
   }
 
   Future<void> _saveCurrent() async {
-    final t = widget.controller.text.trim();
-    if (t.isEmpty) return;
-    await SavedTopicsStore.add(t);
+    final title = widget.controller.text.trim();
+    if (title.isEmpty) return;
+    final originalContent = _submissionSourceText.trim();
+    await SavedTopicsStore.add(
+      title,
+      originalContent: originalContent,
+    );
     await _loadSaved();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1300,10 +1619,14 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
 
     final providers =
         speechConfig?.asrProviders ?? const <SpeechProviderInfo>[];
+    final resolvedPreferredProviderId = resolvePreferredHomeAsrProviderId(
+      preferredProviderId: preferredProviderId,
+      providers: providers,
+    );
 
     SpeechProviderInfo? selectedProvider;
     for (final provider in providers) {
-      if (provider.id == preferredProviderId) {
+      if (provider.id == resolvedPreferredProviderId) {
         selectedProvider = provider;
         break;
       }
@@ -1337,11 +1660,11 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     }
 
     final providerId = selectedProvider?.id ?? preferredProviderId;
-    final providerUrl = selectedProvider == null
-        ? ''
-        : (selectedProvider.url.isNotEmpty
-            ? selectedProvider.url
-            : selectedProvider.defaultUrl);
+    final providerUrl = resolveHomeAsrProviderUrl(
+      providerId: providerId,
+      url: selectedProvider?.url ?? '',
+      defaultUrl: selectedProvider?.defaultUrl ?? '',
+    );
 
     return (
       providerId: providerId,
@@ -1374,8 +1697,11 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
       if (!provider.available) continue;
       final candidate = (
         providerId: provider.id,
-        providerUrl:
-            provider.url.isNotEmpty ? provider.url : provider.defaultUrl,
+        providerUrl: resolveHomeAsrProviderUrl(
+          providerId: provider.id,
+          url: provider.url,
+          defaultUrl: provider.defaultUrl,
+        ),
         serverUrl: primary.serverUrl,
       );
       final key =
@@ -1429,6 +1755,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
       config.providerId,
       serverUrl: config.serverUrl,
       providerUrl: config.providerUrl,
+      preferServerProxy: shouldPreferServerProxyForHomeAsr(config.providerId),
     );
     return _asr!;
   }
@@ -1449,6 +1776,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
             TextPosition(offset: widget.controller.text.length),
           );
           _draft = '';
+          _syncRawDraftFromController();
           widget.onChanged();
         }
       });
@@ -1532,6 +1860,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
         TextPosition(offset: widget.controller.text.length),
       );
       _draft = '';
+      _syncRawDraftFromController();
       widget.onChanged();
     }
     setState(() => _listening = false);
@@ -1543,14 +1872,38 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
   }
 
   Future<void> _refineNow() async {
-    final text = widget.controller.text.trim();
+    final text = (_submissionSourceText.trim().isNotEmpty
+            ? _submissionSourceText.trim()
+            : widget.controller.text.trim())
+        .trim();
     if (text.isEmpty || _refining) return;
     setState(() => _refining = true);
     try {
-      final asr = await _ensureAsr();
-      final refined = await asr.refineTranscript(text);
-      if (refined.trim().isNotEmpty) {
-        widget.controller.text = refined.trim();
+      var refinedTitle = '';
+      var refinedDescription = text;
+      try {
+        final apiClient = ref.read(apiClientProvider);
+        final refinedPayload = await apiClient.refineFreeTopic(text);
+        refinedTitle = (refinedPayload['title'] as String? ?? '').trim();
+        refinedDescription =
+            (refinedPayload['description'] as String? ?? text).trim();
+      } catch (_) {}
+      if (refinedTitle.isEmpty) {
+        final asr = await _ensureAsr();
+        refinedTitle = (await asr.refineTranscript(text)).trim();
+      }
+      if (refinedTitle.trim().isNotEmpty) {
+        _submissionSourceText =
+            refinedDescription.isNotEmpty ? refinedDescription : text;
+        widget.controller.text = refinedTitle.trim();
+        widget.controller.selection = TextSelection.fromPosition(
+          TextPosition(offset: widget.controller.text.length),
+        );
+        _publishDraft(
+          title: refinedTitle.trim(),
+          sourceText: _submissionSourceText,
+          condensed: true,
+        );
         widget.onChanged();
       }
     } catch (_) {
@@ -1562,6 +1915,9 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
 
   @override
   Widget build(BuildContext context) {
+    final streamUserSubtitles =
+        ref.watch(localSettingsProvider).valueOrNull?.streamUserSubtitles ??
+            true;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -1575,9 +1931,17 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
               separatorBuilder: (_, __) => const SizedBox(width: 6),
               itemBuilder: (_, i) {
                 final t = _savedTopics[i];
+                final sourceText =
+                    t.hasOriginalContent ? t.originalContent : t.title;
                 return InkWell(
                   onTap: () {
-                    widget.controller.text = t;
+                    widget.controller.text = t.title;
+                    _submissionSourceText = sourceText;
+                    _publishDraft(
+                      title: t.title,
+                      sourceText: sourceText,
+                      condensed: t.hasOriginalContent,
+                    );
                     widget.onChanged();
                     setState(() {});
                   },
@@ -1598,7 +1962,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
                       ConstrainedBox(
                         constraints: const BoxConstraints(maxWidth: 140),
                         child: Text(
-                          t,
+                          t.title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -1626,7 +1990,10 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
                 padding: const EdgeInsets.fromLTRB(12, 12, 12, 64),
                 child: TextField(
                   controller: widget.controller,
-                  onChanged: (_) => widget.onChanged(),
+                  onChanged: (_) {
+                    _syncRawDraftFromController();
+                    widget.onChanged();
+                  },
                   style: const TextStyle(
                       color: _kTextPrimary, fontSize: 15, height: 1.6),
                   maxLines: null,
@@ -1644,7 +2011,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
                   ),
                 ),
               ),
-              if (_draft.isNotEmpty)
+              if (streamUserSubtitles && _draft.isNotEmpty)
                 Positioned(
                   left: 12,
                   right: 80,
@@ -1689,6 +2056,8 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
                         label: '清空',
                         onTap: () {
                           widget.controller.clear();
+                          _submissionSourceText = '';
+                          widget.onDraftChanged(const FreeTopicDraftValue());
                           widget.onChanged();
                           setState(() {});
                         },
@@ -1796,6 +2165,8 @@ class _CategoryItem extends StatefulWidget {
 String _categoryIcon(String label) {
   final map = {
     '全部': '🌐',
+    _kSparkCategoryName: '✦',
+    _kSparkCategoryId: '✦',
     '教育': '📚',
     'education': '📚',
     '科技': '🔬',
@@ -1847,6 +2218,8 @@ class _CategoryItemState extends State<_CategoryItem> {
   @override
   Widget build(BuildContext context) {
     final icon = _categoryIcon(widget.label);
+    final sparkOnly = _isSparkCategoryLabel(widget.label);
+    final accent = sparkOnly ? _kNeonGold : _kNeonCyan;
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
@@ -1858,36 +2231,48 @@ class _CategoryItemState extends State<_CategoryItem> {
           padding: const EdgeInsets.fromLTRB(24, 10, 10, 10),
           decoration: BoxDecoration(
             color: widget.selected
-                ? _kNeonCyan.withValues(alpha: 0.15)
+                ? accent.withValues(alpha: 0.15)
                 : _hovered
                     ? _kCard
                     : Colors.transparent,
             border: Border(
               left: BorderSide(
-                color: widget.selected ? _kNeonCyan : Colors.transparent,
+                color: widget.selected ? accent : Colors.transparent,
                 width: 2,
               ),
             ),
           ),
-          child: Row(
-            children: [
-              Text(icon, style: const TextStyle(fontSize: 13)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  widget.label,
-                  style: TextStyle(
-                    color: widget.selected ? _kNeonCyan : _kTextSecondary,
-                    fontSize: 12,
-                    fontWeight:
-                        widget.selected ? FontWeight.w600 : FontWeight.normal,
+          child: sparkOnly
+              ? Center(
+                  child: Text(
+                    icon,
+                    style: TextStyle(
+                      fontSize: 18,
+                      color: widget.selected ? accent : _kTextSecondary,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                )
+              : Row(
+                  children: [
+                    Text(icon, style: const TextStyle(fontSize: 13)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        widget.label,
+                        style: TextStyle(
+                          color: widget.selected ? accent : _kTextSecondary,
+                          fontSize: 12,
+                          fontWeight: widget.selected
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
         ),
       ),
     );
@@ -2156,6 +2541,7 @@ class _TopicsContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isSparkCategory = _isSparkCategoryId(selectedCategory);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -2191,22 +2577,25 @@ class _TopicsContent extends StatelessWidget {
             ),
           ),
         const SizedBox(height: 10),
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-            mainAxisSpacing: 4,
-            crossAxisSpacing: 4,
-            mainAxisExtent: 44,
+        if (topics.isEmpty)
+          _TopicEmptyState(isSparkCategory: isSparkCategory)
+        else
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              mainAxisSpacing: 4,
+              crossAxisSpacing: 4,
+              mainAxisExtent: 44,
+            ),
+            itemCount: topics.length.clamp(0, 28),
+            itemBuilder: (_, i) => _TopicRow(
+              topic: topics[i],
+              isSelected: selectedTopicId == topics[i].id,
+              onTap: () => onTopicSelected(topics[i]),
+            ),
           ),
-          itemCount: topics.length.clamp(0, 28),
-          itemBuilder: (_, i) => _TopicRow(
-            topic: topics[i],
-            isSelected: selectedTopicId == topics[i].id,
-            onTap: () => onTopicSelected(topics[i]),
-          ),
-        ),
         if (topics.length > 28)
           Padding(
             padding: const EdgeInsets.only(top: 4),
@@ -2228,30 +2617,80 @@ class _CatChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sparkOnly = _isSparkCategoryLabel(label);
+    final accent = sparkOnly ? _kNeonGold : _kNeonCyan;
+    final chipLabel = sparkOnly ? _categoryIcon(label) : label;
     return Padding(
       padding: const EdgeInsets.only(right: 6),
       child: GestureDetector(
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          padding: sparkOnly
+              ? const EdgeInsets.symmetric(horizontal: 12, vertical: 2)
+              : const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
-            color: selected ? _kNeonCyan.withValues(alpha: 0.15) : _kCard,
+            color: selected ? accent.withValues(alpha: 0.15) : _kCard,
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
-              color: selected ? _kNeonCyan.withValues(alpha: 0.8) : _kBorder,
+              color: selected ? accent.withValues(alpha: 0.8) : _kBorder,
               width: selected ? 1.5 : 1,
             ),
           ),
           child: Text(
-            label,
+            chipLabel,
             style: TextStyle(
-              color: selected ? _kNeonCyan : _kTextSecondary,
-              fontSize: 11,
+              color: selected ? accent : _kTextSecondary,
+              fontSize: sparkOnly ? 16 : 11,
               fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _TopicEmptyState extends StatelessWidget {
+  final bool isSparkCategory;
+
+  const _TopicEmptyState({required this.isSparkCategory});
+
+  @override
+  Widget build(BuildContext context) {
+    final title = isSparkCategory ? '还没有保存的火花话题' : '这个分类暂时还没有话题';
+    final hint =
+        isSparkCategory ? '先在上方“自由话题”里整理并保存一个，再回来这里继续选择。' : '可以先切换其他分类看看。';
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+      decoration: BoxDecoration(
+        color: _kCard.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _kBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: _kTextPrimary,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            hint,
+            style: const TextStyle(
+              color: _kTextSecondary,
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+        ],
       ),
     );
   }
