@@ -68,6 +68,9 @@ class FloorManager:
     5. 处理超时和安全过滤
     """
 
+    _STREAM_SENTENCE_ENDINGS = frozenset("。！？!?；;")
+    _STREAM_CLOSING_CHARS = frozenset('"\'”’）)]】》」』')
+
     def __init__(
         self,
         team: SelectorGroupChat,
@@ -107,7 +110,8 @@ class FloorManager:
         self._interrupt_queue: list[str] = []
 
         # 流式文本缓冲
-        self._streaming_buffer: dict[str, list[str]] = {}
+        self._streaming_buffer: dict[str, str] = {}
+        self._streaming_emitted_raw_prefix: dict[str, str] = {}
         self._current_streaming_source: Optional[str] = None
 
         # display name → agent name 映射（需求4：用于指定发言者解析）
@@ -342,6 +346,52 @@ class FloorManager:
         if len(self._recent_turn_summaries) > 3:
             self._recent_turn_summaries = self._recent_turn_summaries[-3:]
         await self.summary_memory.replace_turn_summaries(self._recent_turn_summaries)
+
+    def _drain_complete_stream_sentences(self, text: str) -> tuple[list[str], str]:
+        """从流式文本中提取已完成句子，保留尚未完结的尾段。"""
+        value = (text or "").strip()
+        if not value:
+            return [], ""
+
+        segments: list[str] = []
+        start = 0
+        for index, char in enumerate(value):
+            if char not in self._STREAM_SENTENCE_ENDINGS:
+                continue
+            end = index + 1
+            while end < len(value) and value[end] in self._STREAM_CLOSING_CHARS:
+                end += 1
+            segment = value[start:end].strip()
+            if segment:
+                segments.append(segment)
+            while end < len(value) and value[end].isspace():
+                end += 1
+            start = end
+
+        return segments, value[start:].strip()
+
+    def _consume_streaming_sentences(self, source: str, content: str) -> list[str]:
+        current = f"{self._streaming_buffer.get(source, '')}{content}"
+        segments, remainder = self._drain_complete_stream_sentences(current)
+        self._streaming_buffer[source] = remainder
+        if segments:
+            self._streaming_emitted_raw_prefix[source] = (
+                f"{self._streaming_emitted_raw_prefix.get(source, '')}{''.join(segments)}"
+            )
+        return segments
+
+    def _pop_streaming_message_tail(self, source: str, raw_content: str) -> tuple[bool, str]:
+        """在最终消息到达时，返回尚未通过流式播报过的原始尾段。"""
+        remainder = self._streaming_buffer.pop(source, "")
+        emitted_prefix = self._streaming_emitted_raw_prefix.pop(source, "")
+        if self._current_streaming_source == source:
+            self._current_streaming_source = None
+
+        if not emitted_prefix:
+            return False, raw_content
+        if raw_content.startswith(emitted_prefix):
+            return True, raw_content[len(emitted_prefix):].lstrip()
+        return True, remainder or raw_content
 
     def on_message(self, callback: Callable) -> "FloorManager":
         """注册消息回调。callback(source, content, msg_type)"""
@@ -608,21 +658,30 @@ class FloorManager:
             source = event.source if hasattr(event, "source") else self.current_speaker
             content = event.content if hasattr(event, "content") else str(event)
 
-            if self._current_streaming_source != source:
+            payload = {"source": source, "content": content}
+            if source in self.ai_names:
                 self._current_streaming_source = source
-                self._streaming_buffer[source] = []
-
-            self._streaming_buffer.setdefault(source, []).append(content)
+                raw_segments = self._consume_streaming_sentences(source, content)
+                tts_segments: list[str] = []
+                for raw_segment in raw_segments:
+                    segment = self._sanitize_all_references(source, raw_segment)
+                    segment = await self.safety_filter.filter_or_rewrite(segment)
+                    segment = segment.strip()
+                    if segment:
+                        tts_segments.append(segment)
+                if tts_segments:
+                    payload["tts_segments"] = tts_segments
 
             return {
                 "event_type": "stream",
-                "data": {"source": source, "content": content},
+                "data": payload,
             }
 
         # 完整文本消息
         if isinstance(event, TextMessage):
             source = event.source
-            content = event.content
+            raw_content = event.content
+            content = raw_content
 
             # 过滤 AutoGen 内部任务注入消息（source="user" 是 AutoGen 框架内部产生的）
             if source == "user":
@@ -640,6 +699,8 @@ class FloorManager:
             if all_display_names and (source in self.ai_names or source in self.human_names):
                 designated_pre_filter = parse_speaker_designation(content, all_display_names)
 
+            had_streamed_tts, remaining_tts_raw = self._pop_streaming_message_tail(source, raw_content)
+
             # 安全过滤 AI 输出
             if source in self.ai_names:
                 content = await self.safety_filter.filter_or_rewrite(content)
@@ -653,9 +714,15 @@ class FloorManager:
                     logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
                     self._set_designated_speaker(agent_name)
 
-            # 清空该发言者的流式缓冲
-            self._streaming_buffer.pop(source, None)
-            self._current_streaming_source = None
+            tts_text = ""
+            if source in self.ai_names:
+                if had_streamed_tts:
+                    remaining_tts_raw = remaining_tts_raw.strip()
+                    if remaining_tts_raw:
+                        tail = self._sanitize_all_references(source, remaining_tts_raw)
+                        tts_text = await self.safety_filter.filter_or_rewrite(tail)
+                else:
+                    tts_text = content
 
             await self._emit_message(source, content, "text")
             if not self._is_non_substantive_turn(content):
@@ -667,7 +734,7 @@ class FloorManager:
 
             return {
                 "event_type": "message",
-                "data": {"source": source, "content": content},
+                "data": {"source": source, "content": content, "tts_text": tts_text},
             }
 
         # 人类输入请求

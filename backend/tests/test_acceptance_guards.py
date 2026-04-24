@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from autogen_agentchat.messages import ModelClientStreamingChunkEvent
 from autogen_agentchat.messages import TextMessage
 from autogen_agentchat.messages import UserInputRequestedEvent
 
@@ -299,6 +300,51 @@ async def test_watchdog_human_turn_only_reminds_and_does_not_enqueue_skip() -> N
 
     assert queue.empty()
     assert any('系统不会替你跳过' in content for _, content, _ in messages)
+
+
+def test_floor_manager_stream_sentence_splitter_keeps_quotes_and_tail() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+
+    segments, remainder = floor_manager._drain_complete_stream_sentences(
+        '“先想一想。”然后再回答'
+    )
+
+    assert segments == ['“先想一想。”']
+    assert remainder == '然后再回答'
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_streaming_tts_only_leaves_final_tail_for_message() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+
+    stream_event = await floor_manager._process_event(
+        ModelClientStreamingChunkEvent(
+            source='explorer',
+            content='先看规则。再想',
+        )
+    )
+    message_event = await floor_manager._process_event(
+        TextMessage(source='explorer', content='先看规则。再想一想。')
+    )
+
+    assert stream_event is not None
+    assert stream_event['event_type'] == 'stream'
+    assert stream_event['data']['tts_segments'] == ['先看规则。']
+
+    assert message_event is not None
+    assert message_event['event_type'] == 'message'
+    assert message_event['data']['content'] == '先看规则。再想一想。'
+    assert message_event['data']['tts_text'] == '再想一想。'
 
 
 def test_turn_scheduler_prefers_ai_after_moderator_opening() -> None:

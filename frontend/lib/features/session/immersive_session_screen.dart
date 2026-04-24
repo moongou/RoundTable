@@ -38,6 +38,28 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   static const String _edgeThinkerVoice = 'zh-CN-YunzeNeural';
   static const String _openVoiceTeacherProfile = 'ov:teacher_li';
   static const String _openVoiceThinkerProfile = 'ov:thinker_elder';
+  static const Set<String> _ttsSentenceEndings = <String>{
+    '。',
+    '！',
+    '？',
+    '!',
+    '?',
+    '；',
+    ';',
+  };
+  static const Set<String> _ttsSentenceClosers = <String>{
+    '"',
+    '\'',
+    '”',
+    '’',
+    ')',
+    '）',
+    ']',
+    '】',
+    '》',
+    '」',
+    '』',
+  };
   static const Set<String> _femaleStudentSpeakers = <String>{
     '小疑',
     '小爱',
@@ -167,6 +189,76 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     return (pageText.length * (isFirstPage ? 220 : 180))
         .clamp(isFirstPage ? 3200 : 2400, isFirstPage ? 7600 : 5600)
         .toInt();
+  }
+
+  static List<String> splitTtsSentenceUnits(String text) {
+    final value = text.trim();
+    if (value.isEmpty) {
+      return const <String>[];
+    }
+
+    final segments = <String>[];
+    var start = 0;
+    for (var index = 0; index < value.length; index++) {
+      final char = value[index];
+      if (!_ttsSentenceEndings.contains(char)) {
+        continue;
+      }
+      var end = index + 1;
+      while (end < value.length && _ttsSentenceClosers.contains(value[end])) {
+        end += 1;
+      }
+      final segment = value.substring(start, end).trim();
+      if (segment.isNotEmpty) {
+        segments.add(segment);
+      }
+      while (end < value.length && value[end].trim().isEmpty) {
+        end += 1;
+      }
+      start = end;
+    }
+
+    final tail = value.substring(start).trim();
+    if (tail.isNotEmpty) {
+      segments.add(tail);
+    }
+    return segments;
+  }
+
+  static List<String> normalizeTtsSegmentsPayload({
+    Object? rawSegments,
+    String fallbackText = '',
+  }) {
+    final segments = <String>[];
+    if (rawSegments is List) {
+      for (final item in rawSegments) {
+        segments.addAll(splitTtsSentenceUnits(item.toString()));
+      }
+    } else if (rawSegments != null) {
+      final normalized = rawSegments.toString().trim();
+      if (normalized.isNotEmpty) {
+        segments.addAll(splitTtsSentenceUnits(normalized));
+      }
+    } else if (fallbackText.trim().isNotEmpty) {
+      segments.addAll(splitTtsSentenceUnits(fallbackText));
+    }
+
+    if (segments.isEmpty && fallbackText.trim().isNotEmpty) {
+      segments.addAll(splitTtsSentenceUnits(fallbackText));
+    }
+
+    final normalized = <String>[];
+    for (final segment in segments) {
+      final trimmed = segment.trim();
+      if (trimmed.isEmpty) {
+        continue;
+      }
+      if (normalized.isNotEmpty && normalized.last == trimmed) {
+        continue;
+      }
+      normalized.add(trimmed);
+    }
+    return normalized;
   }
 
   final Topic topic;
@@ -2046,6 +2138,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           final content = ((data['content'] ?? '') as Object).toString();
           final msgType = ((data['msg_type'] ?? 'text') as Object).toString();
           final shouldSpeak = msgType != 'system' && source != humanName;
+          final queuedTtsSegments = shouldSpeak
+              ? ImmersiveSessionScreen.normalizeTtsSegmentsPayload(
+                  rawSegments: data['tts_segments'] ?? data['tts_text'],
+                  fallbackText: content,
+                )
+              : const <String>[];
 
           // 需求7：去重 - 如果最后一条消息与当前完全相同，跳过重复
           if (_messages.isNotEmpty) {
@@ -2113,7 +2211,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   source,
                   ttsProvider: _ttsProviderId,
                 );
-            _enqueueTts(source: source, text: content, voice: voice);
+            for (final segment in queuedTtsSegments) {
+              _enqueueTts(source: source, text: segment, voice: voice);
+            }
           }
 
           _buildParticipants();
@@ -2232,6 +2332,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             (data['source'] ?? '').toString(),
           );
           final content = (data['content'] ?? '').toString();
+          final queuedTtsSegments =
+              ImmersiveSessionScreen.normalizeTtsSegmentsPayload(
+            rawSegments: data['tts_segments'],
+          );
           // 语音与字幕同步：AI 流式文本不提前渲染，统一在 TTS 开始时显示。
           if (source != humanName) {
             _isRealtimeSessionMatched(
@@ -2239,8 +2343,22 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               triggerRole: source,
               eventType: 'stream',
             );
+            if (queuedTtsSegments.isNotEmpty) {
+              final voice = _voiceMap[source] ??
+                  ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
+                    source,
+                    ttsProvider: _ttsProviderId,
+                  );
+              for (final segment in queuedTtsSegments) {
+                _enqueueTts(source: source, text: segment, voice: voice);
+              }
+            }
             _debugSubtitleLog(
-                triggerRole: source, note: 'stream blocked for non-human');
+              triggerRole: source,
+              note: queuedTtsSegments.isEmpty
+                  ? 'stream subtitle blocked for non-human'
+                  : 'stream tts queued; subtitle blocked for non-human',
+            );
             break;
           }
           final token = _subtitleToken;

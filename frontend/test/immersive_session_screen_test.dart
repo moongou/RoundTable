@@ -213,6 +213,29 @@ void main() {
     );
   });
 
+  test('tts payload normalization splits sentences and keeps unfinished tail',
+      () {
+    expect(
+      ImmersiveSessionScreen.splitTtsSentenceUnits('“先想一想。”然后再回答'),
+      ['“先想一想。”', '然后再回答'],
+    );
+
+    expect(
+      ImmersiveSessionScreen.normalizeTtsSegmentsPayload(
+        rawSegments: ['第一句。第二句', '第三句？'],
+      ),
+      ['第一句。', '第二句', '第三句？'],
+    );
+
+    expect(
+      ImmersiveSessionScreen.normalizeTtsSegmentsPayload(
+        rawSegments: '',
+        fallbackText: '补一句。再补一句',
+      ),
+      ['补一句。', '再补一句'],
+    );
+  });
+
   test('subtitle page delay can follow remaining human hold window', () {
     expect(
       ImmersiveSessionScreen.subtitlePageAdvanceDelayMs(
