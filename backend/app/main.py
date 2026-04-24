@@ -113,6 +113,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Voice-Requested",
+        "X-Voice-Used",
+        "X-TTS-Provider",
+        "X-TTS-Attempts",
+        "X-TTS-Elapsed-Ms",
+    ],
 )
 
 app.include_router(api_router, prefix="/api/v1")

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from autogen_agentchat.messages import TextMessage
+from autogen_agentchat.messages import UserInputRequestedEvent
 
 from app.agents.human_proxy import (
     clear_human_queues,
@@ -13,6 +14,7 @@ from app.agents.human_proxy import (
     put_human_input,
 )
 from app.core.floor_manager import FloorManager
+from app.core.floor_manager import FloorState
 from app.core.rolling_summary_memory import RollingSummaryMemory
 from app.core.turn_scheduler import create_discussion_team
 
@@ -286,3 +288,27 @@ def test_turn_scheduler_prefers_ai_after_moderator_opening() -> None:
 
     assert selector(opening_without_designation) == 'explorer'
     assert selector(opening_with_ai_designation) == 'explorer'
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_ignores_duplicate_human_input_requested_for_same_speaker() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+    floor_manager.current_speaker = '豆苗'
+    floor_manager.state = FloorState.HUMAN_TURN_WAITING
+
+    first = await floor_manager._process_event(
+        UserInputRequestedEvent(request_id='req-1', source='豆苗')
+    )
+    second = await floor_manager._process_event(
+        UserInputRequestedEvent(request_id='req-2', source='豆苗')
+    )
+
+    assert first is not None
+    assert first['event_type'] == 'human_input_requested'
+    assert first['data']['speaker'] == '豆苗'
+    assert second is None

@@ -15,6 +15,18 @@ import 'package:dio/dio.dart';
 
 import 'speech_contract.dart';
 
+class _ServerTtsAudioPayload {
+  final Uint8List bytes;
+  final String contentType;
+  final TtsLastResponseInfo responseInfo;
+
+  const _ServerTtsAudioPayload({
+    required this.bytes,
+    required this.contentType,
+    required this.responseInfo,
+  });
+}
+
 /// 服务器端 TTS 实现：调用 POST /api/v1/voice/tts 获取音频并播放
 class ServerTtsService implements TtsService {
   final String serverUrl;
@@ -23,6 +35,14 @@ class ServerTtsService implements TtsService {
   bool _isSpeaking = false;
   html.AudioElement? _audioElement;
   Completer<void>? _pendingCompleter;
+  String? _activeObjectUrl;
+  final Map<String, _ServerTtsAudioPayload> _prefetchCache = {};
+  final Map<String, Future<void>> _prefetchInFlight = {};
+  static const int _maxCacheSize = 5;
+  int _prefetchRequested = 0;
+  int _prefetchHit = 0;
+  int _prefetchMiss = 0;
+  TtsLastResponseInfo? _lastResponseInfo;
 
   ServerTtsService({
     this.serverUrl = 'http://localhost:8001',
@@ -38,16 +58,98 @@ class ServerTtsService implements TtsService {
   bool get isSpeaking => _isSpeaking;
 
   @override
-  TtsPerfSnapshot getPerfSnapshot() => const TtsPerfSnapshot();
+  TtsPerfSnapshot getPerfSnapshot() => TtsPerfSnapshot(
+        prefetchHit: _prefetchHit,
+        prefetchMiss: _prefetchMiss,
+        prefetchRequested: _prefetchRequested,
+        lastResponseInfo: _lastResponseInfo,
+      );
+
+  String _cacheKey(String text, {String? voice}) {
+    return '${voice ?? 'default'}::$text';
+  }
+
+  Future<_ServerTtsAudioPayload> _fetchAudio(String text,
+      {String? voice}) async {
+    final response = await _dio.post<List<int>>(
+      '/api/v1/voice/tts',
+      data: {
+        'text': text,
+        'provider': providerId,
+        'voice': voice ?? 'alloy',
+      },
+      options: Options(responseType: ResponseType.bytes),
+    );
+
+    return _ServerTtsAudioPayload(
+      bytes: Uint8List.fromList(response.data!),
+      contentType: response.headers.value('content-type') ?? 'audio/mpeg',
+      responseInfo: TtsLastResponseInfo(
+        provider: response.headers.value('x-tts-provider') ?? providerId,
+        requestedVoice: response.headers.value('x-voice-requested') ?? voice,
+        usedVoice: response.headers.value('x-voice-used') ?? voice,
+        attempts: int.tryParse(response.headers.value('x-tts-attempts') ?? ''),
+        elapsedMs:
+            double.tryParse(response.headers.value('x-tts-elapsed-ms') ?? ''),
+        contentType: response.headers.value('content-type') ?? 'audio/mpeg',
+      ),
+    );
+  }
 
   @override
-  Future<void> prefetch(String text, {String? voice}) async {}
+  Future<void> prefetch(String text, {String? voice}) async {
+    _prefetchRequested += 1;
+    final key = _cacheKey(text, voice: voice);
+    if (_prefetchCache.containsKey(key)) {
+      return;
+    }
+
+    final existing = _prefetchInFlight[key];
+    if (existing != null) {
+      await existing;
+      return;
+    }
+
+    final job = () async {
+      try {
+        final payload = await _fetchAudio(text, voice: voice);
+        if (payload.bytes.isEmpty) {
+          return;
+        }
+        if (_prefetchCache.length >= _maxCacheSize) {
+          _prefetchCache.remove(_prefetchCache.keys.first);
+        }
+        _prefetchCache[key] = payload;
+      } catch (_) {
+        // Ignore prefetch failures; playback path will retry on demand.
+      } finally {
+        _prefetchInFlight.remove(key);
+      }
+    }();
+
+    _prefetchInFlight[key] = job;
+    await job;
+  }
 
   @override
   Future<void> prefetchBatch(
     List<({String text, String? voice})> items, {
     int maxConcurrent = 2,
-  }) async {}
+  }) async {
+    if (items.isEmpty) return;
+
+    final queue = List<({String text, String? voice})>.from(items);
+    final workers = maxConcurrent.clamp(1, 4);
+
+    Future<void> worker() async {
+      while (queue.isNotEmpty) {
+        final item = queue.removeLast();
+        await prefetch(item.text, voice: item.voice);
+      }
+    }
+
+    await Future.wait(List.generate(workers, (_) => worker()));
+  }
 
   @override
   Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
@@ -55,22 +157,23 @@ class ServerTtsService implements TtsService {
 
     try {
       _isSpeaking = true;
-      final response = await _dio.post<List<int>>(
-        '/api/v1/voice/tts',
-        data: {
-          'text': text,
-          'provider': providerId,
-          'voice': voice ?? 'alloy',
-          if (rate != 1.0) 'speed': rate,
-        },
-        options: Options(responseType: ResponseType.bytes),
-      );
+      final key = _cacheKey(text, voice: voice);
+      _ServerTtsAudioPayload payload;
+      if (_prefetchCache.containsKey(key)) {
+        _prefetchHit += 1;
+        payload = _prefetchCache.remove(key)!;
+        _lastResponseInfo =
+            payload.responseInfo.copyWith(fromPrefetchCache: true);
+      } else {
+        _prefetchMiss += 1;
+        payload = await _fetchAudio(text, voice: voice);
+        _lastResponseInfo =
+            payload.responseInfo.copyWith(fromPrefetchCache: false);
+      }
 
-      final audioBytes = Uint8List.fromList(response.data!);
-      final contentType =
-          response.headers.value('content-type') ?? 'audio/mpeg';
-      final blob = html.Blob([audioBytes], contentType);
+      final blob = html.Blob([payload.bytes], payload.contentType);
       final url = html.Url.createObjectUrlFromBlob(blob);
+      _activeObjectUrl = url;
 
       _audioElement = html.AudioElement()
         ..src = url
@@ -82,14 +185,22 @@ class ServerTtsService implements TtsService {
 
       _audioElement!.onEnded.listen((_) {
         _isSpeaking = false;
+        if (_activeObjectUrl == url) {
+          _activeObjectUrl = null;
+        }
         html.Url.revokeObjectUrl(url);
+        _audioElement = null;
         _pendingCompleter = null;
         if (!completer.isCompleted) completer.complete();
       });
 
       _audioElement!.onError.listen((_) {
         _isSpeaking = false;
+        if (_activeObjectUrl == url) {
+          _activeObjectUrl = null;
+        }
         html.Url.revokeObjectUrl(url);
+        _audioElement = null;
         _pendingCompleter = null;
         if (!completer.isCompleted) {
           completer.completeError('TTS playback error');
@@ -109,6 +220,11 @@ class ServerTtsService implements TtsService {
     _isSpeaking = false;
     _audioElement?.pause();
     _audioElement = null;
+    final url = _activeObjectUrl;
+    _activeObjectUrl = null;
+    if (url != null) {
+      html.Url.revokeObjectUrl(url);
+    }
     // 完成 pending completer 以立即中断 speak() 中的等待
     if (_pendingCompleter != null && !_pendingCompleter!.isCompleted) {
       _pendingCompleter!.complete();

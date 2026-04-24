@@ -11,9 +11,11 @@ enum HumanTurnCommand {
 class SessionFrontendCommander {
   SessionFrontendCommander({
     Duration activationDebounce = const Duration(milliseconds: 350),
+    Duration completionDebounce = const Duration(milliseconds: 1400),
     Duration pendingGuard = const Duration(seconds: 5),
     DateTime Function()? now,
   })  : _activationDebounce = activationDebounce,
+        _completionDebounce = completionDebounce,
         _pendingGuard = pendingGuard,
         _now = now ?? DateTime.now;
 
@@ -22,8 +24,10 @@ class SessionFrontendCommander {
   bool _handApprovedToSpeak = false;
   DateTime? _pendingSince;
   DateTime? _lastActivatedAt;
+  DateTime? _lastCompletedAt;
 
   final Duration _activationDebounce;
+  final Duration _completionDebounce;
   final Duration _pendingGuard;
   final DateTime Function() _now;
 
@@ -93,6 +97,7 @@ class SessionFrontendCommander {
     _pendingHumanSpeaker = '';
     _pendingSince = null;
     _handApprovedToSpeak = false;
+    _lastCompletedAt = _now();
   }
 
   bool shouldForceActivatePending({
@@ -124,9 +129,14 @@ class SessionFrontendCommander {
 
   bool _canActivateNow() {
     final last = _lastActivatedAt;
-    if (last == null) {
-      return true;
+    if (last != null && _now().difference(last) < _activationDebounce) {
+      return false;
     }
-    return _now().difference(last) >= _activationDebounce;
+    final completed = _lastCompletedAt;
+    if (completed != null &&
+        _now().difference(completed) < _completionDebounce) {
+      return false;
+    }
+    return true;
   }
 }

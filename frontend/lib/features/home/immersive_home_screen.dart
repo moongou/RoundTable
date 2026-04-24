@@ -165,30 +165,6 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       if (_selectedTopic == null) return;
       effectiveTopic = _selectedTopic!;
     }
-    final apiClient = ref.read(apiClientProvider);
-    try {
-      final validation = await apiClient.validateConfig();
-      if (!mounted) return;
-      if (!validation.valid) {
-        _showPreflightFailedDialog(
-          title: '配置未通过会前检测',
-          message: validation.message,
-          details: validation.checks
-              .where((c) => !c.ok)
-              .map((c) => '${c.name}: ${c.detail}')
-              .toList(),
-        );
-        return;
-      }
-    } catch (e) {
-      if (!mounted) return;
-      _showPreflightFailedDialog(
-        title: '会前检测失败',
-        message: '无法验证后端配置，请检查服务状态后重试。',
-        details: ['错误: $e'],
-      );
-      return;
-    }
 
     final local = ref.read(localSettingsProvider).valueOrNull;
     final asrProvider =

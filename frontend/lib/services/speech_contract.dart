@@ -10,15 +10,57 @@ class AsrResult {
 }
 
 /// Runtime TTS metrics snapshot used by UI telemetry panels.
+class TtsLastResponseInfo {
+  final String? provider;
+  final String? requestedVoice;
+  final String? usedVoice;
+  final int? attempts;
+  final double? elapsedMs;
+  final String? contentType;
+  final bool fromPrefetchCache;
+
+  const TtsLastResponseInfo({
+    this.provider,
+    this.requestedVoice,
+    this.usedVoice,
+    this.attempts,
+    this.elapsedMs,
+    this.contentType,
+    this.fromPrefetchCache = false,
+  });
+
+  TtsLastResponseInfo copyWith({
+    String? provider,
+    String? requestedVoice,
+    String? usedVoice,
+    int? attempts,
+    double? elapsedMs,
+    String? contentType,
+    bool? fromPrefetchCache,
+  }) {
+    return TtsLastResponseInfo(
+      provider: provider ?? this.provider,
+      requestedVoice: requestedVoice ?? this.requestedVoice,
+      usedVoice: usedVoice ?? this.usedVoice,
+      attempts: attempts ?? this.attempts,
+      elapsedMs: elapsedMs ?? this.elapsedMs,
+      contentType: contentType ?? this.contentType,
+      fromPrefetchCache: fromPrefetchCache ?? this.fromPrefetchCache,
+    );
+  }
+}
+
 class TtsPerfSnapshot {
   final int prefetchHit;
   final int prefetchMiss;
   final int prefetchRequested;
+  final TtsLastResponseInfo? lastResponseInfo;
 
   const TtsPerfSnapshot({
     this.prefetchHit = 0,
     this.prefetchMiss = 0,
     this.prefetchRequested = 0,
+    this.lastResponseInfo,
   });
 
   int get playbackCount => prefetchHit + prefetchMiss;

@@ -2,9 +2,6 @@
 	"folders": [
 		{
 			"path": "."
-		},
-		{
-			"path": "../../VS-CODE-PROJECT/dev-dashboard"
 		}
 	]
 }

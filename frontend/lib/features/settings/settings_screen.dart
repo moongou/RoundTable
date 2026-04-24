@@ -235,129 +235,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     }
   }
 
-  Future<void> _validateConfig() async {
-    ref.invalidate(configValidationProvider);
-    try {
-      final r = await ref.read(configValidationProvider.future);
-      if (!mounted) return;
-      final currentConfig = ref.read(currentConfigProvider).valueOrNull;
-      final s =
-          ref.read(localSettingsProvider).valueOrNull ?? const LocalSettings();
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: AppColors.studyWallLight,
-          title: Row(children: [
-            Icon(r?.valid == true ? Icons.check_circle : Icons.error,
-                color: r?.valid == true ? Colors.green : Colors.red, size: 22),
-            const SizedBox(width: 8),
-            Text(r?.valid == true ? '配置有效' : '配置无效',
-                style: AppTheme.calligraphyStyleDark(fontSize: 18)),
-          ]),
-          content: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (r?.valid != true) ...[
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(r?.message ?? '未知错误',
-                        style:
-                            const TextStyle(color: Colors.red, fontSize: 12)),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                const Text('当前配置',
-                    style: TextStyle(
-                        color: AppColors.amberGold,
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-                if (currentConfig != null) ...[
-                  _DialogRow('AI 模型', currentConfig.llmProviderName),
-                  _DialogRow('当前模型', currentConfig.model),
-                  _DialogRow(
-                      'API Key',
-                      currentConfig.apiKeyMasked.isNotEmpty
-                          ? currentConfig.apiKeyMasked
-                          : '未配置'),
-                ],
-                _DialogRow('语音识别', s.asrProvider.toUpperCase()),
-                _DialogRow('语音合成', s.ttsProvider.toUpperCase()),
-                if (currentConfig != null)
-                  _DialogRow('网络搜索',
-                      currentConfig.webSearchEnabled ? 'Tavily 已启用' : '未启用'),
-                _DialogRow('交互方式', _interactionModeLabel(s)),
-                _DialogRow('服务器', s.serverUrl),
-                const SizedBox(height: 12),
-                const Text('可用性检测',
-                    style: TextStyle(
-                        color: AppColors.amberGold,
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-                if ((r?.checks ?? const []).isEmpty)
-                  const Text('暂无详细检测项',
-                      style: TextStyle(color: AppColors.warmGray, fontSize: 11))
-                else
-                  ...r!.checks.map(
-                    (c) => Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            c.ok ? Icons.check_circle : Icons.cancel,
-                            color: c.ok ? Colors.green : Colors.red,
-                            size: 14,
-                          ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  c.name,
-                                  style: const TextStyle(
-                                      color: AppColors.warmWhite,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600),
-                                ),
-                                Text(
-                                  c.detail,
-                                  style: const TextStyle(
-                                      color: AppColors.warmGray, fontSize: 11),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('关闭',
-                  style: TextStyle(color: AppColors.amberGold)),
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      _snackErr('校验失败: $e');
-    }
-  }
-
   Future<void> _testVoice(SpeechProviderInfo p) async {
     setState(() {
       _testingVoice[p.id] = true;
@@ -519,15 +396,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       appBar: AppBar(
         title: Text('设置', style: AppTheme.calligraphyStyleDark(fontSize: 20)),
         backgroundColor: AppColors.studyWall,
-        actions: [
-          TextButton.icon(
-            onPressed: _validateConfig,
-            icon: const Icon(Icons.check_circle_outline,
-                size: 16, color: AppColors.amberGold),
-            label: const Text('验证',
-                style: TextStyle(color: AppColors.amberGold, fontSize: 13)),
-          ),
-        ],
         bottom: TabBar(
           controller: _tabController,
           isScrollable: true,
@@ -549,8 +417,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         controller: _tabController,
         children: [
           _buildAiModelTab(s, providersAsync, currentAsync),
-          _buildAsrTab(s, speechAsync, healthAsync),
-          _buildTtsTab(s, speechAsync, healthAsync),
+          _buildAsrTab(s, speechAsync),
+          _buildTtsTab(s, speechAsync),
           const _TopicsTab(),
           _buildGeneralTab(s, currentAsync, healthAsync),
         ],
@@ -563,7 +431,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   // ─────────────────────────────────────────────────────────────────────────
 
   Widget _buildAiModelTab(
-      LocalSettings s, AsyncValue providersAsync, AsyncValue currentAsync) {
+      LocalSettings s,
+      AsyncValue<List<ProviderInfo>> providersAsync,
+      AsyncValue<CurrentConfig> currentAsync) {
     return ListView(
       controller: _aiScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -580,11 +450,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     );
   }
 
-  Widget _buildAsrTab(
-      LocalSettings s, AsyncValue speechAsync, AsyncValue healthAsync) {
-    final speechConfig = speechAsync.valueOrNull is SpeechConfig
-        ? speechAsync.valueOrNull as SpeechConfig
-        : null;
+  Widget _buildAsrTab(LocalSettings s, AsyncValue<SpeechConfig> speechAsync) {
+    final speechConfig = speechAsync.valueOrNull;
     return ListView(
       controller: _asrScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -603,11 +470,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     );
   }
 
-  Widget _buildTtsTab(
-      LocalSettings s, AsyncValue speechAsync, AsyncValue healthAsync) {
-    final speechConfig = speechAsync.valueOrNull is SpeechConfig
-        ? speechAsync.valueOrNull as SpeechConfig
-        : null;
+  Widget _buildTtsTab(LocalSettings s, AsyncValue<SpeechConfig> speechAsync) {
+    final speechConfig = speechAsync.valueOrNull;
     return ListView(
       controller: _ttsScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -627,7 +491,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   }
 
   Widget _buildGeneralTab(
-      LocalSettings s, AsyncValue currentAsync, AsyncValue healthAsync) {
+      LocalSettings s,
+      AsyncValue<CurrentConfig> currentAsync,
+      AsyncValue<Map<String, ServiceHealth>> healthAsync) {
     return ListView(
       controller: _generalScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1586,7 +1452,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   //  Section builders (reused by tabs)
   // ─────────────────────────────────────────────────────────────────────────
 
-  Widget _buildServerSection(AsyncValue currentAsync) => _Section(
+  Widget _buildServerSection(AsyncValue<CurrentConfig> currentAsync) =>
+      _Section(
         title: '服务器地址',
         icon: Icons.dns_outlined,
         children: [
@@ -1611,7 +1478,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildLlmSection(AsyncValue providersAsync, LocalSettings s) =>
+  Widget _buildLlmSection(
+          AsyncValue<List<ProviderInfo>> providersAsync, LocalSettings s) =>
       _Section(
         title: 'AI 模型提供商',
         icon: Icons.smart_toy_outlined,
@@ -1626,7 +1494,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildAsrSection(AsyncValue speechAsync, LocalSettings s) => _Section(
+  Widget _buildAsrSection(
+          AsyncValue<SpeechConfig> speechAsync, LocalSettings s) =>
+      _Section(
         title: '语音识别（ASR）',
         icon: Icons.mic_outlined,
         children: [
@@ -1644,7 +1514,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildTtsSection(AsyncValue speechAsync, LocalSettings s) => _Section(
+  Widget _buildTtsSection(
+          AsyncValue<SpeechConfig> speechAsync, LocalSettings s) =>
+      _Section(
         title: '语音合成（TTS）',
         icon: Icons.volume_up_outlined,
         children: [
@@ -1725,7 +1597,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildTavilySection(AsyncValue currentAsync) => _Section(
+  Widget _buildTavilySection(AsyncValue<CurrentConfig> currentAsync) =>
+      _Section(
         title: '网络搜索（Tavily）',
         icon: Icons.travel_explore_outlined,
         children: [
@@ -1793,7 +1666,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildSummarySection(LocalSettings s, AsyncValue currentAsync) =>
+  Widget _buildSummarySection(
+          LocalSettings s, AsyncValue<CurrentConfig> currentAsync) =>
       _Section(
         title: '配置总览',
         icon: Icons.dashboard_outlined,
@@ -1816,7 +1690,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildHealthSection(AsyncValue healthAsync) => _Section(
+  Widget _buildHealthSection(
+          AsyncValue<Map<String, ServiceHealth>> healthAsync) =>
+      _Section(
         title: '本地服务状态',
         icon: Icons.monitor_heart_outlined,
         action: IconButton(
@@ -1838,6 +1714,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           tooltip: '刷新',
         ),
         children: [
+          const Text(
+            '这里是系统状态的统一展示入口。是否可用请以本地服务状态为准，不再单独显示“验证”结果。',
+            style: TextStyle(color: AppColors.warmGray, fontSize: 12),
+          ),
+          const SizedBox(height: 10),
           healthAsync.when(
             data: (map) => Column(
                 children: map.entries
@@ -2229,32 +2110,51 @@ class _Section extends StatelessWidget {
   final IconData icon;
   final Widget? action;
   final List<Widget> children;
-  const _Section(
-      {required this.title,
-      required this.icon,
-      this.action,
-      required this.children});
+
+  const _Section({
+    required this.title,
+    required this.icon,
+    this.action,
+    required this.children,
+  });
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: AppColors.studyWallLight.withValues(alpha: 0.6),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.warmGray.withValues(alpha: 0.15)),
+          color: AppColors.studyWallLight,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: AppColors.amberGold.withValues(alpha: 0.16),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.12),
+              blurRadius: 12,
+              offset: const Offset(0, 6),
+            ),
+          ],
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(icon, size: 18, color: AppColors.amberGold),
-            const SizedBox(width: 7),
-            Expanded(
-                child: Text(title,
-                    style: AppTheme.calligraphyStyleDark(fontSize: 15))),
-            if (action != null) action!,
-          ]),
-          const SizedBox(height: 10),
-          ...children,
-        ]),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, size: 18, color: AppColors.amberGold),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: AppTheme.calligraphyStyleDark(fontSize: 15),
+                  ),
+                ),
+                if (action != null) action!,
+              ],
+            ),
+            const SizedBox(height: 10),
+            ...children,
+          ],
+        ),
       );
 }
 
@@ -2660,29 +2560,6 @@ class _ErrorBox extends StatelessWidget {
       );
 }
 
-class _DialogRow extends StatelessWidget {
-  final String label;
-  final String value;
-  const _DialogRow(this.label, this.value);
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          SizedBox(
-            width: 80,
-            child: Text(label,
-                style:
-                    const TextStyle(color: AppColors.warmGray, fontSize: 12)),
-          ),
-          Expanded(
-            child: Text(value,
-                style:
-                    const TextStyle(color: AppColors.warmWhite, fontSize: 12)),
-          ),
-        ]),
-      );
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 需求22：话题管理（与首页自由话题共用同一存储）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2730,28 +2607,23 @@ class _TopicsTabState extends State<_TopicsTab> {
   }
 
   Future<void> _add() async {
-    final t = _inputCtrl.text.trim();
-    if (t.isEmpty) {
-      _showSnack('请先输入一个话题。', error: true);
+    final topic = _inputCtrl.text.trim();
+    if (topic.isEmpty) {
+      _showSnack('请输入要保存的话题', error: true);
       return;
     }
-    if (_items.contains(t)) {
-      _showSnack('这个话题已经在列表里了。', error: true);
-      return;
-    }
-    await SavedTopicsStore.add(t);
+    await SavedTopicsStore.add(topic);
     _inputCtrl.clear();
     await _load();
-    _showSnack('已添加话题：$t');
+    _showSnack('已添加到常用话题');
   }
 
-  Future<void> _remove(String t) async {
-    await SavedTopicsStore.remove(t);
+  Future<void> _remove(String topic) async {
+    await SavedTopicsStore.remove(topic);
     await _load();
-    _showSnack('已删除话题：$t');
+    _showSnack('已删除话题');
   }
 
-  @override
   Widget build(BuildContext context) {
     if (_loading) {
       return const Center(

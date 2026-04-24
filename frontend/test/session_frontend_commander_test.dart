@@ -52,6 +52,29 @@ void main() {
       expect(later, HumanTurnCommand.activateNow);
     });
 
+    test('completion debounce suppresses immediate re-prompt after submit', () {
+      DateTime now = DateTime(2026, 4, 20, 10, 0, 0, 0);
+      final commander = SessionFrontendCommander(
+        completionDebounce: const Duration(milliseconds: 1200),
+        now: () => now,
+      );
+
+      commander.markHumanTurnCompleted();
+
+      final immediate = commander.onHumanInputRequested(
+        speaker: '豆苗',
+        hasOngoingSpeechPlayback: false,
+      );
+      expect(immediate, HumanTurnCommand.none);
+
+      now = now.add(const Duration(milliseconds: 1300));
+      final later = commander.onHumanInputRequested(
+        speaker: '豆苗',
+        hasOngoingSpeechPlayback: false,
+      );
+      expect(later, HumanTurnCommand.activateNow);
+    });
+
     test('force-activate pending human turn after guard timeout', () {
       DateTime now = DateTime(2026, 4, 20, 10, 0, 0, 0);
       final commander = SessionFrontendCommander(

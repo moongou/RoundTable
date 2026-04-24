@@ -88,7 +88,8 @@ void main() {
     );
   });
 
-  test('pending human turn only waits for current speaker playback to finish', () {
+  test('pending human turn only waits for current speaker playback to finish',
+      () {
     expect(
       ImmersiveSessionScreen.shouldBlockPendingHumanTurn(
         ttsPlaying: false,
@@ -114,6 +115,32 @@ void main() {
         hasQueuedCurrentSpeakerSpeech: true,
       ),
       isTrue,
+    );
+  });
+
+  test('completed human turn ignores duplicate prompt for same speaker', () {
+    expect(
+      ImmersiveSessionScreen.shouldIgnoreRepeatedHumanInputRequest(
+        requestedSpeaker: '豆苗',
+        completedSpeaker: '豆苗',
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldIgnoreRepeatedHumanInputRequest(
+        requestedSpeaker: '**豆苗**',
+        completedSpeaker: '豆苗',
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldIgnoreRepeatedHumanInputRequest(
+        requestedSpeaker: '豆苗',
+        completedSpeaker: '',
+      ),
+      isFalse,
     );
   });
 
@@ -153,6 +180,26 @@ void main() {
     );
   });
 
+  test('ending quotes screen stays manual even after discussion ends', () {
+    expect(
+      ImmersiveSessionScreen.shouldPresentEndingQuotesScreen(
+        discussionEnded: true,
+        hasGoldenQuotes: true,
+        manuallyRequested: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldPresentEndingQuotesScreen(
+        discussionEnded: true,
+        hasGoldenQuotes: true,
+        manuallyRequested: true,
+      ),
+      isTrue,
+    );
+  });
+
   test('golden quotes do not activate on thin opening material', () {
     final messages = <ChatMessage>[
       const ChatMessage(source: '李老师', content: '同学们好，我是李老师。'),
@@ -188,6 +235,19 @@ void main() {
         ttsProvider: 'openvoice',
       ),
       'ov:teacher_li',
+    );
+
+    expect(
+      ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
+        '**小疑**',
+        ttsProvider: 'openvoice',
+      ),
+      'ov:student_xiaoyi',
+    );
+
+    expect(
+      ImmersiveSessionScreen.normalizeSpeakerLabel(' **豆苗** '),
+      '豆苗',
     );
     expect(
       ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -70,6 +72,13 @@ def _detect_audio_content_type(audio_data: bytes) -> tuple[str, str]:
     return "application/octet-stream", "bin"
 
 
+def _should_retry_tts_error(error: Exception) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code if error.response is not None else None
+        return bool(status_code and (status_code >= 500 or status_code == 429))
+    return isinstance(error, httpx.RequestError)
+
+
 # ── 角色音色映射 ──────────────────────────────────────────────────────────────
 
 def _get_voice_for_character(character_id: str, provider_id: str | None = None) -> str:
@@ -127,12 +136,16 @@ async def text_to_speech(request: TTSRequest) -> Response:
     voice = request.voice
     if request.character_id:
         voice = _get_voice_for_character(request.character_id, request.provider)
+    provider_id = request.provider or settings.tts_provider
 
     try:
         provider = create_tts_provider(request.provider)
         last_error: Exception | None = None
         audio_data: bytes | None = None
+        attempts = 0
+        started_at = time.perf_counter()
         for attempt in range(2):
+            attempts = attempt + 1
             try:
                 audio_data = await provider.synthesize(
                     request.text,
@@ -142,19 +155,25 @@ async def text_to_speech(request: TTSRequest) -> Response:
                 break
             except Exception as e:
                 last_error = e
-                # 仅对瞬时错误做一次快速重试，避免把偶发上游 500 直接暴露给前端。
-                if attempt == 0:
-                    await asyncio.sleep(0.2)
+                # 仅对瞬时网络/上游 5xx 做一次快速重试，避免确定性错误额外拖慢响应。
+                if attempt == 0 and _should_retry_tts_error(e):
+                    await asyncio.sleep(0.12)
                     continue
+                break
         if audio_data is None:
             raise last_error or RuntimeError("unknown tts error")
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
         media_type, suffix = _detect_audio_content_type(audio_data)
         return Response(
             content=audio_data,
             media_type=media_type,
             headers={
                 "Content-Disposition": f"inline; filename=tts_output.{suffix}",
+                "X-Voice-Requested": request.voice,
                 "X-Voice-Used": voice,
+                "X-TTS-Provider": provider_id,
+                "X-TTS-Attempts": str(attempts),
+                "X-TTS-Elapsed-Ms": str(elapsed_ms),
             },
         )
     except Exception as e:

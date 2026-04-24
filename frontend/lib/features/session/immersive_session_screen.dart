@@ -103,6 +103,17 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     return ttsPlaying || ttsServiceSpeaking || hasQueuedCurrentSpeakerSpeech;
   }
 
+  static bool shouldIgnoreRepeatedHumanInputRequest({
+    required String requestedSpeaker,
+    required String completedSpeaker,
+  }) {
+    if (requestedSpeaker.isEmpty || completedSpeaker.isEmpty) {
+      return false;
+    }
+    return normalizeSpeakerLabel(requestedSpeaker) ==
+        normalizeSpeakerLabel(completedSpeaker);
+  }
+
   static Duration humanSubtitleHoldDurationFor(String text) {
     final chars = text.trim().runes.length;
     final holdMs = (chars * 65).clamp(1800, 5200).toInt();
@@ -170,8 +181,47 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     return true;
   }
 
+  static bool shouldPresentEndingQuotesScreen({
+    required bool discussionEnded,
+    required bool hasGoldenQuotes,
+    required bool manuallyRequested,
+  }) {
+    return discussionEnded && hasGoldenQuotes && manuallyRequested;
+  }
+
+  static String normalizeSpeakerLabel(String speaker) {
+    var normalized = speaker.trim();
+    if (normalized.isEmpty) {
+      return '';
+    }
+
+    const wrappers = <String>['**', '__', '`', '*', '_'];
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (final wrapper in wrappers) {
+        if (normalized.length <= wrapper.length * 2) {
+          continue;
+        }
+        if (!normalized.startsWith(wrapper) || !normalized.endsWith(wrapper)) {
+          continue;
+        }
+        final inner = normalized
+            .substring(wrapper.length, normalized.length - wrapper.length)
+            .trim();
+        if (inner.isEmpty) {
+          continue;
+        }
+        normalized = inner;
+        changed = true;
+      }
+    }
+
+    return normalized;
+  }
+
   static String _canonicalSpeakerName(String speaker) {
-    final normalized = speaker.trim();
+    final normalized = normalizeSpeakerLabel(speaker);
     if (_teacherSpeakerAliases.contains(normalized)) {
       return teacherDisplayName;
     }
@@ -179,13 +229,13 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   }
 
   static bool isTeacherSpeaker(String speaker) =>
-      _teacherSpeakerAliases.contains(speaker.trim());
+      _teacherSpeakerAliases.contains(_canonicalSpeakerName(speaker));
 
   static bool isStudentSpeaker(String speaker) =>
-      _edgeStudentVoices.containsKey(speaker.trim());
+      _edgeStudentVoices.containsKey(_canonicalSpeakerName(speaker));
 
   static bool isThinkerSpeaker(String speaker) {
-    final normalized = speaker.trim();
+    final normalized = _canonicalSpeakerName(speaker);
     return normalized.isNotEmpty &&
         normalized != '系统' &&
         !isTeacherSpeaker(normalized) &&
@@ -389,6 +439,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   final List<String> _goldenQuotes = [];
   bool _discussionEnded = false;
   bool _isGeneratingGoldenQuotes = false;
+  bool _showEndingQuotesScreen = false;
   // TTS 顺序播放队列 (i)
   final List<
       ({
@@ -427,6 +478,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _recordingControlledByHoldCtrl = false;
   Timer? _speechFinalizeTimer;
   bool _isFinalizingSpeech = false; // 防止多次快速按 Ctrl 导致并发 finalize
+  bool _speechFinalizeRunning = false;
+  bool _isCompletingHumanTurn = false;
   bool get _pendingHumanTurn => _commander.pendingHumanTurn;
   String get _pendingHumanSpeaker => _commander.pendingHumanSpeaker;
   bool get _handApprovedToSpeak => _commander.handApprovedToSpeak;
@@ -458,6 +511,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   // 语音状态
   bool _isRecording = false;
+  String _completedHumanTurnSpeaker = '';
   late TtsService _ttsService;
   late AsrService _asrService;
   TtsService? _browserFallbackTts;
@@ -637,6 +691,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
       });
       _debugSubtitleLog(triggerRole: widget.humanName, note: 'stt streaming');
+      if (result.isFinal && !_isRecording && _isFinalizingSpeech) {
+        unawaited(_flushSpeechFinalizeNow());
+      }
     }, onError: (error) {
       _reportAsrStatus(
         'stream_error',
@@ -1210,7 +1267,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           ..clear()
           ..addAll(quotes);
         if (_lastErrorMessage == null) {
-          _statusText = 'AI 已整理出今日金句';
+          _statusText = _discussionEnded ? '讨论已结束，右上角可手动查看金句' : 'AI 已整理出今日金句';
         }
       });
     } catch (error) {
@@ -1268,8 +1325,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final delayMs = ImmersiveSessionScreen.subtitlePageAdvanceDelayMs(
       pageText: pageText,
       isFirstPage: isFirstPage,
-      remainingHumanSubtitleHold:
-          _centerSpeaker == widget.humanName ? _remainingHumanSubtitleHold : null,
+      remainingHumanSubtitleHold: _centerSpeaker == widget.humanName
+          ? _remainingHumanSubtitleHold
+          : null,
       remainingPages: remainingPages,
     );
     _subtitlePageTimer = Timer(Duration(milliseconds: delayMs), () {
@@ -1553,6 +1611,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _cancelMaxSpeechTimer();
     _cancelPendingHumanTurnGuard();
     final activateSpeaker = speaker.isEmpty ? widget.humanName : speaker;
+    _completedHumanTurnSpeaker = '';
     _commander.markHumanTurnActivated(speaker: activateSpeaker);
     _deferredAutoSkipTimer?.cancel();
     _deferredAutoSkipTimer = null;
@@ -1810,22 +1869,31 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     // 构建参与者列表：AI 角色 + 思想家 + 人类
     final names = <String>{};
     final avatars = <String, String>{};
+    final humanName =
+        ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
 
     // 从系统事件的参与者列表中获取
     for (final name in _knownParticipants) {
-      names.add(name);
+      final normalizedName = ImmersiveSessionScreen.normalizeSpeakerLabel(name);
+      if (normalizedName.isNotEmpty) {
+        names.add(normalizedName);
+      }
     }
 
     // 从已有消息中补充参与者
     for (final msg in _messages) {
       if (msg.type != 'system') {
-        names.add(msg.source);
+        final normalizedName =
+            ImmersiveSessionScreen.normalizeSpeakerLabel(msg.source);
+        if (normalizedName.isNotEmpty) {
+          names.add(normalizedName);
+        }
       }
     }
 
     // 从当前发言者中添加
     if (_currentSpeaker.isNotEmpty) {
-      names.add(_currentSpeaker);
+      names.add(ImmersiveSessionScreen.normalizeSpeakerLabel(_currentSpeaker));
     }
 
     // 旧角色模板的头像映射 - fun character-specific pairings (d)
@@ -1875,7 +1943,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
     // 为所有参与者分配头像并建立固定音色映射
     for (final name in names) {
-      if (name == widget.humanName) {
+      if (name == humanName) {
         avatars[name] = diceBearUrl(name, style: 'personas');
         // 人类不需要 TTS 音色
       } else {
@@ -1892,7 +1960,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
     setState(() {
       _participants = names.map((name) {
-        final isHuman = name == widget.humanName;
+        final isHuman = name == humanName;
         final isSpeaking = name == _currentSpeaker &&
             (_ttsPlaying || (isHuman && _isRecording));
         final isCurrentSpeaker = isSpeaking;
@@ -1927,10 +1995,15 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case WsEventType.message:
         final data = event.data;
         if (data != null) {
-          final source = data['source'] ?? '未知';
-          final content = data['content'] ?? '';
-          final msgType = data['msg_type'] ?? 'text';
-          final shouldSpeak = msgType != 'system' && source != widget.humanName;
+          final humanName =
+              ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
+          final rawSource = ((data['source'] ?? '未知') as Object).toString();
+          final normalizedSource =
+              ImmersiveSessionScreen.normalizeSpeakerLabel(rawSource);
+          final source = normalizedSource.isEmpty ? '未知' : normalizedSource;
+          final content = ((data['content'] ?? '') as Object).toString();
+          final msgType = ((data['msg_type'] ?? 'text') as Object).toString();
+          final shouldSpeak = msgType != 'system' && source != humanName;
 
           // 需求7：去重 - 如果最后一条消息与当前完全相同，跳过重复
           if (_messages.isNotEmpty) {
@@ -1977,7 +2050,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               if (!isSystemLike &&
                   !_ttsPlaying &&
                   sameSpeaker &&
-                  (!_isMyTurn || source == widget.humanName)) {
+                  (!_isMyTurn || source == humanName)) {
                 // 字幕去除表情提示（如"（微笑）"），保持干净显示
                 _centerMessage = _stripStageDirectionsForSpeech(content);
                 _centerSpeaker = source;
@@ -1993,7 +2066,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
           // 如果是 AI 角色/主持人消息，排队 TTS 朗读（顺序播放，i）
           if (shouldSpeak) {
-            final voice = _voiceMap[source];
+            final voice = _voiceMap[source] ??
+                ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
+                  source,
+                  ttsProvider: _ttsProviderId,
+                );
             _enqueueTts(source: source, text: content, voice: voice);
           }
 
@@ -2003,8 +2080,22 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case WsEventType.turnChange:
         final data = event.data;
         if (data != null) {
-          final speaker = data['speaker'] ?? '';
+          final humanName =
+              ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
+          final speaker = ImmersiveSessionScreen.normalizeSpeakerLabel(
+            ((data['speaker'] ?? '') as Object).toString(),
+          );
           final isHuman = data['is_human'] ?? false;
+          _completedHumanTurnSpeaker = '';
+          if (isHuman &&
+              speaker == humanName &&
+              (_isCompletingHumanTurn || _isFinalizingSpeech)) {
+            setState(() {
+              _statusText = '正在整理你的话……';
+            });
+            _buildParticipants();
+            return;
+          }
           final sessionMatched = _isRealtimeSessionMatched(
               data: data, triggerRole: speaker, eventType: 'turn_change');
 
@@ -2022,7 +2113,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           }
 
           if (isHuman &&
-              speaker == widget.humanName &&
+              speaker == humanName &&
               _hasCurrentSpeakerSpeechToFinish()) {
             _commander.onHumanInputRequested(
               speaker: widget.humanName,
@@ -2040,7 +2131,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               (_hasOngoingSpeechPlayback() || _ttsQueue.isNotEmpty)) {
             await _yieldSpeechQueueToNextTurn(
               nextSpeaker: speaker,
-              isHumanPriority: isHuman && speaker == widget.humanName,
+              isHumanPriority: isHuman && speaker == humanName,
             );
           }
 
@@ -2048,7 +2139,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           _cancelMaxSpeechTimer();
           setState(() {
             _currentSpeaker = speaker;
-            _isMyTurn = isHuman && speaker == widget.humanName;
+            _isMyTurn = isHuman && speaker == humanName;
             _hasRaisedHand = false;
             _sttPartialText = '';
             if (_isMyTurn) {
@@ -2057,8 +2148,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               _isThinking = false;
               _thinkingController.stop();
               // 需求20：暂停时不提示"请按住麦克风讲话"
-                _statusText =
-                  _isPaused ? '暂停中...' : '轮到你了：按住 Ctrl 或点击“讲话”开始';
+              _statusText = _isPaused ? '暂停中...' : '轮到你了：按住 Ctrl 或点击“讲话”开始';
               if (!_isPaused) {
                 _glowController.repeat(reverse: true);
                 _keyboardFocusNode.requestFocus();
@@ -2094,10 +2184,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case WsEventType.stream:
         final data = event.data;
         if (data != null) {
-          final source = (data['source'] ?? '').toString();
+          final humanName =
+              ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
+          final source = ImmersiveSessionScreen.normalizeSpeakerLabel(
+            (data['source'] ?? '').toString(),
+          );
           final content = (data['content'] ?? '').toString();
           // 语音与字幕同步：AI 流式文本不提前渲染，统一在 TTS 开始时显示。
-          if (source != widget.humanName) {
+          if (source != humanName) {
             _isRealtimeSessionMatched(
               data: data,
               triggerRole: source,
@@ -2190,7 +2284,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           // 从系统事件捕获参与者列表
           final participants = data['participants'];
           if (participants is List) {
-            _knownParticipants = participants.cast<String>();
+            _knownParticipants = participants
+                .map((participant) =>
+                    ImmersiveSessionScreen.normalizeSpeakerLabel(
+                        participant.toString()))
+                .where((participant) => participant.isNotEmpty)
+                .toList(growable: false);
             _buildParticipants();
           }
           setState(() {
@@ -2203,10 +2302,22 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
         break;
       case WsEventType.humanInputRequested:
-        final requestedSpeaker =
-            ((event.data?['speaker'] ?? '') as Object).toString().trim();
-        if (requestedSpeaker.isNotEmpty &&
-            requestedSpeaker != widget.humanName) {
+        final humanName =
+            ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
+        final requestedSpeaker = ImmersiveSessionScreen.normalizeSpeakerLabel(
+          ((event.data?['speaker'] ?? '') as Object).toString(),
+        );
+        if (requestedSpeaker.isNotEmpty && requestedSpeaker != humanName) {
+          break;
+        }
+        if (ImmersiveSessionScreen.shouldIgnoreRepeatedHumanInputRequest(
+          requestedSpeaker:
+              requestedSpeaker.isEmpty ? humanName : requestedSpeaker,
+          completedSpeaker: _completedHumanTurnSpeaker,
+        )) {
+          break;
+        }
+        if (_isCompletingHumanTurn || _isFinalizingSpeech) {
           break;
         }
         // If already in user's turn or actively recording, ignore duplicate requests
@@ -2266,12 +2377,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           _statusText = endedWithError
               ? '会话已中断: ${_lastErrorMessage!}'
               : shouldGenerateGoldenQuotes
-                  ? '讨论已结束，AI 正在整理金句...'
+                  ? '讨论已结束，AI 正在整理金句，完成后可从右上角手动打开'
                   : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
           _goldenQuotes.clear();
           _discussionEnded = true;
+          _showEndingQuotesScreen = false;
         });
         if (shouldGenerateGoldenQuotes) {
           unawaited(_generateGoldenQuotes());
@@ -2284,6 +2396,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           final approvedBy = (data['approved_by'] ?? '李老师').toString();
           final approved = data['approved'] == true;
           final mineApproved = approved && interrupter == widget.humanName;
+          if (mineApproved) {
+            _completedHumanTurnSpeaker = '';
+          }
           final shouldWaitForCurrentSpeech = _hasCurrentSpeakerSpeechToFinish();
           final command = _commander.onInterruptApprovedForHuman(
             mineApproved: mineApproved,
@@ -2408,14 +2523,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     if (!_isRecording) return;
     if (_isFinalizingSpeech) return; // 防止并发 finalize
     _isFinalizingSpeech = true;
+    _isCompletingHumanTurn = true;
     _cancelMaxSpeechTimer();
     _recordingControlledByHoldCtrl = false;
     setState(() {
       _isRecording = false;
-      // 需求5：录音结束、字幕还没出来时，立刻清除"请按住麦克风讲话"的提示
-      if (_statusText.contains('请按住麦克风讲话') || _statusText.contains('轮到你了')) {
-        _statusText = '正在整理你的话……';
-      }
+      _micLocked = true;
+      _statusText = '正在整理你的话……';
     });
     _micController.stop();
     _micController.reset();
@@ -2435,16 +2549,31 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
     _awaitingAsrFirstPacket = false;
 
+    _scheduleSpeechFinalize();
+  }
+
+  void _scheduleSpeechFinalize({
+    Duration delay = const Duration(milliseconds: 140),
+  }) {
     _speechFinalizeTimer?.cancel();
-    _speechFinalizeTimer = Timer(const Duration(milliseconds: 800), () async {
-      try {
-        await _finalizeSpeechWithRetry();
-      } finally {
-        if (mounted) {
-          _isFinalizingSpeech = false;
-        }
-      }
+    _speechFinalizeTimer = Timer(delay, () {
+      unawaited(_flushSpeechFinalizeNow());
     });
+  }
+
+  Future<void> _flushSpeechFinalizeNow() async {
+    _speechFinalizeTimer?.cancel();
+    _speechFinalizeTimer = null;
+    if (!_isFinalizingSpeech || _speechFinalizeRunning) {
+      return;
+    }
+    _speechFinalizeRunning = true;
+    try {
+      await _finalizeSpeechWithRetry();
+    } finally {
+      _speechFinalizeRunning = false;
+      _isFinalizingSpeech = false;
+    }
   }
 
   Future<void> _finalizeSpeechWithRetry() async {
@@ -2454,10 +2583,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             : _lastNonEmptySttText.trim())
         .trim();
 
-    // 给 ASR 最终包更长等待窗口，避免”录完即判空”导致误跳过。
-    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    // 优先利用 final 包立即收尾；没有 final 时只保留很短的兜底等待。
+    final deadline = DateTime.now().add(const Duration(milliseconds: 2400));
     while (rawText.isEmpty && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 350));
+      await Future<void>.delayed(const Duration(milliseconds: 120));
       if (!mounted) return;
       rawText = (_sttPartialText.trim().isNotEmpty
               ? _sttPartialText.trim()
@@ -2477,7 +2606,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         textLen: 0,
       );
       setState(() {
+        _isCompletingHumanTurn = false;
         _isMyTurn = true;
+        _micLocked = false;
         _statusText = '我还没听清，再说一次吧';
       });
       _showStatusToast('我还没听清，再说一次吧');
@@ -2494,9 +2625,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
 
     _wsClient.sendHumanInput(speaker: widget.humanName, content: submitText);
+    _completedHumanTurnSpeaker = widget.humanName;
     setState(() {
       // 不直接添加到 _messages，避免后端 message 事件重复添加
       // 后端收到 human_input 后会发送 message 事件，前端 _handleEvent 中会添加
+      _isCompletingHumanTurn = false;
       _isMyTurn = false;
       // 需求4：发言完毕，锁定麦克风为灰色，直到下轮或举手批准
       _micLocked = true;
@@ -2645,7 +2778,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }
 
   void _holdAiUntilHumanSubtitleDone(String text) {
-    final holdDuration = ImmersiveSessionScreen.humanSubtitleHoldDurationFor(text);
+    final holdDuration =
+        ImmersiveSessionScreen.humanSubtitleHoldDurationFor(text);
     _humanSubtitleLockUntil = DateTime.now().add(holdDuration);
     _humanSubtitleLockTimer?.cancel();
     _subtitlePageTimer?.cancel();
@@ -2989,6 +3123,26 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     return total / values.length;
   }
 
+  String _formatTtsTraceValue(String? value, {String fallback = '—'}) {
+    final normalized = (value ?? '').trim();
+    return normalized.isEmpty ? fallback : normalized;
+  }
+
+  String _buildLatestTtsTraceSummary() {
+    final trace = _ttsPerf.lastResponseInfo;
+    if (trace == null) {
+      return '最近一次 /voice/tts：暂无播放记录';
+    }
+    final provider = _formatTtsTraceValue(trace.provider);
+    final usedVoice = _formatTtsTraceValue(trace.usedVoice);
+    final attempts = trace.attempts?.toString() ?? '—';
+    final elapsed = trace.elapsedMs != null
+        ? '${trace.elapsedMs!.toStringAsFixed(1)} ms'
+        : '—';
+    final source = trace.fromPrefetchCache ? '预取命中' : '实时回源';
+    return '最近一次 /voice/tts：provider=$provider，voice=$usedVoice，attempts=$attempts，elapsed=$elapsed，来源=$source';
+  }
+
   String _buildPerfCompareReport() {
     const baselineCount = 10;
     const recentCount = 10;
@@ -3034,6 +3188,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 - 回源次数: ${_ttsPerf.prefetchMiss}
 - 开播样本数: $_ttsStartupSamples
 - ASR首包样本数: $_asrFirstPacketSamples
+
+## 最近一次服务端 TTS
+- ${_buildLatestTtsTraceSummary()}
 
 ## 说明
 - 命中率越高越好，开播等待与ASR首包延迟越低越好。
@@ -3194,6 +3351,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final hitRate = _prefetchHitRatePercent;
     final hitProgress = (hitRate / 100).clamp(0.0, 1.0);
     final perf = _ttsPerf;
+    final trace = perf.lastResponseInfo;
     final totalBg = _bgTaskRunning + _bgTaskQueue.length;
 
     return Container(
@@ -3281,6 +3439,77 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               color: Colors.white.withValues(alpha: 0.78),
               fontSize: 10,
             ),
+          ),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0C1624).withValues(alpha: 0.92),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: const Color(0xFF80DEEA).withValues(alpha: 0.22),
+              ),
+            ),
+            child: trace == null
+                ? Text(
+                    '最近一次 /voice/tts：等待播放后更新',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.72),
+                      fontSize: 10,
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '最近一次服务端 TTS',
+                        style: TextStyle(
+                          color: Color(0xFF80DEEA),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _PerfTraceChip(
+                            label: 'Provider',
+                            value: _formatTtsTraceValue(trace.provider),
+                            accent: const Color(0xFF80DEEA),
+                          ),
+                          _PerfTraceChip(
+                            label: 'Voice',
+                            value: _formatTtsTraceValue(trace.usedVoice),
+                            accent: const Color(0xFFFFD54F),
+                          ),
+                          _PerfTraceChip(
+                            label: 'Attempts',
+                            value: trace.attempts?.toString() ?? '—',
+                            accent: const Color(0xFFFFAB91),
+                          ),
+                          _PerfTraceChip(
+                            label: 'Elapsed',
+                            value: trace.elapsedMs != null
+                                ? '${trace.elapsedMs!.toStringAsFixed(1)} ms'
+                                : '—',
+                            accent: const Color(0xFF00E5A8),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '请求 ${_formatTtsTraceValue(trace.requestedVoice)}  →  实际 ${_formatTtsTraceValue(trace.usedVoice)}  ·  ${trace.fromPrefetchCache ? '预取命中' : '实时回源'}${trace.contentType != null && trace.contentType!.isNotEmpty ? '  ·  ${trace.contentType}' : ''}',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.72),
+                          fontSize: 10,
+                          height: 1.45,
+                        ),
+                      ),
+                    ],
+                  ),
           ),
           const SizedBox(height: 10),
           _PerfSparkline(
@@ -3558,14 +3787,18 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   @override
   Widget build(BuildContext context) {
-    // 只有 AI 真正整理出金句后，才切到终幕金句页，避免一开场就全屏展示。
-    if (_discussionEnded && _goldenQuotes.isNotEmpty) {
+    if (ImmersiveSessionScreen.shouldPresentEndingQuotesScreen(
+      discussionEnded: _discussionEnded,
+      hasGoldenQuotes: _goldenQuotes.isNotEmpty,
+      manuallyRequested: _showEndingQuotesScreen,
+    )) {
       return _EndingQuotesScreen(
         quotes: _goldenQuotes,
         onExit: () {
-          if (Navigator.of(context).canPop()) {
-            Navigator.of(context).pop();
-          }
+          if (!mounted) return;
+          setState(() {
+            _showEndingQuotesScreen = false;
+          });
         },
         // 需求九：朗读由"思想家角色"完成，句间有小停顿。
         onReadAloud: _readAloudQuotes,
@@ -4064,6 +4297,29 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         constraints:
                             const BoxConstraints(minWidth: 36, minHeight: 36),
                       ),
+                      const SizedBox(width: 8),
+                      _TopRectButton(
+                        icon: Icons.auto_awesome,
+                        label: _goldenQuotes.isNotEmpty ? '金句' : '整理中',
+                        width: 126,
+                        enabled: _goldenQuotes.isNotEmpty,
+                        onTap: _goldenQuotes.isNotEmpty
+                            ? () {
+                                setState(() {
+                                  _showEndingQuotesScreen = true;
+                                });
+                              }
+                            : null,
+                        backgroundColor: _goldenQuotes.isNotEmpty
+                            ? const Color(0xFF6E4B1F).withValues(alpha: 0.72)
+                            : Colors.white.withValues(alpha: 0.04),
+                        borderColor: _goldenQuotes.isNotEmpty
+                            ? AppColors.amberGold.withValues(alpha: 0.65)
+                            : Colors.white.withValues(alpha: 0.14),
+                        foregroundColor: _goldenQuotes.isNotEmpty
+                            ? AppColors.amberGold
+                            : AppColors.warmGray,
+                      ),
                     ],
                   ),
                 ),
@@ -4366,6 +4622,54 @@ class _PerfSparkline extends StatelessWidget {
   }
 }
 
+class _PerfTraceChip extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color accent;
+
+  const _PerfTraceChip({
+    required this.label,
+    required this.value,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: accent.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: accent,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.25,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SparklinePainter extends CustomPainter {
   final List<double> values;
   final Color lineColor;
@@ -4518,40 +4822,61 @@ class _PauseButton extends StatelessWidget {
 class _TopRectButton extends StatelessWidget {
   final IconData icon;
   final String label;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final bool enabled;
+  final double width;
+  final Color? backgroundColor;
+  final Color? borderColor;
+  final Color? foregroundColor;
 
   const _TopRectButton({
     required this.icon,
     required this.label,
-    required this.onTap,
+    this.onTap,
+    this.enabled = true,
+    this.width = 120,
+    this.backgroundColor,
+    this.borderColor,
+    this.foregroundColor,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 120,
-        height: 48,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          color: Colors.white.withValues(alpha: 0.08),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.25)),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: AppColors.warmWhite, size: 20),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: const TextStyle(
-                color: AppColors.warmWhite,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
+    final resolvedForeground =
+        foregroundColor ?? (enabled ? AppColors.warmWhite : AppColors.warmGray);
+    return IgnorePointer(
+      ignoring: !enabled || onTap == null,
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 180),
+          opacity: enabled ? 1.0 : 0.55,
+          child: Container(
+            width: width,
+            height: 48,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              color: backgroundColor ?? Colors.white.withValues(alpha: 0.08),
+              border: Border.all(
+                color: borderColor ?? Colors.white.withValues(alpha: 0.25),
               ),
             ),
-          ],
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: resolvedForeground, size: 20),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: resolvedForeground,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

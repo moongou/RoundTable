@@ -428,14 +428,22 @@ class Settings(BaseSettings):
 
     def get_voice_service_url(self, service_id: str) -> str:
         """获取语音服务的 URL。"""
+        sid = (service_id or "").strip().lower()
         url_map = {
+            "chattts": self.chattts_url,
             "funasr": self.funasr_url,
             "edge_tts": self.edge_tts_url,
             "cosyvoice": self.cosyvoice_url,
             "openai_whisper": self.openai_whisper_base_url,
             "openai_tts": self.openai_base_url,
         }
-        return url_map.get(service_id, "")
+        url = url_map.get(sid, "")
+        if url:
+            return url
+        return (
+            LOCAL_SERVICE_DEFAULTS.get(sid, {}).get("url", "")
+            or VOICE_SERVICE_META.get(sid, {}).get("default_url", "")
+        )
 
 
 settings = Settings()

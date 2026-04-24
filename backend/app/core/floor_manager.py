@@ -128,6 +128,7 @@ class FloorManager:
         self._human_stall_timeout_sec = 30.0
         self._min_human_turn_window_sec = 8.0
         self._human_turn_started_mono = 0.0
+        self._last_human_input_requested_speaker = ""
 
         # 暂停状态
         self._paused = False
@@ -594,6 +595,7 @@ class FloorManager:
                 await self._set_state(FloorState.HUMAN_TURN_WAITING, reason="speaker_selected_human")
             else:
                 await self._set_state(FloorState.AI_SPEAKING, reason="speaker_selected_ai")
+            self._last_human_input_requested_speaker = ""
 
             await self._emit_turn_change(speaker, is_human)
             return {
@@ -674,7 +676,19 @@ class FloorManager:
             speaker = self.current_speaker or ""
             if not speaker and len(self.human_agents) == 1:
                 speaker = self.human_agents[0].name
+            if (
+                speaker
+                and speaker == self._last_human_input_requested_speaker
+                and self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+            ):
+                logger.info(
+                    "[FloorManager] 忽略重复 human_input_requested: speaker=%s state=%s",
+                    speaker,
+                    self.state,
+                )
+                return None
             await self._set_state(FloorState.HUMAN_SPEAKING, reason="human_input_requested")
+            self._last_human_input_requested_speaker = speaker
             return {
                 "event_type": "human_input_requested",
                 "data": {"speaker": speaker},
@@ -702,6 +716,7 @@ class FloorManager:
         normalized_name = (name or "").strip()
         normalized_text = (text or "").strip()
         self._touch_progress("submit_human_input")
+        self._last_human_input_requested_speaker = ""
 
         logger.info("[FloorManager] 收到人类输入: name=%s, text_len=%d", normalized_name, len(normalized_text))
 

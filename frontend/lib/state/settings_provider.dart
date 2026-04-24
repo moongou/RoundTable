@@ -188,9 +188,3 @@ final currentConfigProvider = FutureProvider<CurrentConfig>((ref) async {
   final apiClient = ref.watch(apiClientProvider);
   return apiClient.getCurrentConfig();
 });
-
-/// 配置验证结果
-final configValidationProvider = FutureProvider<ConfigValidation?>((ref) async {
-  final apiClient = ref.watch(apiClientProvider);
-  return apiClient.validateConfig();
-});

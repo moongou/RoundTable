@@ -253,6 +253,73 @@ async def _probe_websocket_service(url: str, timeout_sec: float = 3.0) -> dict:
         }
 
 
+_FULL_HEALTH_SERVICE_IDS = tuple(
+    sid for sid in LOCAL_SERVICE_DEFAULTS.keys() if sid != "gateway"
+)
+
+
+def _health_category_for_service(service_id: str) -> str:
+    if service_id == "ollama":
+        return "llm"
+    if service_id in ASR_PROVIDERS:
+        return "asr"
+    return "tts"
+
+
+def _health_candidate_service_ids(*, current_only: bool) -> list[str]:
+    if current_only:
+        candidate_ids = [settings.asr_provider, settings.tts_provider]
+        if settings.llm_provider == "ollama":
+            candidate_ids.append("ollama")
+    else:
+        candidate_ids = [*_FULL_HEALTH_SERVICE_IDS, "ollama"]
+
+    service_ids: list[str] = []
+    for raw_id in candidate_ids:
+        service_id = (raw_id or "").strip().lower()
+        if not service_id or service_id in {"browser", "disabled", "gateway"}:
+            continue
+        service_ids.append(service_id)
+    return list(dict.fromkeys(service_ids))
+
+
+async def _probe_health_service(service_id: str) -> tuple[str, dict]:
+    category = _health_category_for_service(service_id)
+    url = settings.get_voice_service_url(service_id)
+    health_path = (
+        LOCAL_SERVICE_DEFAULTS.get(service_id, {}).get("health")
+        or VOICE_SERVICE_META.get(service_id, {}).get("health_path", "/")
+    )
+
+    if not url:
+        return service_id, {
+            "url": "",
+            "target": "",
+            "reachable": False,
+            "status_code": None,
+            "latency_ms": None,
+            "probe_type": "basic",
+            "category": category,
+            "detail": "未配置服务 URL",
+        }
+
+    if service_id == "ollama":
+        result = await _probe_service(url, health_path)
+        result["probe_type"] = "basic"
+        result["category"] = category
+        return service_id, result
+
+    semantic = await _semantic_voice_probe(service_id, url)
+    if semantic.get("reachable"):
+        semantic["category"] = category
+        return service_id, semantic
+
+    basic = await _probe_service(url, health_path)
+    basic["probe_type"] = "basic"
+    basic["category"] = category
+    return service_id, basic
+
+
 @router.get("/providers")
 async def list_providers():
     """列出所有可用的 LLM 提供商及其默认配置。"""
@@ -374,33 +441,13 @@ async def list_speech_providers():
 
 
 @router.get("/health")
-async def check_services_health():
+async def check_services_health(current_only: bool = False):
     """检查本地服务健康度（分类 + 语义探测）。"""
     results: dict[str, dict] = {}
-    tasks = []
-
-    # 使用当前配置的实际 URL
-    service_urls = {
-        "edge_tts": (settings.edge_tts_url, "/v1/models"),
-        "cosyvoice": (settings.cosyvoice_url, "/health"),
-        "funasr": (settings.funasr_url, "/"),
-        "ollama": (settings.ollama_base_url.replace("/v1", ""), "/api/tags"),
-    }
-    async def check_service(name: str, url: str, health_path: str):
-        semantic = await _semantic_voice_probe(name, url)
-        if semantic.get("reachable"):
-            results[name] = semantic
-            return
-        # 回退到基础可达性探测，便于区分“协议失败”和“网络不可达”。
-        basic = await _probe_service(url, health_path)
-        basic["probe_type"] = "basic"
-        basic["category"] = "asr" if name in ASR_PROVIDERS else "tts"
-        results[name] = basic
-
-    for name, (url, health) in service_urls.items():
-        tasks.append(check_service(name, url, health))
-
-    await asyncio.gather(*tasks)
+    service_ids = _health_candidate_service_ids(current_only=current_only)
+    probed = await asyncio.gather(*(_probe_health_service(service_id) for service_id in service_ids))
+    for service_id, payload in probed:
+        results[service_id] = payload
     return results
 
 

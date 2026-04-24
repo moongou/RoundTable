@@ -167,12 +167,63 @@ function getStatus() {
 // ── 综合健康检查 ────────────────────────────────────────────
 async function getFullHealth() {
   const results = {};
+  let currentConfig = null;
+
+  const serviceNames = {
+    chattts: 'ChatTTS',
+    capswriter: 'CapsWriter',
+    cosyvoice: 'CosyVoice',
+    edge_tts: 'Edge TTS',
+    fireredtts: 'FireRedTTS',
+    funasr: 'FunASR',
+    ollama: 'Ollama',
+    openai_tts: 'OpenAI TTS',
+    openai_whisper: 'OpenAI Whisper',
+    openvoice: 'OpenVoice',
+    vibevoice: 'VibeVoice',
+    vosk: 'Vosk',
+  };
+
+  function serviceDisplayName(serviceId) {
+    return serviceNames[serviceId] || serviceId;
+  }
+
+  function configuredServiceTitle(config, serviceId) {
+    if (serviceId === config.asr_provider) {
+      return '当前 ASR · ' + serviceDisplayName(serviceId);
+    }
+    if (serviceId === config.tts_provider) {
+      return '当前 TTS · ' + serviceDisplayName(serviceId);
+    }
+    if (serviceId === 'ollama' && config.llm_provider === 'ollama') {
+      return '当前 LLM · Ollama';
+    }
+    return serviceDisplayName(serviceId);
+  }
+
+  function healthDetail(service) {
+    if (service && service.detail) {
+      return service.detail;
+    }
+    if (service && service.reachable && service.status_code) {
+      return 'HTTP ' + service.status_code;
+    }
+    return service && service.reachable ? '可达' : '不可达';
+  }
 
   // 后端 API 服务
   try {
     const data = await httpGet('http://127.0.0.1:8001/api/v1/config/current');
-    const cfg = JSON.parse(data);
-    results.backend_api = { name: '后端 API 服务', url: 'http://localhost:8001', reachable: true, detail: 'LLM: ' + cfg.llm_provider_name + ' › ' + cfg.model };
+    currentConfig = JSON.parse(data);
+    results.backend_api = {
+      name: '后端 API 服务',
+      url: 'http://localhost:8001',
+      reachable: true,
+      detail:
+        'LLM: ' + currentConfig.llm_provider_name + ' › ' + currentConfig.model +
+        ' ｜ ASR: ' + serviceDisplayName(currentConfig.asr_provider) +
+        ' ｜ TTS: ' + serviceDisplayName(currentConfig.tts_provider),
+    };
   } catch(e) {
     results.backend_api = { name: '后端 API 服务', url: 'http://localhost:8001', reachable: false, detail: '无法连接' };
   }
@@ -184,22 +235,28 @@ async function getFullHealth() {
   // 开发面板
   results.devpanel = { name: '开发面板', url: 'http://localhost:8888', reachable: true, detail: '运行中' };
 
-  // 本地服务
-  try {
-    const data = await httpGet('http://127.0.0.1:8001/api/v1/config/health');
-    const services = JSON.parse(data);
-    const nameMap = { edge_tts: 'Edge TTS', cosyvoice: 'CosyVoice', funasr: 'FunASR', ollama: 'Ollama' };
-    for (const [key, val] of Object.entries(services)) {
-      results[key] = { name: nameMap[key] || key, url: val.url, reachable: val.reachable, detail: val.reachable ? 'HTTP ' + val.status_code : '不可达' };
+  // 仅展示当前配置真正使用到的语音/本地模型服务。
+  if (currentConfig) {
+    try {
+      const data = await httpGet('http://127.0.0.1:8001/api/v1/config/health?current_only=1');
+      const services = JSON.parse(data);
+      for (const [key, val] of Object.entries(services)) {
+        results['configured_' + key] = {
+          name: configuredServiceTitle(currentConfig, key),
+          url: val.url || '-',
+          reachable: !!val.reachable,
+          detail: healthDetail(val),
+        };
+      }
+    } catch(e) {
+      results.configured_services = {
+        name: '当前语音/本地模型服务',
+        url: 'http://localhost:8001/api/v1/config/health?current_only=1',
+        reachable: false,
+        detail: '当前配置健康检查获取失败',
+      };
     }
-  } catch(e) { /* backend unavailable */ }
-
-  // LLM 配置
-  try {
-    const data = await httpGet('http://127.0.0.1:8001/api/v1/config/validate');
-    const v = JSON.parse(data);
-    results.llm_config = { name: 'LLM 配置验证', url: '-', reachable: v.valid, detail: v.valid ? '配置有效' : v.message };
-  } catch(e) { /* skip */ }
+  }
 
   return results;
 }
@@ -288,6 +345,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .hw-info .hw-chip{color:#d4a017;font-weight:600;font-size:12px}
   .hw-info .hw-sep{color:#333}
   .hw-opt{font-size:11px;color:#80cbc4;max-width:780px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
+  .quick-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:flex-start}
+  .runtime-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}
+  .runtime-col{min-width:0}
+  .runtime-col + .runtime-col{border-left:1px solid rgba(15,52,96,0.75);padding-left:20px}
+  .health-grid{margin-top:10px;background:#0d0d1a;border:1px solid #0f3460;border-radius:8px;overflow:hidden}
+  .health-empty{padding:14px;color:#666;text-align:center}
+  @media (max-width: 1080px){
+    .runtime-split{grid-template-columns:1fr}
+    .runtime-col + .runtime-col{border-left:none;border-top:1px solid rgba(15,52,96,0.75);padding-left:0;padding-top:18px}
+  }
   .footer{margin-top:24px;color:#444;font-size:12px}
 </style>
 </head>
@@ -301,24 +368,34 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </div>
 <div class="stack">
   <div class="card" id="card-actions">
-    <div class="card-title">🔗 快速导航</div>
-    <div style="padding:10px 0 2px;color:#94a3b8;font-size:12px;line-height:1.7">
-      常用操作入口已统一收纳到页面底部工具条，避免顶部与右侧分散操作按钮。
+    <div class="quick-actions">
+      <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动后端</button>
+      <button class="btn-stop" id="btn-stop-backend" onclick="ctrl('backend','stop')" disabled>⏹ 停止后端</button>
+      <a class="btn-open" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
+      <a class="btn-open" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
+      <a class="btn-open" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
+      <a class="btn-open" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
+      <a class="btn-open" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+      <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 检测并打开报告</button>
     </div>
   </div>
-  <div class="card">
-    <div class="card-title">
-      ❤ 系统健康检查
-      <span class="status-label" id="health-summary">加载中…</span>
-      <button class="btn-refresh" onclick="refreshHealth()" style="margin-left:auto">🔄 刷新</button>
+  <div class="card" id="card-runtime">
+    <div class="runtime-split">
+      <section class="runtime-col" id="card-backend">
+        <div class="card-title">📟 后端运行日志 (FastAPI :8001)</div>
+        <div class="log-box" id="log-backend"></div>
+      </section>
+      <section class="runtime-col" id="card-health">
+        <div class="card-title">
+          ❤ 系统健康检查
+          <span class="status-label" id="health-summary">加载中…</span>
+          <button class="btn-refresh" onclick="refreshHealth()" style="margin-left:auto">🔄 刷新</button>
+        </div>
+        <div class="health-grid" id="health-grid">
+          <div class="health-empty">加载中…</div>
+        </div>
+      </section>
     </div>
-    <div class="health-grid" id="health-grid">
-      <div style="padding:14px;color:#666;text-align:center">加载中…</div>
-    </div>
-  </div>
-  <div class="card" id="card-backend">
-    <div class="card-title">📟 后端运行日志 (FastAPI :8001)</div>
-    <div class="log-box" id="log-backend"></div>
   </div>
   <div class="card" id="card-flutter">
     <div class="card-title">🎨 前端 Flutter Web</div>
@@ -349,18 +426,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 <div class="footer">RoundTable Dev Panel · 使用 <kbd>Ctrl+C</kbd> 停止面板</div>
-<!-- 需求23：主要操作按钮固定到页面底部 -->
-<div style="position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,rgba(26,26,46,0) 0%,#101828 40%);padding:14px 24px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;z-index:50;border-top:1px solid #0f3460">
-  <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动后端</button>
-  <button class="btn-stop" id="btn-stop-backend" onclick="ctrl('backend','stop')" disabled>⏹ 停止后端</button>
-  <a class="btn-open" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
-  <a class="btn-open" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
-  <a class="btn-open" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
-  <a class="btn-open" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
-  <a class="btn-open" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
-  <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 检测并打开报告</button>
-</div>
-<style>body{padding-bottom:160px}</style>
 <script>
 function ctrl(svc, action) {
   fetch('/api/' + action + '/' + svc, {method:'POST'})
@@ -416,9 +481,17 @@ fetch('/api/status').then(function(r){return r.json()}).then(function(d) {
 });
 function refreshHealth() {
   var grid = document.getElementById('health-grid');
-  grid.innerHTML = '<div style="padding:14px;color:#666;text-align:center">检查中…</div>';
+  grid.innerHTML = '<div class="health-empty">检查中…</div>';
   document.getElementById('health-summary').textContent = '检查中…';
-  fetch('/api/health').then(function(r){return r.json()}).then(renderHealth);
+  fetch('/api/health')
+    .then(function(r){return r.json()})
+    .then(renderHealth)
+    .catch(function(err) {
+      grid.innerHTML = '<div class="health-empty">健康检查失败：' + escHtml((err && err.message) || 'unknown') + '</div>';
+      var summary = document.getElementById('health-summary');
+      summary.textContent = '检查失败';
+      summary.style.color = '#ef5350';
+    });
 }
 function renderHealth(data) {
   var grid = document.getElementById('health-grid');
@@ -438,9 +511,12 @@ function renderHealth(data) {
       '<div class="health-detail ' + (svc.reachable ? 'ok' : 'fail') + '">' + escHtml(svc.detail) + '</div>';
     grid.appendChild(row);
   }
+  if (total === 0) {
+    grid.innerHTML = '<div class="health-empty">当前配置没有需要后端检查的语音或本地模型服务。</div>';
+  }
   var summary = document.getElementById('health-summary');
-  summary.textContent = ok + '/' + total + ' 服务正常';
-  summary.style.color = ok === total ? '#4caf50' : ok > 0 ? '#ff9800' : '#ef5350';
+  summary.textContent = total > 0 ? (ok + '/' + total + ' 服务正常') : '无需检查';
+  summary.style.color = total === 0 ? '#80cbc4' : ok === total ? '#4caf50' : ok > 0 ? '#ff9800' : '#ef5350';
 }
 function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 refreshHealth();
