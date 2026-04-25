@@ -226,13 +226,13 @@ String resolvePreferredHomeAsrProviderId({
   }
 
   final fallbackOrder = normalizedPreferred == 'browser'
-      ? <String>['capswriter', 'funasr', 'vosk', 'openai_whisper', 'browser']
+      ? <String>['capswriter', 'funasr', 'vosk', 'siliconflow_asr', 'browser']
       : <String>[
           normalizedPreferred,
           ImmersiveSessionScreen.defaultAsrProvider,
           'capswriter',
           'vosk',
-          'openai_whisper',
+        'siliconflow_asr',
           'browser',
         ];
 
@@ -455,7 +455,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           _showPreflightFailedDialog(
             title: '浏览器语音不可用',
             message: '当前浏览器不支持语音识别（Web Speech API）。',
-            details: const ['请切换 ASR 到 funasr/openai_whisper，或更换支持语音识别的浏览器。'],
+            details: const ['请切换 ASR 到 funasr/硅基流动 ASR，或更换支持语音识别的浏览器。'],
           );
           return;
         }
@@ -1635,7 +1635,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     if (selectedProvider == null || !selectedProvider.available) {
       for (final fallbackId in <String>[
         ImmersiveSessionScreen.defaultAsrProvider,
-        'openai_whisper',
+        'siliconflow_asr',
         'browser',
       ]) {
         for (final provider in providers) {

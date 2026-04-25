@@ -21,6 +21,18 @@ void main() {
     );
   });
 
+  test('session payload participant names stay stable and skip duplicates', () {
+    expect(
+      ImmersiveSessionScreen.extractParticipantNamesFromSessionPayload([
+        {'name': '李老师'},
+        {'name': '巴甫洛夫'},
+        {'name': '豆苗'},
+        {'name': '巴甫洛夫'},
+      ]),
+      ['李老师', '巴甫洛夫', '豆苗'],
+    );
+  });
+
   test('voice service rebind waits until capture and playback are idle', () {
     expect(
       ImmersiveSessionScreen.shouldDeferVoiceServiceRebind(
@@ -118,6 +130,111 @@ void main() {
     );
   });
 
+  test('inter-speaker pause only applies between AI speakers', () {
+    expect(
+      ImmersiveSessionScreen.shouldInsertInterSpeakerPause(
+        currentSpeaker: '李老师',
+        nextSpeaker: '巴甫洛夫',
+        humanName: '豆苗',
+        pendingHumanTurn: false,
+        isMyTurn: false,
+        isRecording: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldInsertInterSpeakerPause(
+        currentSpeaker: '巴甫洛夫',
+        nextSpeaker: '豆苗',
+        humanName: '豆苗',
+        pendingHumanTurn: false,
+        isMyTurn: false,
+        isRecording: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldInsertInterSpeakerPause(
+        currentSpeaker: '李老师',
+        nextSpeaker: '巴甫洛夫',
+        humanName: '豆苗',
+        pendingHumanTurn: true,
+        isMyTurn: false,
+        isRecording: false,
+      ),
+      isFalse,
+    );
+  });
+
+  test('inter-speaker pause duration stays within one to three seconds', () {
+    final values = <int>{
+      for (var i = 0; i < 9; i++)
+        ImmersiveSessionScreen.interSpeakerPauseDuration(
+          currentSpeaker: '李老师',
+          nextSpeaker: '巴甫洛夫',
+          turnSeed: i,
+        ).inSeconds,
+    };
+
+    expect(values.every((value) => value >= 1 && value <= 3), isTrue);
+    expect(values.length >= 2, isTrue);
+  });
+
+  test('subtitle lead-in stays synchronized with AI voice playback', () {
+    expect(
+      ImmersiveSessionScreen.aiSubtitleLeadIn,
+      Duration.zero,
+    );
+  });
+
+  test('thinker handoff pauses are longer than ordinary AI handoffs', () {
+    final teacherToStudent = ImmersiveSessionScreen.interSpeakerPauseDuration(
+      currentSpeaker: '李老师',
+      nextSpeaker: '小探',
+      turnSeed: 0,
+    ).inSeconds;
+    final teacherToThinker = ImmersiveSessionScreen.interSpeakerPauseDuration(
+      currentSpeaker: '李老师',
+      nextSpeaker: '巴甫洛夫',
+      turnSeed: 0,
+    ).inSeconds;
+
+    expect(teacherToStudent >= 1 && teacherToStudent <= 2, isTrue);
+    expect(teacherToThinker >= 2 && teacherToThinker <= 3, isTrue);
+  });
+
+  test('queued tail can be yielded to human turn once active speech is over',
+      () {
+    expect(
+      ImmersiveSessionScreen.shouldYieldQueuedSpeechForHumanTurn(
+        ttsPlaying: false,
+        ttsServiceSpeaking: false,
+        hasQueuedCurrentSpeakerSpeech: true,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldYieldQueuedSpeechForHumanTurn(
+        ttsPlaying: true,
+        ttsServiceSpeaking: false,
+        hasQueuedCurrentSpeakerSpeech: true,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldYieldQueuedSpeechForHumanTurn(
+        ttsPlaying: false,
+        ttsServiceSpeaking: true,
+        hasQueuedCurrentSpeakerSpeech: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('completed human turn ignores duplicate prompt for same speaker', () {
     expect(
       ImmersiveSessionScreen.shouldIgnoreRepeatedHumanInputRequest(
@@ -199,6 +316,48 @@ void main() {
     );
   });
 
+  test('turn countdown stops once speech has begun or turn is finishing', () {
+    expect(
+      ImmersiveSessionScreen.shouldKeepTurnCountdownActive(
+        isMyTurn: true,
+        hasSpeechDraft: false,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldKeepTurnCountdownActive(
+        isMyTurn: true,
+        hasSpeechDraft: true,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldKeepTurnCountdownActive(
+        isMyTurn: false,
+        hasSpeechDraft: false,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldKeepTurnCountdownActive(
+        isMyTurn: true,
+        hasSpeechDraft: false,
+        isCompletingHumanTurn: true,
+        isFinalizingSpeech: false,
+      ),
+      isFalse,
+    );
+  });
+
   test('human subtitle hold gives long replies enough dwell time', () {
     expect(
       ImmersiveSessionScreen.humanSubtitleHoldDurationFor('短句').inMilliseconds,
@@ -210,6 +369,32 @@ void main() {
         '这是一个比较长的用户发言，用来确认分成两页字幕时，保留窗口会被拉长，而不是只有短短三秒就切走。',
       ).inMilliseconds,
       greaterThan(3000),
+    );
+  });
+
+  test('teacher and students keep a gentler speech rate', () {
+    expect(
+      ImmersiveSessionScreen.fixedSpeechRateForSpeaker(
+        '李老师',
+        text: '同学们，我们先看看这个问题。',
+      ),
+      lessThanOrEqualTo(0.91),
+    );
+
+    expect(
+      ImmersiveSessionScreen.fixedSpeechRateForSpeaker(
+        '小明',
+        text: '我觉得可以先试试看。',
+      ),
+      lessThanOrEqualTo(0.94),
+    );
+
+    expect(
+      ImmersiveSessionScreen.fixedSpeechRateForSpeaker(
+        '小爱',
+        text: '我觉得可以先试试看。',
+      ),
+      lessThanOrEqualTo(0.97),
     );
   });
 

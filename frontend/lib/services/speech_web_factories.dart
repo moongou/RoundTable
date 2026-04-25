@@ -20,9 +20,9 @@ TtsService createWebTtsService(
     case 'vibevoice':
     case 'fireredtts':
     case 'openvoice':
-      return ServerTtsService(serverUrl: serverUrl, providerId: providerId);
     case 'openai_tts':
-      return ServerTtsService(serverUrl: serverUrl, providerId: 'edge_tts');
+    case 'siliconflow_tts':
+      return ServerTtsService(serverUrl: serverUrl, providerId: providerId);
     default:
       return BrowserTtsService();
   }
@@ -66,6 +66,8 @@ AsrService createWebAsrService(
             : 'ws://localhost:10095',
       );
     case 'openai_whisper':
+    case 'siliconflow_asr':
+    case 'groq_whisper':
       return ServerAsrService(serverUrl: serverUrl, providerId: providerId);
     default:
       return BrowserAsrService();

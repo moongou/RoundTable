@@ -39,6 +39,8 @@ class ProviderInfo {
         return '🔮';
       case 'deepseek':
         return '🔍';
+      case 'siliconflow':
+        return '🌊';
       case 'ollama':
         return '🦙';
       case 'ollama_cloud':
@@ -94,6 +96,11 @@ class SpeechProviderInfo {
   final String defaultUrl;
   final bool needsApiKey;
   final bool hasApiKey;
+  final String model;
+  final String defaultModel;
+  final String voice;
+  final String defaultVoice;
+  final String mode;
 
   const SpeechProviderInfo({
     required this.id,
@@ -104,6 +111,11 @@ class SpeechProviderInfo {
     this.defaultUrl = '',
     this.needsApiKey = false,
     this.hasApiKey = false,
+    this.model = '',
+    this.defaultModel = '',
+    this.voice = '',
+    this.defaultVoice = '',
+    this.mode = 'local',
   });
 
   factory SpeechProviderInfo.fromJson(Map<String, dynamic> json) =>
@@ -116,24 +128,82 @@ class SpeechProviderInfo {
         defaultUrl: json['default_url'] as String? ?? '',
         needsApiKey: json['needs_api_key'] as bool? ?? false,
         hasApiKey: json['has_api_key'] as bool? ?? false,
+        model: json['model'] as String? ?? '',
+        defaultModel: json['default_model'] as String? ?? '',
+        voice: json['voice'] as String? ?? '',
+        defaultVoice: json['default_voice'] as String? ?? '',
+        mode: json['mode'] as String? ?? 'local',
       );
+
+  bool get isCloud => mode == 'cloud';
+
+  bool get isMainlandPreferred {
+    switch (id) {
+      case 'siliconflow_asr':
+      case 'siliconflow_tts':
+        return true;
+      default:
+        return !isCloud;
+    }
+  }
+
+  String get icon {
+    switch (id) {
+      case 'browser':
+        return '🌐';
+      case 'funasr':
+        return '🎙️';
+      case 'capswriter':
+        return '⌨️';
+      case 'vosk':
+        return '📡';
+      case 'chattts':
+        return '💬';
+      case 'edge_tts':
+        return '🗣️';
+      case 'openvoice':
+        return '🧬';
+      case 'cosyvoice':
+        return '🎵';
+      case 'siliconflow_asr':
+      case 'siliconflow_tts':
+        return '🌊';
+      case 'openai_whisper':
+      case 'openai_tts':
+        return '🌐';
+      case 'groq_whisper':
+        return '⚡';
+      case 'disabled':
+        return '⏸️';
+      default:
+        return isCloud ? '☁️' : '🎧';
+    }
+  }
 }
 
 /// 语音服务连接测试结果
 class VoiceServiceTestResult {
   final bool success;
   final List<String> voices;
+  final List<String> models;
   final String? error;
   final String url;
   final int? statusCode;
   final double? latencyMs;
+  final String requestedModel;
+  final bool modelValid;
+  final String voiceUsed;
 
   const VoiceServiceTestResult({
     required this.success,
     required this.voices,
+    this.models = const [],
     required this.url,
     this.statusCode,
     this.latencyMs,
+    this.requestedModel = '',
+    this.modelValid = true,
+    this.voiceUsed = '',
     this.error,
   });
 
@@ -141,9 +211,13 @@ class VoiceServiceTestResult {
       VoiceServiceTestResult(
         success: json['success'] as bool? ?? false,
         voices: List<String>.from(json['voices'] as List? ?? []),
+        models: List<String>.from(json['models'] as List? ?? []),
         url: json['url'] as String? ?? '',
         statusCode: json['status_code'] as int?,
         latencyMs: (json['latency_ms'] as num?)?.toDouble(),
+        requestedModel: json['requested_model'] as String? ?? '',
+        modelValid: json['model_valid'] as bool? ?? true,
+        voiceUsed: json['voice_used'] as String? ?? '',
         error: json['error'] as String?,
       );
 }

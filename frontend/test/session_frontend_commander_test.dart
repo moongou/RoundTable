@@ -42,7 +42,8 @@ void main() {
         speaker: '豆苗',
         hasOngoingSpeechPlayback: false,
       );
-      expect(immediate, HumanTurnCommand.none);
+      expect(immediate, HumanTurnCommand.defer);
+      expect(commander.pendingHumanTurn, isTrue);
 
       now = now.add(const Duration(milliseconds: 600));
       final later = commander.onHumanInputRequested(
@@ -65,7 +66,8 @@ void main() {
         speaker: '豆苗',
         hasOngoingSpeechPlayback: false,
       );
-      expect(immediate, HumanTurnCommand.none);
+      expect(immediate, HumanTurnCommand.defer);
+      expect(commander.pendingHumanTurn, isTrue);
 
       now = now.add(const Duration(milliseconds: 1300));
       final later = commander.onHumanInputRequested(

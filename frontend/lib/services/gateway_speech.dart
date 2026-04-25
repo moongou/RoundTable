@@ -326,6 +326,8 @@ class GatewayTtsService implements TtsService {
   final Dio _dio;
   bool _isSpeaking = false;
   html.AudioElement? _audioElement;
+  Completer<void>? _pendingCompleter;
+  String? _activeObjectUrl;
 
   // TTS 预加载缓存
   final Map<String, Uint8List> _prefetchCache = {};
@@ -447,6 +449,7 @@ class GatewayTtsService implements TtsService {
       // Gateway 返回 WAV 格式
       final blob = html.Blob([audioBytes], 'audio/wav');
       final url = html.Url.createObjectUrlFromBlob(blob);
+      _activeObjectUrl = url;
 
       _audioElement = html.AudioElement()
         ..src = url
@@ -454,16 +457,27 @@ class GatewayTtsService implements TtsService {
         ..autoplay = true;
 
       final completer = Completer<void>();
+      _pendingCompleter = completer;
 
       _audioElement!.onEnded.listen((_) {
         _isSpeaking = false;
+        if (_activeObjectUrl == url) {
+          _activeObjectUrl = null;
+        }
         html.Url.revokeObjectUrl(url);
+        _audioElement = null;
+        _pendingCompleter = null;
         if (!completer.isCompleted) completer.complete();
       });
 
       _audioElement!.onError.listen((_) {
         _isSpeaking = false;
+        if (_activeObjectUrl == url) {
+          _activeObjectUrl = null;
+        }
         html.Url.revokeObjectUrl(url);
+        _audioElement = null;
+        _pendingCompleter = null;
         if (!completer.isCompleted) {
           completer.completeError('TTS playback error');
         }
@@ -482,6 +496,15 @@ class GatewayTtsService implements TtsService {
     _isSpeaking = false;
     _audioElement?.pause();
     _audioElement = null;
+    final url = _activeObjectUrl;
+    _activeObjectUrl = null;
+    if (url != null) {
+      html.Url.revokeObjectUrl(url);
+    }
+    if (_pendingCompleter != null && !_pendingCompleter!.isCompleted) {
+      _pendingCompleter!.complete();
+      _pendingCompleter = null;
+    }
   }
 
   @override

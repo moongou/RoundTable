@@ -47,9 +47,6 @@ String _normalizeTtsProvider(String? providerId) {
   if (normalized == null || normalized.isEmpty) {
     return '';
   }
-  if (normalized == 'openai_tts') {
-    return 'edge_tts';
-  }
   return normalized;
 }
 

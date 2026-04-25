@@ -47,7 +47,11 @@ class SessionFrontendCommander {
       return HumanTurnCommand.defer;
     }
     if (!_canActivateNow()) {
-      return HumanTurnCommand.none;
+      _pendingHumanTurn = true;
+      _pendingHumanSpeaker = speaker;
+      _handApprovedToSpeak = false;
+      _pendingSince ??= _now();
+      return HumanTurnCommand.defer;
     }
     _pendingHumanTurn = false;
     _pendingHumanSpeaker = '';
@@ -74,7 +78,11 @@ class SessionFrontendCommander {
     }
 
     if (!_canActivateNow()) {
-      return HumanTurnCommand.none;
+      _pendingHumanTurn = true;
+      _pendingHumanSpeaker = speaker;
+      _handApprovedToSpeak = false;
+      _pendingSince ??= _now();
+      return HumanTurnCommand.defer;
     }
 
     _pendingHumanTurn = false;

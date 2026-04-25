@@ -229,12 +229,16 @@ class ApiClient {
     required String service,
     String? url,
     String? apiKey,
+    String? model,
+    String? voice,
   }) async {
     final response =
         await _dio.post('/api/v1/config/test-voice-service', data: {
       'service': service,
       if (url != null && url.isNotEmpty) 'url': url,
       if (apiKey != null && apiKey.isNotEmpty) 'api_key': apiKey,
+      if (model != null && model.isNotEmpty) 'model': model,
+      if (voice != null && voice.isNotEmpty) 'voice': voice,
     });
     return VoiceServiceTestResult.fromJson(
         response.data as Map<String, dynamic>);
