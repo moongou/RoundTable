@@ -31,7 +31,6 @@ class _SettingsContent extends ConsumerStatefulWidget {
 
 class _SettingsContentState extends ConsumerState<_SettingsContent>
     with SingleTickerProviderStateMixin {
-  late TextEditingController _serverUrlCtrl;
   late TabController _tabController;
 
   String? _expandedProvider;
@@ -91,6 +90,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   String? _interactiveTtsError;
   final TextEditingController _interactiveTtsTextCtrl =
       TextEditingController(text: '你好，这是一段设置页里的合成试听文本。');
+  String? _pendingSpeechSelectionSync;
 
   String _interactionModeLabel(LocalSettings s) {
     if (!s.pushToTalk) return '自由对话';
@@ -101,20 +101,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   void initState() {
     super.initState();
     _tabController = TabController(length: 5, vsync: this);
-    _serverUrlCtrl = TextEditingController(text: 'http://localhost:8001');
-    // Defer loading the actual server URL from provider
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final s = ref.read(localSettingsProvider).valueOrNull;
-      if (s != null && _serverUrlCtrl.text != s.serverUrl) {
-        _serverUrlCtrl.text = s.serverUrl;
-      }
-    });
   }
 
   @override
   void dispose() {
     _tabController.dispose();
-    _serverUrlCtrl.dispose();
     _tavilyKeyCtrl.dispose();
     _interactiveTtsTextCtrl.dispose();
     _aiScrollCtrl.dispose();
@@ -149,18 +140,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   TextEditingController _vm(SpeechProviderInfo p) => _voiceModelCtrl
       .putIfAbsent(p.id, () => TextEditingController(text: p.model));
 
-  // ── actions ──────────────────────────────────────────────────────────────
-
-  Future<void> _saveServerUrl() async {
-    final url = _serverUrlCtrl.text.trim();
-    if (url.isEmpty) return;
-    await ref.read(localSettingsProvider.notifier).setServerUrl(url);
-    ref.invalidate(providersProvider);
-    ref.invalidate(speechConfigProvider);
-    ref.invalidate(healthStatusProvider);
-    ref.invalidate(currentConfigProvider);
-    _snack('服务器地址已更新');
+  String _resolvedServerUrl(LocalSettings? settings) {
+    final resolved = settings?.serverUrl.trim() ?? '';
+    return resolved.isNotEmpty ? resolved : 'http://localhost:8001';
   }
+
+  // ── actions ──────────────────────────────────────────────────────────────
 
   Future<void> _testProvider(ProviderInfo p) async {
     setState(() => _testingProvider[p.id] = true);
@@ -194,14 +179,22 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       final url = _baseUrlCtrl[p.id]?.text.trim() ?? '';
       final mdl = _modelCtrl[p.id]?.text.trim() ?? '';
       final tested = _providerTestResult[p.id];
+      final reusingSavedConfig = key.isEmpty &&
+          url == p.baseUrl &&
+          mdl == p.model &&
+          url.isNotEmpty &&
+          mdl.isNotEmpty &&
+          (!p.needsApiKey || p.hasApiKey);
 
-      if (tested == null || !tested.success || tested.models.isEmpty) {
-        _snackErr('请先点击“测试连接”，并确保返回可用模型后再保存。');
-        return;
-      }
-      if (mdl.isEmpty || !tested.models.contains(mdl)) {
-        _snackErr('当前模型不可用，请从下拉中选择已验证模型。');
-        return;
+      if (!reusingSavedConfig) {
+        if (tested == null || !tested.success || tested.models.isEmpty) {
+          _snackErr('请先点击“测试连接”，并确保返回可用模型后再保存。');
+          return;
+        }
+        if (mdl.isEmpty || !tested.models.contains(mdl)) {
+          _snackErr('当前模型不可用，请从下拉中选择已验证模型。');
+          return;
+        }
       }
 
       if (key.isNotEmpty) updates['${p.id}_api_key'] = key;
@@ -320,7 +313,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         await ref.read(localSettingsProvider.notifier).setTtsProvider(p.id);
       }
       setState(() => _expandedVoiceService = p.id);
-      ref.invalidate(speechConfigProvider);
       ref.invalidate(currentConfigProvider);
     } catch (e) {
       _snackErr('保存失败: $e');
@@ -342,8 +334,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       } else {
         await ref.read(localSettingsProvider.notifier).setTtsProvider(p.id);
       }
-      setState(() => _expandedVoiceService = p.id);
-      ref.invalidate(speechConfigProvider);
+      setState(() => _expandedVoiceService = p.isCloud ? p.id : null);
       ref.invalidate(currentConfigProvider);
       _snack('已切换到 ${p.name}');
     } catch (e) {
@@ -405,6 +396,64 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         duration: const Duration(seconds: 3)));
   }
 
+  Future<void> _refreshLocalServiceStatus() async {
+    if (_healthRefreshing) return;
+    setState(() => _healthRefreshing = true);
+    try {
+      await Future.wait<Object?>([
+        ref.refresh(speechConfigProvider.future),
+        ref.refresh(healthStatusProvider.future),
+        ref.refresh(currentConfigProvider.future),
+      ]);
+      _snack('本地服务状态已刷新');
+    } catch (e) {
+      _snackErr('本地服务状态刷新失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _healthRefreshing = false);
+      }
+    }
+  }
+
+  void _syncSpeechSelectionsWithCurrentConfig(
+    LocalSettings settings,
+    CurrentConfig? current,
+  ) {
+    if (current == null) {
+      _pendingSpeechSelectionSync = null;
+      return;
+    }
+
+    final nextAsrProvider = current.asrProvider.trim();
+    final nextTtsProvider = current.ttsProvider.trim();
+    if (nextAsrProvider.isEmpty || nextTtsProvider.isEmpty) {
+      return;
+    }
+    if (settings.asrProvider == nextAsrProvider &&
+        settings.ttsProvider == nextTtsProvider) {
+      _pendingSpeechSelectionSync = null;
+      return;
+    }
+
+    final syncKey = '$nextAsrProvider|$nextTtsProvider';
+    if (_pendingSpeechSelectionSync == syncKey) {
+      return;
+    }
+    _pendingSpeechSelectionSync = syncKey;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final notifier = ref.read(localSettingsProvider.notifier);
+      if (settings.asrProvider != nextAsrProvider) {
+        await notifier.setAsrProvider(nextAsrProvider);
+      }
+      if (settings.ttsProvider != nextTtsProvider) {
+        await notifier.setTtsProvider(nextTtsProvider);
+      }
+      _pendingSpeechSelectionSync = null;
+    });
+  }
+
   // ── build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -415,6 +464,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     final speechAsync = ref.watch(speechConfigProvider);
     final healthAsync = ref.watch(healthStatusProvider);
     final currentAsync = ref.watch(currentConfigProvider);
+    _syncSpeechSelectionsWithCurrentConfig(s, currentAsync.valueOrNull);
 
     if (localAsync.isLoading) {
       return Scaffold(
@@ -475,7 +525,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       controller: _aiScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       children: [
-        _buildServerSection(currentAsync),
+        _buildAiConfigSection(currentAsync),
         const SizedBox(height: 14),
         _buildLlmSection(providersAsync, s),
         const SizedBox(height: 14),
@@ -561,7 +611,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             if (_llmBenchmark != null) ...[
               const SizedBox(width: 12),
               Text(
-                '推荐: ${_llmBenchmark!['results']?[0]?['provider'] ?? '-'}',
+                '推荐: ${_llmBenchmark!['recommended'] ?? _llmBenchmark!['results']?[0]?['provider'] ?? '-'}',
                 style:
                     const TextStyle(color: AppColors.amberGold, fontSize: 12),
               ),
@@ -951,7 +1001,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       child: Column(
         children: results.map((r) {
           final m = r as Map<String, dynamic>;
-          final name = m['service'] ?? m['provider'] ?? '-';
+          final name =
+              m['service'] ?? m['provider_name'] ?? m['provider'] ?? '-';
           final status = m['status'] ?? 'unknown';
           final isOk = status == 'ok';
           String detail = '';
@@ -1045,9 +1096,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
 
   Future<Map<String, dynamic>> _runBrowserAsrBenchmarkLocal(
       {int rounds = 3}) async {
-    final serverUrl = _serverUrlCtrl.text.trim().isNotEmpty
-        ? _serverUrlCtrl.text.trim()
-        : 'http://localhost:8001';
+    final serverUrl =
+        _resolvedServerUrl(ref.read(localSettingsProvider).valueOrNull);
     final asr = createAsrService('browser', serverUrl: serverUrl);
     try {
       if (!asr.isAvailable) {
@@ -1241,7 +1291,55 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     final providers =
         speechConfig?.asrProviders ?? const <SpeechProviderInfo>[];
     if (providers.isEmpty) {
-      return const <SpeechProviderInfo>[];
+      const fallbackNames = <String, String>{
+        'browser': '浏览器原生语音识别',
+        'capswriter': 'CapsWriter 本地服务（推荐，低延迟）',
+        'vosk': 'Vosk 本地服务（支持流式）',
+        'funasr': 'FunASR 本地服务',
+        'openai_whisper': 'OpenAI Whisper API',
+        'siliconflow_asr': '硅基流动 ASR',
+        'groq_whisper': 'Groq Whisper API',
+      };
+      const fallbackOrder = <String>[
+        'capswriter',
+        'vosk',
+        'funasr',
+        'browser',
+        'openai_whisper',
+        'siliconflow_asr',
+        'groq_whisper',
+      ];
+
+      final orderedIds = <String>[];
+      void addFallback(String providerId) {
+        if (providerId.isEmpty || providerId == 'disabled') return;
+        if (!orderedIds.contains(providerId)) {
+          orderedIds.add(providerId);
+        }
+      }
+
+      addFallback(settings.asrProvider);
+      for (final providerId in fallbackOrder) {
+        addFallback(providerId);
+      }
+
+      return orderedIds
+          .map(
+            (providerId) => SpeechProviderInfo(
+              id: providerId,
+              name: fallbackNames[providerId] ?? providerId,
+              isActive: providerId == settings.asrProvider,
+              available: providerId != 'disabled',
+              mode: switch (providerId) {
+                'openai_whisper' ||
+                'siliconflow_asr' ||
+                'groq_whisper' =>
+                  'cloud',
+                _ => 'local',
+              },
+            ),
+          )
+          .toList(growable: false);
     }
 
     final ordered = <SpeechProviderInfo>[];
@@ -1269,6 +1367,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     return ordered;
   }
 
+  bool _supportsStreamingAsr(String providerId) => const <String>{
+        'capswriter',
+        'vosk',
+        'funasr',
+      }.contains(providerId);
+
   String? _resolveInteractiveVoice(
       String providerId, SpeechConfig? speechConfig) {
     final selected = _selectedVoice[providerId]?.trim();
@@ -1293,9 +1397,13 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
 
     const urlMap = {
       'chattts': 'chattts_url',
+      'capswriter': 'capswriter_url',
+      'vosk': 'vosk_url',
       'funasr': 'funasr_url',
       'edge_tts': 'edge_tts_url',
       'cosyvoice': 'cosyvoice_url',
+      'vibevoice': 'vibevoice_url',
+      'fireredtts': 'fireredtts_url',
       'openvoice': 'openvoice_url',
       'openai_whisper': 'openai_whisper_base_url',
       'siliconflow_asr': 'siliconflow_asr_base_url',
@@ -1384,95 +1492,87 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       return;
     }
 
-    final serverUrl = _serverUrlCtrl.text.trim().isNotEmpty
-        ? _serverUrlCtrl.text.trim()
-        : settings.serverUrl;
-    final candidates = _interactiveAsrCandidates(settings, speechConfig);
-    if (candidates.isEmpty) {
-      _snackErr('当前没有可测试的 ASR 服务。');
+    final serverUrl = _resolvedServerUrl(settings);
+    final providerId = settings.asrProvider.trim();
+    if (providerId.isEmpty || providerId == 'disabled') {
+      _snackErr('请先选择一个可用的 ASR 服务。');
       return;
     }
 
-    Object? lastError;
-    String? startedProviderId;
+    final candidate = _interactiveAsrCandidates(settings, speechConfig)
+        .cast<SpeechProviderInfo?>()
+        .firstWhere(
+          (item) => item?.id == providerId,
+          orElse: () => null,
+        );
+    if (candidate != null && !candidate.available && providerId != 'browser') {
+      _snackErr('$providerId 当前不可用，请先检查服务状态。');
+      return;
+    }
 
-    for (final candidate in candidates) {
-      final providerId = candidate.id;
-      final providerUrl =
-          _resolveSpeechProviderUrl(speechConfig, providerId, isAsr: true);
-      final asr = createAsrService(
-        providerId,
-        serverUrl: serverUrl,
-        providerUrl: providerUrl,
-        preferServerProxy: providerId != 'browser',
-      );
+    final providerUrl =
+        _resolveSpeechProviderUrl(speechConfig, providerId, isAsr: true);
+    final preferServerProxy = !settings.asrStreamingEnabled ||
+        const <String>{
+          'openai_whisper',
+          'siliconflow_asr',
+          'groq_whisper',
+        }.contains(providerId);
+    final asr = createAsrService(
+      providerId,
+      serverUrl: serverUrl,
+      providerUrl: providerUrl,
+      preferServerProxy: preferServerProxy,
+    );
 
-      if (!candidate.available && providerId != 'browser') {
-        asr.dispose();
-        lastError = StateError('$providerId 当前不可用');
-        continue;
-      }
-
-      await _interactiveAsrSub?.cancel();
-      _interactiveAsrSub = asr.transcriptionStream.listen(
-        (result) {
-          final nextText = result.text.trim();
-          if (nextText.isEmpty || !mounted) return;
-          setState(() {
-            _interactiveAsrText = nextText;
-            if (result.isFinal) {
-              _interactiveAsrError = null;
-            }
-          });
-        },
-        onError: (error) {
-          if (!mounted) return;
-          setState(() {
-            _interactiveAsrError = error.toString();
-          });
-        },
-      );
-
-      setState(() {
-        _interactiveAsrService = asr;
-        _interactiveAsrRunning = true;
-        _interactiveAsrText = '';
-        _interactiveAsrError = null;
-      });
-
-      try {
-        await asr.warmup();
-        if (!asr.isAvailable) {
-          throw StateError('$providerId 当前不可用');
-        }
-        await asr.startListening();
-        await Future.delayed(const Duration(milliseconds: 250));
-        if (!asr.isListening) {
-          throw StateError('语音识别启动失败');
-        }
-        startedProviderId = providerId;
-        break;
-      } catch (e) {
-        lastError = e;
-        await _interactiveAsrSub?.cancel();
-        _interactiveAsrSub = null;
-        asr.dispose();
+    await _interactiveAsrSub?.cancel();
+    _interactiveAsrSub = asr.transcriptionStream.listen(
+      (result) {
+        final nextText = result.text.trim();
+        if (nextText.isEmpty || !mounted) return;
+        setState(() {
+          _interactiveAsrText = nextText;
+          if (result.isFinal) {
+            _interactiveAsrError = null;
+          }
+        });
+      },
+      onError: (error) {
         if (!mounted) return;
         setState(() {
-          _interactiveAsrService = null;
-          _interactiveAsrRunning = false;
-          _interactiveAsrError = e.toString();
+          _interactiveAsrError = error.toString();
         });
+      },
+    );
+
+    setState(() {
+      _interactiveAsrService = asr;
+      _interactiveAsrRunning = true;
+      _interactiveAsrText = '';
+      _interactiveAsrError = null;
+    });
+
+    try {
+      await asr.warmup();
+      if (!asr.isAvailable) {
+        throw StateError('$providerId 当前不可用');
       }
-    }
-
-    if (startedProviderId == null) {
-      _snackErr('语音识别启动失败: ${lastError ?? '没有可用服务'}');
-      return;
-    }
-
-    if (startedProviderId != settings.asrProvider) {
-      _snack('当前首选 ASR 不可用，已临时切换到 ${startedProviderId.toUpperCase()} 进行测试。');
+      await asr.startListening();
+      await Future.delayed(const Duration(milliseconds: 250));
+      if (!asr.isListening) {
+        throw StateError('语音识别启动失败');
+      }
+    } catch (e) {
+      await _interactiveAsrSub?.cancel();
+      _interactiveAsrSub = null;
+      asr.dispose();
+      if (!mounted) return;
+      setState(() {
+        _interactiveAsrService = null;
+        _interactiveAsrRunning = false;
+        _interactiveAsrError = e.toString();
+      });
+      _snackErr('语音识别启动失败: $e');
     }
   }
 
@@ -1500,9 +1600,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       return;
     }
 
-    final serverUrl = _serverUrlCtrl.text.trim().isNotEmpty
-        ? _serverUrlCtrl.text.trim()
-        : settings.serverUrl;
+    final serverUrl = _resolvedServerUrl(settings);
     final providerId = settings.ttsProvider;
     final voice = _resolveInteractiveVoice(providerId, speechConfig);
     final providerUrl =
@@ -1517,7 +1615,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                 voice: voice,
               ),
             );
-        ref.invalidate(speechConfigProvider);
         ref.invalidate(currentConfigProvider);
       } catch (e) {
         _snackErr('同步 TTS 配置失败: $e');
@@ -1568,28 +1665,40 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   //  Section builders (reused by tabs)
   // ─────────────────────────────────────────────────────────────────────────
 
-  Widget _buildServerSection(AsyncValue<CurrentConfig> currentAsync) =>
+  Widget _buildAiConfigSection(AsyncValue<CurrentConfig> currentAsync) =>
       _Section(
-        title: '服务器地址',
-        icon: Icons.dns_outlined,
+        title: '当前配置',
+        icon: Icons.tune_outlined,
         children: [
-          Row(children: [
-            Expanded(
-                child: _Field(
-                    ctrl: _serverUrlCtrl,
-                    hint: 'http://localhost:8001',
-                    onDone: (_) => _saveServerUrl())),
-            const SizedBox(width: 8),
-            _GoldBtn('保存', onTap: _saveServerUrl),
-          ]),
           const SizedBox(height: 8),
           currentAsync.when(
-            data: (c) => Text('当前：${c.llmProviderName} › ${c.model}',
-                style:
-                    const TextStyle(color: AppColors.warmGray, fontSize: 11)),
+            data: (c) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '这里只展示当前生效的 AI 配置。服务地址跟随当前运行环境，不再在设置页单独编辑。',
+                  style: TextStyle(color: AppColors.warmGray, fontSize: 12),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _ConfigBadge(label: '提供商', value: c.llmProviderName),
+                    _ConfigBadge(label: '模型', value: c.model),
+                    _ConfigBadge(
+                      label: 'API Key',
+                      value: c.apiKeyMasked.isNotEmpty ? '已保存' : '未配置',
+                    ),
+                  ],
+                ),
+              ],
+            ),
             loading: () => const SizedBox.shrink(),
-            error: (_, __) => const Text('⚠ 无法连接服务器，请检查地址',
-                style: TextStyle(color: Colors.orange, fontSize: 11)),
+            error: (_, __) => const Text(
+              '⚠ 无法读取当前 AI 配置，请检查后端是否正常运行。',
+              style: TextStyle(color: Colors.orange, fontSize: 11),
+            ),
           ),
         ],
       );
@@ -1603,7 +1712,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           providersAsync.when(
             skipLoadingOnRefresh: true,
             data: (list) {
-              final selectedProvider = _selectedProviderForPanel(list, s);
+              final visibleProviders =
+                  list.where((p) => p.id != 'gemini').toList(growable: false);
+              final selectedProvider =
+                  _selectedProviderForPanel(visibleProviders, s);
               if (selectedProvider == null) {
                 return const Text(
                   '当前没有可用的模型提供商。',
@@ -1626,7 +1738,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                   Wrap(
                     spacing: 10,
                     runSpacing: 10,
-                    children: list
+                    children: visibleProviders
                         .map(
                           (p) => _providerSelectorButton(
                             p,
@@ -1685,6 +1797,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             data: (sp) => _buildSpeechSection(
               providers: sp.asrProviders,
               activeId: s.asrProvider,
+              settings: s,
               isAsr: true,
             ),
             loading: () => const _Spin(),
@@ -1704,6 +1817,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             data: (sp) => _buildSpeechSection(
               providers: sp.ttsProviders,
               activeId: s.ttsProvider,
+              settings: s,
               isAsr: false,
             ),
             loading: () => const _Spin(),
@@ -1715,22 +1829,51 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   Widget _buildSpeechSection({
     required List<SpeechProviderInfo> providers,
     required String activeId,
+    required LocalSettings settings,
     required bool isAsr,
   }) {
-    final cloudProviders = providers
-        .where((p) => p.isCloud && p.isMainlandPreferred)
-        .toList(growable: false);
+    bool isOperational(SpeechProviderInfo provider) {
+      final hasRequiredApiKey = !provider.needsApiKey || provider.hasApiKey;
+      return provider.id != 'disabled' &&
+          provider.available &&
+          hasRequiredApiKey;
+    }
+
+    final cloudProviders =
+        providers.where((p) => p.isCloud).toList(growable: false);
     final localProviders =
         providers.where((p) => !p.isCloud).toList(growable: false);
+
+    final preferredCloudProviders = cloudProviders
+        .where((p) => p.isMainlandPreferred && isOperational(p))
+        .toList(growable: false);
+    final otherCloudProviders = cloudProviders
+        .where((p) => !p.isMainlandPreferred || !isOperational(p))
+        .toList(growable: false);
+
+    final preferredLocalProviders =
+        localProviders.where(isOperational).toList(growable: false);
+    final otherLocalProviders =
+        localProviders.where((p) => !isOperational(p)).toList(growable: false);
+
     final selectedCloud = _selectedSpeechProviderForPanel(
-      providers: cloudProviders,
+      providers: preferredCloudProviders,
       activeId: activeId,
     );
+    final selectedOtherCloud = _selectedSpeechProviderForPanel(
+      providers: otherCloudProviders,
+      activeId: activeId,
+    );
+    final activeLocal = _findSpeechProvider(providers, activeId);
+    final hasOtherServices =
+        otherCloudProviders.isNotEmpty || otherLocalProviders.isNotEmpty;
+    final otherServicesCount =
+        otherCloudProviders.length + otherLocalProviders.length;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (cloudProviders.isNotEmpty) ...[
+        if (preferredCloudProviders.isNotEmpty) ...[
           Text(
             isAsr ? '云端 ASR（中国大陆优先）' : '云端 TTS（中国大陆优先）',
             style: const TextStyle(
@@ -1751,7 +1894,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           Wrap(
             spacing: 10,
             runSpacing: 10,
-            children: cloudProviders
+            children: preferredCloudProviders
                 .map(
                   (p) => _speechProviderSelectorButton(
                     p,
@@ -1774,21 +1917,119 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             ),
           ],
         ],
-        if (localProviders.isNotEmpty) ...[
-          if (cloudProviders.isNotEmpty) const SizedBox(height: 16),
+        if (preferredLocalProviders.isNotEmpty) ...[
+          if (preferredCloudProviders.isNotEmpty) const SizedBox(height: 16),
           Text(
-            isAsr ? '本地与内置 ASR' : '本地与内置 TTS',
+            isAsr ? '可用 ASR 服务（绿标）' : '可用 TTS 服务（绿标）',
             style: const TextStyle(
               color: AppColors.warmWhite,
               fontSize: 12,
               fontWeight: FontWeight.w700,
             ),
           ),
+          const SizedBox(height: 6),
+          Text(
+            '可用性来自“通用 > 本地服务状态”的刷新结果。这里单选后立即生效，无需再测试连接、应用或写入 .env。',
+            style: TextStyle(
+              color: AppColors.warmGray.withValues(alpha: 0.95),
+              fontSize: 11,
+            ),
+          ),
           const SizedBox(height: 10),
-          ...localProviders.map(
+          ...preferredLocalProviders.map(
             (p) => Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: _speechTile(p, activeId, isAsr: isAsr),
+            ),
+          ),
+          if (isAsr) ...[
+            if (activeLocal != null &&
+                !activeLocal.isCloud &&
+                _supportsStreamingAsr(activeLocal.id)) ...[
+              const SizedBox(height: 4),
+              _buildAsrStreamingPreference(activeLocal, settings),
+            ],
+          ],
+        ],
+        if (hasOtherServices) ...[
+          if (preferredCloudProviders.isNotEmpty ||
+              preferredLocalProviders.isNotEmpty)
+            const SizedBox(height: 10),
+          Theme(
+            data: Theme.of(context).copyWith(
+              dividerColor: Colors.transparent,
+            ),
+            child: ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              iconColor: AppColors.warmGray,
+              collapsedIconColor: AppColors.warmGray,
+              title: Text(
+                '其他服务（$otherServicesCount）',
+                style: const TextStyle(
+                  color: AppColors.warmGray,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              subtitle: const Text(
+                '不可用、缺少配置或非大陆优先服务已折叠到这里。',
+                style: TextStyle(
+                  color: AppColors.warmGray,
+                  fontSize: 10.5,
+                ),
+              ),
+              children: [
+                if (otherCloudProviders.isNotEmpty) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      isAsr ? '其他云端 ASR' : '其他云端 TTS',
+                      style: const TextStyle(
+                        color: AppColors.warmGray,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: otherCloudProviders
+                        .map(
+                          (p) => _speechProviderSelectorButton(
+                            p,
+                            selected: selectedOtherCloud?.id == p.id,
+                            active: activeId == p.id,
+                            onTap: () =>
+                                setState(() => _expandedVoiceService = p.id),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                  if (selectedOtherCloud != null) ...[
+                    const SizedBox(height: 12),
+                    _cloudVoiceProviderForm(
+                      selectedOtherCloud,
+                      _voiceTestResult[selectedOtherCloud.id],
+                      _testingVoice[selectedOtherCloud.id] ?? false,
+                      _savingVoice[selectedOtherCloud.id] ?? false,
+                      isAsr: isAsr,
+                      activeId: activeId,
+                    ),
+                  ],
+                ],
+                if (otherLocalProviders.isNotEmpty) ...[
+                  if (otherCloudProviders.isNotEmpty)
+                    const SizedBox(height: 12),
+                  ...otherLocalProviders.map(
+                    (p) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _speechTile(p, activeId, isAsr: isAsr),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 2),
+              ],
             ),
           ),
         ],
@@ -1822,6 +2063,51 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     }
 
     return providers.first;
+  }
+
+  SpeechProviderInfo? _findSpeechProvider(
+    List<SpeechProviderInfo> providers,
+    String providerId,
+  ) {
+    for (final provider in providers) {
+      if (provider.id == providerId) {
+        return provider;
+      }
+    }
+    return null;
+  }
+
+  Widget _buildAsrStreamingPreference(
+    SpeechProviderInfo provider,
+    LocalSettings settings,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: AppColors.studyWall.withValues(alpha: 0.68),
+        border: Border.all(
+          color: AppColors.warmGray.withValues(alpha: 0.18),
+        ),
+      ),
+      child: SwitchListTile(
+        title: const Text('启用流式语音识别',
+            style: TextStyle(color: AppColors.warmWhite, fontSize: 13)),
+        subtitle: Text(
+          settings.asrStreamingEnabled
+              ? '当前 ${provider.name} 会优先走实时草稿识别。'
+              : '当前 ${provider.name} 会在录音结束后再上传识别。',
+          style: const TextStyle(color: AppColors.warmGray, fontSize: 11),
+        ),
+        value: settings.asrStreamingEnabled,
+        onChanged: (enabled) => ref
+            .read(localSettingsProvider.notifier)
+            .setAsrStreamingEnabled(enabled),
+        contentPadding: EdgeInsets.zero,
+        activeThumbColor: AppColors.amberGold,
+        dense: true,
+      ),
+    );
   }
 
   Widget _buildInteractionSection(LocalSettings s) => _Section(
@@ -2009,27 +2295,13 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       _Section(
         title: '本地服务状态',
         icon: Icons.monitor_heart_outlined,
-        action: IconButton(
-          icon: _healthRefreshing
-              ? const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: AppColors.amberGold))
-              : const Icon(Icons.refresh, size: 16, color: AppColors.amberGold),
-          onPressed: _healthRefreshing
-              ? null
-              : () async {
-                  setState(() => _healthRefreshing = true);
-                  ref.invalidate(healthStatusProvider);
-                  await Future.delayed(const Duration(seconds: 2));
-                  setState(() => _healthRefreshing = false);
-                },
-          tooltip: '刷新',
+        action: _SpeechRefreshButton(
+          refreshing: _healthRefreshing,
+          onPressed: _refreshLocalServiceStatus,
         ),
         children: [
           const Text(
-            '这里是系统状态的统一展示入口。是否可用请以本地服务状态为准，不再单独显示“验证”结果。',
+            '这里是系统状态的统一展示入口。是否可用请以本地服务状态为准；刷新后会同步更新 ASR/TTS 的可用列表，不再单独显示“验证”结果。',
             style: TextStyle(color: AppColors.warmGray, fontSize: 12),
           ),
           const SizedBox(height: 10),
@@ -2054,22 +2326,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     required bool active,
     required VoidCallback onTap,
   }) {
-    final model = _modelCtrl[p.id]?.text.isNotEmpty == true
-        ? _modelCtrl[p.id]!.text
-        : p.model;
-    final statusColor = !p.needsApiKey
-        ? Colors.lightBlue
-        : p.hasApiKey
-            ? Colors.green
-            : Colors.orange;
-    final statusText = !p.needsApiKey
-        ? '免 Key'
-        : p.hasApiKey
-            ? 'Key 已配置'
-            : '待配置';
-
     return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: 158, maxWidth: 212),
+      constraints: const BoxConstraints(minWidth: 120, maxWidth: 188),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
@@ -2123,50 +2381,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                       ),
                     ),
                     if (active) _Chip('当前', AppColors.amberGold),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  model,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: AppColors.warmGray,
-                    fontSize: 10.5,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Container(
-                      width: 7,
-                      height: 7,
-                      decoration: BoxDecoration(
-                        color: statusColor,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        statusText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: statusColor,
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    Icon(
-                      selected
-                          ? Icons.keyboard_arrow_down_rounded
-                          : Icons.chevron_right_rounded,
-                      color:
-                          selected ? AppColors.amberGold : AppColors.warmGray,
-                      size: 18,
-                    ),
                   ],
                 ),
               ],
@@ -2242,8 +2456,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                   const SizedBox(height: 4),
                   Text(
                     active
-                        ? '当前生效配置。测试通过后可以直接应用或写入 .env。'
-                        : '这是备用供应商。保存时会自动切换到该提供商。',
+                        ? '当前生效配置。会自动沿用上次保存的地址、模型和 API Key。'
+                        : '这是备用供应商。保存时会自动切换到该提供商，并沿用上次保存的配置。',
                     style: const TextStyle(
                       color: AppColors.warmGray,
                       fontSize: 11,
@@ -2275,11 +2489,19 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           const _Label('API Key'),
           _Field(
             ctrl: _pk(p),
-            hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
+            hint: p.hasApiKey ? '已保存，留空则沿用当前 Key' : '输入 API Key',
             obscure: true,
           ),
           const SizedBox(height: 8),
         ],
+        Text(
+          '系统会自动沿用上次保存的地址、模型和 API Key；只有重新输入时才会覆盖。',
+          style: const TextStyle(
+            color: AppColors.warmGray,
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: 8),
         const _Label('请求地址（Base URL）'),
         _Field(ctrl: _bu(p), hint: p.baseUrl),
         const SizedBox(height: 8),
@@ -2343,15 +2565,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   Widget _speechTile(SpeechProviderInfo p, String activeId,
       {required bool isAsr}) {
     final active = p.id == activeId;
-    final expanded = _expandedVoiceService == p.id;
-    final needsCfg = p.id != 'browser' && p.id != 'disabled';
-    final testing = _testingVoice[p.id] ?? false;
-    final vResult = _voiceTestResult[p.id];
-
-    // 只有真正可用的服务才显示绿标；缺少 API Key、未启动或禁用时统一白标。
     final hasRequiredApiKey = !p.needsApiKey || p.hasApiKey;
     final isOperational =
         p.id != 'disabled' && p.available && hasRequiredApiKey;
+    final selectable = p.id == 'disabled' || isOperational || active;
     final availColor =
         isOperational ? const Color(0xFF4CAF50) : AppColors.warmWhite;
     final availTip = p.id == 'disabled'
@@ -2361,181 +2578,106 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             : isOperational
                 ? '功能正常'
                 : '服务不可用或未启动';
+    String subtitleText() {
+      if (p.id == 'disabled') {
+        return '纯文本模式，不再调用语音能力。';
+      }
+      if (!selectable && !active) {
+        return '当前不可用，请先到“通用 > 本地服务状态”刷新。';
+      }
+      if (p.id == 'browser') {
+        return '浏览器内置能力，选择后立即生效。';
+      }
+      if (isAsr && _supportsStreamingAsr(p.id)) {
+        return '本地服务，选择后立即生效，并支持流式识别。';
+      }
+      return '本地服务，选择后立即生效。';
+    }
 
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        // ignore: deprecated_member_use
-        Radio<String>(
-          value: p.id,
-          // ignore: deprecated_member_use
-          groupValue: activeId,
-          activeColor: AppColors.amberGold,
-          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          // ignore: deprecated_member_use
-          onChanged: (v) async {
-            if (v == null) return;
-            if (isAsr) {
-              ref.read(localSettingsProvider.notifier).setAsrProvider(v);
-              await ref
-                  .read(apiClientProvider)
-                  .updateConfig({'asr_provider': v});
-              ref.invalidate(currentConfigProvider);
-              ref.invalidate(speechConfigProvider);
-            } else {
-              ref.read(localSettingsProvider.notifier).setTtsProvider(v);
-              await ref
-                  .read(apiClientProvider)
-                  .updateConfig({'tts_provider': v});
-              ref.invalidate(currentConfigProvider);
-              ref.invalidate(speechConfigProvider);
-            }
-          },
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: active
+              ? AppColors.amberGold.withValues(alpha: 0.9)
+              : AppColors.warmGray.withValues(alpha: 0.18),
+          width: active ? 1.3 : 1,
         ),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            // 可用性指示点
-            Tooltip(
-              message: availTip,
-              child: Container(
-                width: 7,
-                height: 7,
-                margin: const EdgeInsets.only(right: 6),
-                decoration: BoxDecoration(
-                  color: availColor,
-                  shape: BoxShape.circle,
-                ),
-              ),
-            ),
-            Text(p.name,
-                style:
-                    const TextStyle(color: AppColors.warmWhite, fontSize: 13)),
-            if (active) ...[
-              const SizedBox(width: 6),
-              _Chip('使用中', AppColors.amberGold)
-            ],
-          ]),
-          if (needsCfg && p.url.isNotEmpty)
-            Text(p.url,
-                style:
-                    const TextStyle(color: AppColors.warmGray, fontSize: 10)),
-        ])),
-        if (needsCfg)
-          IconButton(
-            icon: Icon(expanded ? Icons.expand_less : Icons.settings,
-                color: AppColors.warmGray, size: 15),
-            onPressed: () =>
-                setState(() => _expandedVoiceService = expanded ? null : p.id),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-            tooltip: '配置',
-          ),
-        if (p.id == 'disabled')
-          const Padding(
-            padding: EdgeInsets.only(right: 8),
-            child: Text('纯文本',
-                style: TextStyle(color: AppColors.warmGray, fontSize: 10)),
-          ),
-      ]),
-      if (expanded && needsCfg)
-        Padding(
-          padding: const EdgeInsets.only(left: 36, bottom: 4),
-          child: _voiceForm(p, vResult, testing, isAsr: isAsr),
-        ),
-    ]);
-  }
-
-  Widget _voiceForm(
-      SpeechProviderInfo p, VoiceServiceTestResult? result, bool testing,
-      {required bool isAsr}) {
-    final voices = result?.voices ?? [];
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const SizedBox(height: 4),
-      if (p.needsApiKey) ...[
-        const _Label('API Key'),
-        FractionallySizedBox(
-          alignment: Alignment.centerLeft,
-          widthFactor: 0.5,
-          child: _Field(
-              ctrl: _vk(p),
-              hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
-              obscure: true),
-        ),
-        const SizedBox(height: 6),
-      ],
-      const _Label('服务地址'),
-      FractionallySizedBox(
-        alignment: Alignment.centerLeft,
-        widthFactor: 0.5,
-        child: _Field(
-            ctrl: _vu(p),
-            hint: p.defaultUrl.isNotEmpty
-                ? p.defaultUrl
-                : 'http://localhost:???'),
+        color: active
+            ? AppColors.amberGold.withValues(alpha: 0.08)
+            : AppColors.studyWall.withValues(alpha: 0.55),
       ),
-      const SizedBox(height: 8),
-      Row(children: [
-        _OutBtn(testing ? '测试中…' : '🔌 测试连接',
-            onTap: testing ? null : () => _testVoice(p),
-            loading: testing,
-            height: 36,
-            padding: 12),
-        if (result != null) ...[
-          const SizedBox(width: 8),
-          Icon(result.success ? Icons.check_circle : Icons.cancel,
-              color: result.success ? Colors.green : Colors.red, size: 13),
-          const SizedBox(width: 3),
-          Flexible(
-              child: Text(
-            result.success
-                ? (voices.isNotEmpty ? '✓ ${voices.length} 个音色' : '✓ 连接成功')
-                : result.error ?? '失败',
-            style: TextStyle(
-                fontSize: 10,
-                color: result.success ? Colors.green : Colors.red),
-            overflow: TextOverflow.ellipsis,
-          )),
-        ],
-      ]),
-      if (result != null)
-        Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text(
-            result.success
-                ? 'HTTP ${result.statusCode ?? '-'} · ${result.latencyMs?.toStringAsFixed(1) ?? '-'}ms'
-                : 'HTTP ${result.statusCode ?? '-'} · ${result.error ?? '连接失败'}',
-            style: TextStyle(
-              fontSize: 10,
-              color: result.success ? AppColors.warmGray : Colors.redAccent,
+      child: Row(
+        children: [
+          // ignore: deprecated_member_use
+          Radio<String>(
+            value: p.id,
+            // ignore: deprecated_member_use
+            groupValue: activeId,
+            activeColor: AppColors.amberGold,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            // ignore: deprecated_member_use
+            onChanged: selectable
+                ? (v) async {
+                    if (v == null) return;
+                    await _selectSpeechProvider(p, isAsr: isAsr);
+                  }
+                : null,
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(p.icon, style: const TextStyle(fontSize: 16)),
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message: availTip,
+                      child: Container(
+                        width: 7,
+                        height: 7,
+                        margin: const EdgeInsets.only(right: 6),
+                        decoration: BoxDecoration(
+                          color: availColor,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        p.name,
+                        style: const TextStyle(
+                          color: AppColors.warmWhite,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    if (isAsr && _supportsStreamingAsr(p.id)) ...[
+                      const SizedBox(width: 6),
+                      _Chip('流式', AppColors.amberGold),
+                    ],
+                    if (active) ...[
+                      const SizedBox(width: 6),
+                      _Chip('使用中', AppColors.amberGold),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitleText(),
+                  style: const TextStyle(
+                    color: AppColors.warmGray,
+                    fontSize: 10.5,
+                  ),
+                ),
+              ],
             ),
           ),
-        ),
-      if (result != null && result.success && voices.isNotEmpty) ...[
-        const SizedBox(height: 8),
-        const _Label('选择音色'),
-        FractionallySizedBox(
-          alignment: Alignment.centerLeft,
-          widthFactor: 0.5,
-          child: _VoiceDrop(
-            voices: voices,
-            value: _selectedVoice[p.id],
-            onChanged: (v) => setState(() => _selectedVoice[p.id] = v),
-          ),
-        ),
-      ],
-      const SizedBox(height: 8),
-      Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-        _OutBtn('应用',
-            onTap: () => _saveVoice(p, isAsr: isAsr), height: 36, padding: 12),
-        const SizedBox(width: 8),
-        _GoldBtn('💾 .env',
-            onTap: () => _saveVoice(p, isAsr: isAsr, persist: true),
-            height: 36,
-            padding: 12),
-      ]),
-      const SizedBox(height: 4),
-    ]);
+        ],
+      ),
+    );
   }
 
   Widget _speechProviderSelectorButton(
@@ -2923,18 +3065,46 @@ class _Section extends StatelessWidget {
       );
 }
 
+class _SpeechRefreshButton extends StatelessWidget {
+  final bool refreshing;
+  final VoidCallback onPressed;
+
+  const _SpeechRefreshButton({
+    required this.refreshing,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+        tooltip: '手动刷新服务状态',
+        onPressed: refreshing ? null : onPressed,
+        icon: refreshing
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.amberGold,
+                ),
+              )
+            : const Icon(
+                Icons.refresh,
+                size: 16,
+                color: AppColors.amberGold,
+              ),
+      );
+}
+
 class _Field extends StatelessWidget {
   final TextEditingController ctrl;
   final String hint;
   final bool obscure;
   final bool readOnly;
-  final void Function(String)? onDone;
   const _Field(
       {required this.ctrl,
       required this.hint,
       this.obscure = false,
-      this.readOnly = false,
-      this.onDone});
+      this.readOnly = false});
 
   @override
   Widget build(BuildContext context) => TextField(
@@ -2942,7 +3112,6 @@ class _Field extends StatelessWidget {
         style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
         obscureText: obscure,
         readOnly: readOnly,
-        onSubmitted: onDone,
         decoration: InputDecoration(
           hintText: hint,
           hintStyle: const TextStyle(color: AppColors.warmGray, fontSize: 12),
@@ -3089,6 +3258,47 @@ class _Chip extends StatelessWidget {
                 color: AppColors.scrollTitle,
                 fontSize: 10,
                 fontWeight: FontWeight.w500)),
+      );
+}
+
+class _ConfigBadge extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _ConfigBadge({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(10),
+          color: AppColors.studyWallLight.withValues(alpha: 0.45),
+          border: Border.all(
+            color: AppColors.warmGray.withValues(alpha: 0.18),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                color: AppColors.warmGray,
+                fontSize: 10,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              value,
+              style: const TextStyle(
+                color: AppColors.warmWhite,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
       );
 }
 

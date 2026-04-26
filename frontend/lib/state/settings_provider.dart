@@ -26,13 +26,9 @@ const _prefsKeyAsrProvider = 'asr_provider';
 const _prefsKeyTtsProvider = 'tts_provider';
 const _prefsKeyPushToTalk = 'push_to_talk';
 const _prefsKeyStreamUserSubtitles = 'stream_user_subtitles';
+const _prefsKeyAsrStreamingEnabled = 'asr_streaming_enabled';
 const _prefsKeyMicActivationMode = 'mic_activation_mode';
 const _prefsKeyMicControlMode = 'mic_control_mode';
-
-bool _hasStoredString(SharedPreferences prefs, String key) {
-  final value = prefs.getString(key);
-  return value != null && value.trim().isNotEmpty;
-}
 
 String _normalizeMicControlMode(String? mode) {
   return mode?.trim() == 'hold_ctrl' ? 'hold_ctrl' : 'hold_ctrl';
@@ -42,10 +38,21 @@ String _normalizeMicActivationMode(String? mode) {
   return mode?.trim() == 'auto' ? 'auto' : 'manual';
 }
 
-String _normalizeTtsProvider(String? providerId) {
+String _normalizeSpeechProvider(String? providerId) {
   final normalized = providerId?.trim();
   if (normalized == null || normalized.isEmpty) {
     return '';
+  }
+  return normalized;
+}
+
+String _normalizeTtsProvider(String? providerId) {
+  final normalized = _normalizeSpeechProvider(providerId);
+  if (normalized.isEmpty) {
+    return '';
+  }
+  if (normalized == 'openai_tts') {
+    return 'edge_tts';
   }
   return normalized;
 }
@@ -60,16 +67,19 @@ LocalSettings resolveInitialLocalSettings({
   required bool? storedPushToTalk,
   bool hasStoredStreamUserSubtitles = false,
   bool? storedStreamUserSubtitles,
+  bool hasStoredAsrStreamingEnabled = false,
+  bool? storedAsrStreamingEnabled,
   required String? storedMicActivationMode,
   required String? storedMicControlMode,
   CurrentConfig? remoteConfig,
 }) {
   final normalizedLlmProvider = storedLlmProvider?.trim();
-  final normalizedAsrProvider = storedAsrProvider?.trim();
+  final normalizedAsrProvider = _normalizeSpeechProvider(storedAsrProvider);
   final normalizedTtsProvider = _normalizeTtsProvider(storedTtsProvider);
   final normalizedMicActivationMode =
       _normalizeMicActivationMode(storedMicActivationMode);
   final normalizedMicControlMode = storedMicControlMode?.trim();
+  final remoteAsrProvider = _normalizeSpeechProvider(remoteConfig?.asrProvider);
   final remoteTtsProvider = _normalizeTtsProvider(remoteConfig?.ttsProvider);
 
   return LocalSettings(
@@ -77,19 +87,24 @@ LocalSettings resolveInitialLocalSettings({
     llmProvider: normalizedLlmProvider?.isNotEmpty == true
         ? normalizedLlmProvider!
         : 'openai',
-    asrProvider: normalizedAsrProvider?.isNotEmpty == true
-        ? normalizedAsrProvider!
-        : (remoteConfig?.asrProvider.trim().isNotEmpty == true
-            ? remoteConfig!.asrProvider.trim()
-            : 'funasr'),
-    ttsProvider: normalizedTtsProvider.isNotEmpty
-        ? normalizedTtsProvider
-        : (remoteTtsProvider.isNotEmpty ? remoteTtsProvider : 'edge_tts'),
+    // Speech provider selection is meant to reflect the backend runtime.
+    // If local prefs drift from /config/current, prefer the remote runtime.
+    asrProvider: remoteAsrProvider.isNotEmpty
+        ? remoteAsrProvider
+        : (normalizedAsrProvider.isNotEmpty ? normalizedAsrProvider : 'funasr'),
+    ttsProvider: remoteTtsProvider.isNotEmpty
+        ? remoteTtsProvider
+        : (normalizedTtsProvider.isNotEmpty
+            ? normalizedTtsProvider
+            : 'edge_tts'),
     pushToTalk: hasStoredPushToTalk
         ? (storedPushToTalk ?? true)
         : (remoteConfig?.pushToTalk ?? true),
     streamUserSubtitles: hasStoredStreamUserSubtitles
         ? (storedStreamUserSubtitles ?? true)
+        : true,
+    asrStreamingEnabled: hasStoredAsrStreamingEnabled
+        ? (storedAsrStreamingEnabled ?? true)
         : true,
     micActivationMode: normalizedMicActivationMode,
     micControlMode: _normalizeMicControlMode(normalizedMicControlMode),
@@ -117,32 +132,40 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     final prefs = await SharedPreferences.getInstance();
     final serverUrl =
         prefs.getString(_prefsKeyServerUrl) ?? 'http://localhost:8001';
-    final hasStoredAsrProvider = _hasStoredString(prefs, _prefsKeyAsrProvider);
-    final hasStoredTtsProvider = _hasStoredString(prefs, _prefsKeyTtsProvider);
     final hasStoredPushToTalk = prefs.containsKey(_prefsKeyPushToTalk);
     final hasStoredStreamUserSubtitles =
         prefs.containsKey(_prefsKeyStreamUserSubtitles);
+    final hasStoredAsrStreamingEnabled =
+        prefs.containsKey(_prefsKeyAsrStreamingEnabled);
 
-    CurrentConfig? remoteConfig;
-    if (!hasStoredAsrProvider ||
-        !hasStoredTtsProvider ||
-        !hasStoredPushToTalk) {
-      remoteConfig = await _loadRemoteCurrentConfig(serverUrl);
-    }
+    final storedAsrProvider = prefs.getString(_prefsKeyAsrProvider);
+    final storedTtsProvider = prefs.getString(_prefsKeyTtsProvider);
+    final remoteConfig = await _loadRemoteCurrentConfig(serverUrl);
 
-    return resolveInitialLocalSettings(
+    final resolved = resolveInitialLocalSettings(
       serverUrl: serverUrl,
       storedLlmProvider: prefs.getString(_prefsKeyLlmProvider),
-      storedAsrProvider: prefs.getString(_prefsKeyAsrProvider),
-      storedTtsProvider: prefs.getString(_prefsKeyTtsProvider),
+      storedAsrProvider: storedAsrProvider,
+      storedTtsProvider: storedTtsProvider,
       hasStoredPushToTalk: hasStoredPushToTalk,
       storedPushToTalk: prefs.getBool(_prefsKeyPushToTalk),
       hasStoredStreamUserSubtitles: hasStoredStreamUserSubtitles,
       storedStreamUserSubtitles: prefs.getBool(_prefsKeyStreamUserSubtitles),
+      hasStoredAsrStreamingEnabled: hasStoredAsrStreamingEnabled,
+      storedAsrStreamingEnabled: prefs.getBool(_prefsKeyAsrStreamingEnabled),
       storedMicActivationMode: prefs.getString(_prefsKeyMicActivationMode),
       storedMicControlMode: prefs.getString(_prefsKeyMicControlMode),
       remoteConfig: remoteConfig,
     );
+
+    if (_normalizeSpeechProvider(storedAsrProvider) != resolved.asrProvider) {
+      await prefs.setString(_prefsKeyAsrProvider, resolved.asrProvider);
+    }
+    if (_normalizeTtsProvider(storedTtsProvider) != resolved.ttsProvider) {
+      await prefs.setString(_prefsKeyTtsProvider, resolved.ttsProvider);
+    }
+
+    return resolved;
   }
 
   /// 更新服务器地址
@@ -188,6 +211,12 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_prefsKeyStreamUserSubtitles, enabled);
     state = AsyncData(state.value!.copyWith(streamUserSubtitles: enabled));
+  }
+
+  Future<void> setAsrStreamingEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_prefsKeyAsrStreamingEnabled, enabled);
+    state = AsyncData(state.value!.copyWith(asrStreamingEnabled: enabled));
   }
 
   Future<void> setMicActivationMode(String mode) async {

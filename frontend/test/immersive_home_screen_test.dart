@@ -5,25 +5,25 @@ import 'package:roundtable/models/discussion_models.dart';
 import 'package:roundtable/services/saved_topics_store.dart';
 
 void main() {
-  test('home ASR uses gateway URL for capswriter', () {
+  test('home ASR keeps direct capswriter URL', () {
     expect(
       resolveHomeAsrProviderUrl(
         providerId: 'capswriter',
-        url: 'http://localhost:6701',
-        defaultUrl: 'http://localhost:6666',
+        url: 'http://localhost:6016',
+        defaultUrl: '',
       ),
-      'http://localhost:6666',
+      'http://localhost:6016',
     );
   });
 
-  test('home ASR rewrites direct capswriter host to gateway port', () {
+  test('home ASR does not rewrite capswriter host/port', () {
     expect(
       resolveHomeAsrProviderUrl(
         providerId: 'capswriter',
-        url: 'http://192.168.0.8:6701',
+        url: 'http://192.168.0.8:6016',
         defaultUrl: '',
       ),
-      'http://192.168.0.8:6666',
+      'http://192.168.0.8:6016',
     );
   });
 
@@ -38,10 +38,28 @@ void main() {
     );
   });
 
-  test('home free-topic uses server proxy for capswriter', () {
-    expect(shouldPreferServerProxyForHomeAsr('capswriter'), isTrue);
-    expect(shouldPreferServerProxyForHomeAsr('browser'), isFalse);
-    expect(shouldPreferServerProxyForHomeAsr('funasr'), isFalse);
+  test('home free-topic no longer forces server proxy for capswriter', () {
+    expect(
+      shouldPreferServerProxyForHomeAsr(
+        providerId: 'capswriter',
+        streamingEnabled: true,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldPreferServerProxyForHomeAsr(
+        providerId: 'browser',
+        streamingEnabled: false,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldPreferServerProxyForHomeAsr(
+        providerId: 'funasr',
+        streamingEnabled: false,
+      ),
+      isTrue,
+    );
   });
 
   test('home free-topic prefers capswriter over browser when available', () {

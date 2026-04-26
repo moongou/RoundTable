@@ -70,6 +70,19 @@ class FloorManager:
 
     _STREAM_SENTENCE_ENDINGS = frozenset("。！？!?；;")
     _STREAM_CLOSING_CHARS = frozenset('"\'”’）)]】》」』')
+    _META_REASONING_PATTERNS = (
+        re.compile(r"</?think>", re.IGNORECASE),
+        re.compile(
+            r"(用户现在|用户的输入|用户的消息|name\s*=\s*user|系统提示|之前的设定|真人学生发言处理规范|符合要求|复述了用户的关键表述|点评到位|引导其他角色发言|现在需要我扮演|要符合小学生的语气|带趣味性故事|温和质疑|边栏流程指引|系统触发|等待系统触发|按规范|严格基于|自身身份|严格引用|语气感|引导对继续|引导下一位发声|无编造|符合长项要求|首轮已发言|不自我引用|绝不提前|未发生发言|提前引用|/me|静候)"
+        ),
+        re.compile(r"^(不对|哦，不对|不，看|不，|那我需要|重新理一下|仔细看)"),
+        re.compile(r"(然后点评|然后引导|还要注意语言|这样就可以了)"),
+    )
+    _META_BLOCK_PATTERNS = (
+        re.compile(r"\[([^\]\n]{1,220})\]"),
+        re.compile(r"\(([^)\n]{1,220})\)"),
+        re.compile(r"（([^）\n]{1,220})）"),
+    )
 
     def __init__(
         self,
@@ -112,6 +125,7 @@ class FloorManager:
         # 流式文本缓冲
         self._streaming_buffer: dict[str, str] = {}
         self._streaming_emitted_raw_prefix: dict[str, str] = {}
+        self._streaming_emitted_segment_keys: dict[str, set[str]] = {}
         self._current_streaming_source: Optional[str] = None
 
         # display name → agent name 映射（需求4：用于指定发言者解析）
@@ -202,6 +216,74 @@ class FloorManager:
 
         return text
 
+    def _get_spoken_display_names(self) -> set[str]:
+        """返回整场讨论里实际产生过有效发言的展示名集合。"""
+        spoken = set(self._recent_display_speakers)
+        for agent_name, count in self._speaker_message_count.items():
+            if count > 0:
+                spoken.add(self._agent_to_display_name.get(agent_name, agent_name))
+        return spoken
+
+    def _rewrite_unspoken_named_attribution(
+        self,
+        text: str,
+        *,
+        name: str,
+        last_display: str,
+    ) -> str:
+        """把未实际发言者的命名归因改写为最近真实发言者或中性表述。"""
+        escaped_name = re.escape(name)
+        replacement_prefix = f"刚才{last_display}" if last_display else "刚才有同学"
+
+        if last_display:
+            escaped_last = re.escape(last_display)
+            text = re.sub(
+                rf"{escaped_name}(?:同学|先生)?和{escaped_last}(?:同学|先生)?说([得的])",
+                rf"{last_display}说\1",
+                text,
+            )
+            text = re.sub(
+                rf"{escaped_last}(?:同学|先生)?和{escaped_name}(?:同学|先生)?说([得的])",
+                rf"{last_display}说\1",
+                text,
+            )
+
+        rewrite_specs = [
+            (
+                rf"{escaped_name}(?:同学|先生)?[，,:：]\s*你(提出的|刚才说的|刚才提到的|说的|说得|提到的|讲到的|分享的|质疑的|追问的)",
+                rf"{replacement_prefix}\1",
+            ),
+            (
+                rf"面对\s*{escaped_name}(?:同学|先生)?\s*(提出的|刚才说的|刚才提到的|说的|说得|提到的|讲到的|分享的|质疑的|追问的)",
+                rf"面对{replacement_prefix}\1",
+            ),
+            (
+                rf"再到\s*{escaped_name}(?:同学|先生)?\s*(提出的|刚才说的|刚才提到的|说的|说得|提到的|讲到的|分享的|质疑的|追问的)",
+                rf"再到{replacement_prefix}\1",
+            ),
+            (rf"{escaped_name}(?:同学|先生)?\s*对于", f"{replacement_prefix}对于"),
+            (
+                rf"{escaped_name}(?:同学|先生)?\s*(提出了|提到了|讲到了|分享了|质疑了|追问了)",
+                rf"{replacement_prefix}\1",
+            ),
+            (
+                rf"{escaped_name}(?:同学|先生)?\s*(提出的|说的|说得|提到的|讲到的|分享的|质疑的|追问的)",
+                rf"{replacement_prefix}\1",
+            ),
+        ]
+        for pattern, replacement in rewrite_specs:
+            text = re.sub(pattern, replacement, text)
+
+        if last_display:
+            escaped_last = re.escape(last_display)
+            text = re.sub(
+                rf"({escaped_last}(?:同学|先生)?)[，,:：]\s*刚才{escaped_last}(?:同学|先生)?",
+                r"\1，你刚才",
+                text,
+            )
+
+        return text
+
     def _sanitize_reference_attribution(self, source: str, content: str) -> str:
         """修正明显错误的"刚才/上一位"引用归属，并防止自引用。
 
@@ -242,7 +324,7 @@ class FloorManager:
             return text
 
         # 构建"已实际发言过"的名字集合
-        spoke_set = set(self._recent_display_speakers)
+        spoke_set = self._get_spoken_display_names()
 
         display_names = sorted(set(self._agent_to_display_name.values()), key=len, reverse=True)
         for name in display_names:
@@ -253,6 +335,11 @@ class FloorManager:
                 text = re.sub(rf"(刚才|上一位|前面)\s*{re.escape(name)}", rf"\1{last_display}", text)
             # 检测对从未发言者的引用（"X说/X提到/X认为"） → 替换为中性表述
             if name not in spoke_set:
+                text = self._rewrite_unspoken_named_attribution(
+                    text,
+                    name=name,
+                    last_display=last_display,
+                )
                 text = re.sub(
                     rf"{re.escape(name)}(?:同学|先生)?(?:还)?\s*刚才(说|提到|讲到)的",
                     r"有同学刚才\1的",
@@ -374,24 +461,143 @@ class FloorManager:
         current = f"{self._streaming_buffer.get(source, '')}{content}"
         segments, remainder = self._drain_complete_stream_sentences(current)
         self._streaming_buffer[source] = remainder
-        if segments:
-            self._streaming_emitted_raw_prefix[source] = (
-                f"{self._streaming_emitted_raw_prefix.get(source, '')}{''.join(segments)}"
-            )
         return segments
+
+    def _mark_streaming_segments_emitted(self, source: str, segments: list[str]) -> None:
+        if not segments:
+            return
+        self._streaming_emitted_raw_prefix[source] = (
+            f"{self._streaming_emitted_raw_prefix.get(source, '')}{''.join(segments)}"
+        )
+
+    def _looks_like_meta_reasoning_segment(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", "", text or "")
+        if not normalized:
+            return False
+        return any(pattern.search(normalized) for pattern in self._META_REASONING_PATTERNS)
+
+    def _strip_meta_reasoning_blocks(self, text: str) -> str:
+        value = text or ""
+        for pattern in self._META_BLOCK_PATTERNS:
+            value = pattern.sub(
+                lambda match: ""
+                if self._looks_like_meta_reasoning_segment(match.group(1))
+                else match.group(0),
+                value,
+            )
+        return value
+
+    def _strip_meta_reasoning_text(self, text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return ""
+
+        value = self._strip_meta_reasoning_blocks(value)
+        kept_lines: list[str] = []
+        for raw_line in re.split(r"(?:\r?\n)+", value):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if self._looks_like_meta_reasoning_segment(line):
+                continue
+            line = re.sub(r"^[>\-*•\s]+", "", line).strip()
+            if not line:
+                continue
+
+            segments, remainder = self._drain_complete_stream_sentences(line)
+            kept_segments = [
+                segment.strip()
+                for segment in segments
+                if segment.strip() and not self._looks_like_meta_reasoning_segment(segment)
+            ]
+            remainder = remainder.strip()
+            if remainder and not self._looks_like_meta_reasoning_segment(remainder):
+                kept_segments.append(remainder)
+
+            cleaned_line = "".join(kept_segments).strip()
+            cleaned_line = re.sub(r"\s{2,}", " ", cleaned_line).strip()
+            cleaned_line = re.sub(r"^[，,；;:：\-*\s]+", "", cleaned_line)
+            if cleaned_line:
+                kept_lines.append(cleaned_line)
+
+        return "\n".join(kept_lines).strip()
+
+    def _normalize_streaming_segment(self, text: str) -> str:
+        value = re.sub(r"\s+", "", text or "")
+        return re.sub(r"[。！？!?；;\"'”’）)\]】》」』]+$", "", value)
+
+    def _is_duplicate_streaming_segment(self, source: str, text: str) -> bool:
+        key = self._normalize_streaming_segment(text)
+        if not key:
+            return False
+        seen = self._streaming_emitted_segment_keys.setdefault(source, set())
+        if key in seen:
+            return True
+        seen.add(key)
+        return False
+
+    def _filter_streamed_tail_duplicates(self, text: str, emitted_keys: set[str]) -> str:
+        if not text or not emitted_keys:
+            return text
+
+        segments, remainder = self._drain_complete_stream_sentences(text)
+        filtered_segments = [
+            segment
+            for segment in segments
+            if self._normalize_streaming_segment(segment) not in emitted_keys
+        ]
+        filtered_remainder = remainder.strip()
+        if filtered_remainder:
+            normalized_remainder = self._normalize_streaming_segment(filtered_remainder)
+            if normalized_remainder and normalized_remainder in emitted_keys:
+                filtered_remainder = ""
+
+        parts = filtered_segments
+        if filtered_remainder:
+            parts.append(filtered_remainder)
+        return "".join(parts).strip()
 
     def _pop_streaming_message_tail(self, source: str, raw_content: str) -> tuple[bool, str]:
         """在最终消息到达时，返回尚未通过流式播报过的原始尾段。"""
         remainder = self._streaming_buffer.pop(source, "")
         emitted_prefix = self._streaming_emitted_raw_prefix.pop(source, "")
+        emitted_segment_keys = self._streaming_emitted_segment_keys.pop(source, set())
         if self._current_streaming_source == source:
             self._current_streaming_source = None
 
         if not emitted_prefix:
             return False, raw_content
         if raw_content.startswith(emitted_prefix):
-            return True, raw_content[len(emitted_prefix):].lstrip()
-        return True, remainder or raw_content
+            tail = raw_content[len(emitted_prefix):].lstrip()
+            return True, self._filter_streamed_tail_duplicates(tail, emitted_segment_keys)
+
+        emitted_segments, _ = self._drain_complete_stream_sentences(emitted_prefix)
+        final_segments, final_remainder = self._drain_complete_stream_sentences(raw_content)
+        matched_segments = 0
+        for emitted_segment, final_segment in zip(emitted_segments, final_segments):
+            if self._normalize_streaming_segment(emitted_segment) != self._normalize_streaming_segment(final_segment):
+                break
+            matched_segments += 1
+
+        if matched_segments > 0:
+            unspoken_parts = final_segments[matched_segments:]
+            if final_remainder:
+                unspoken_parts.append(final_remainder)
+            tail = "".join(unspoken_parts).strip()
+            return True, self._filter_streamed_tail_duplicates(tail, emitted_segment_keys)
+
+        if remainder:
+            tail = remainder.strip()
+            return True, self._filter_streamed_tail_duplicates(tail, emitted_segment_keys)
+
+        logger.info(
+            "[FloorManager] 流式尾段前缀未对齐，丢弃可能重复的最终 TTS: source=%s emitted_len=%d raw_len=%d",
+            source,
+            len(emitted_prefix),
+            len(raw_content),
+        )
+        tail = self._filter_streamed_tail_duplicates(raw_content, emitted_segment_keys)
+        return True, tail if tail != raw_content else ""
 
     def on_message(self, callback: Callable) -> "FloorManager":
         """注册消息回调。callback(source, content, msg_type)"""
@@ -636,10 +842,29 @@ class FloorManager:
 
         # 发言者选择事件
         if isinstance(event, SelectSpeakerEvent):
-            speaker = event.content if hasattr(event, "content") else str(event)
+            raw_speaker = event.content if hasattr(event, "content") else str(event)
+            if isinstance(raw_speaker, list):
+                speaker = next(
+                    (str(item).strip() for item in raw_speaker if str(item).strip()),
+                    "",
+                )
+            else:
+                speaker = str(raw_speaker).strip()
+            if (
+                speaker != "moderator"
+                and "moderator" in self.ai_names
+                and not any(self._speaker_message_count.values())
+            ):
+                logger.warning(
+                    "[FloorManager] 首轮选择异常：%s，强制改回 moderator 开场",
+                    speaker,
+                )
+                speaker = "moderator"
             is_human = speaker in self.human_names
 
             logger.info("[FloorManager] 选择发言者: %s (is_human=%s)", speaker, is_human)
+            if speaker:
+                self.current_speaker = speaker
 
             if is_human:
                 await self._set_state(FloorState.HUMAN_TURN_WAITING, reason="speaker_selected_human")
@@ -662,15 +887,35 @@ class FloorManager:
             if source in self.ai_names:
                 self._current_streaming_source = source
                 raw_segments = self._consume_streaming_sentences(source, content)
+                consumed_raw_segments: list[str] = []
                 tts_segments: list[str] = []
                 for raw_segment in raw_segments:
-                    segment = self._sanitize_all_references(source, raw_segment)
+                    cleaned_raw_segment = self._strip_meta_reasoning_text(raw_segment)
+                    if not cleaned_raw_segment:
+                        logger.info(
+                            "[FloorManager] 丢弃推理流片段: source=%s segment=%s",
+                            source,
+                            raw_segment[:80],
+                        )
+                        continue
+                    segment = self._sanitize_all_references(source, cleaned_raw_segment)
                     segment = await self.safety_filter.filter_or_rewrite(segment)
-                    segment = segment.strip()
+                    segment = self._strip_meta_reasoning_text(segment).strip()
                     if segment:
+                        consumed_raw_segments.append(raw_segment)
+                        if self._is_duplicate_streaming_segment(source, segment):
+                            logger.info(
+                                "[FloorManager] 丢弃重复流片段: source=%s segment=%s",
+                                source,
+                                segment[:80],
+                            )
+                            continue
                         tts_segments.append(segment)
+                self._mark_streaming_segments_emitted(source, consumed_raw_segments)
                 if tts_segments:
                     payload["tts_segments"] = tts_segments
+                else:
+                    return None
 
             return {
                 "event_type": "stream",
@@ -689,8 +934,17 @@ class FloorManager:
 
             logger.info("[FloorManager] 完整消息: source=%s, content_len=%d", source, len(content))
 
+            content = self._strip_meta_reasoning_text(content)
+            if source in self.ai_names and not content:
+                logger.info("[FloorManager] 丢弃纯提示词完整消息: source=%s", source)
+                return None
+
             # 首轮发言兜底规整：避免不当引用
             content = self._sanitize_all_references(source, content)
+            content = self._strip_meta_reasoning_text(content)
+            if source in self.ai_names and not content:
+                logger.info("[FloorManager] 丢弃清洗后为空的完整消息: source=%s", source)
+                return None
 
             # 点名解析应尽量基于原始语义，先于安全改写尝试。
             designated_pre_filter: Optional[str] = None
@@ -704,6 +958,10 @@ class FloorManager:
             # 安全过滤 AI 输出
             if source in self.ai_names:
                 content = await self.safety_filter.filter_or_rewrite(content)
+                content = self._strip_meta_reasoning_text(content)
+                if not content:
+                    logger.info("[FloorManager] 安全过滤后消息为空，跳过发送: source=%s", source)
+                    return None
 
             # 如果是老师或用户的发言，检查是否指定了下一位发言者（需求4）
             designated: Optional[str] = designated_pre_filter
@@ -717,10 +975,11 @@ class FloorManager:
             tts_text = ""
             if source in self.ai_names:
                 if had_streamed_tts:
-                    remaining_tts_raw = remaining_tts_raw.strip()
+                    remaining_tts_raw = self._strip_meta_reasoning_text(remaining_tts_raw).strip()
                     if remaining_tts_raw:
                         tail = self._sanitize_all_references(source, remaining_tts_raw)
                         tts_text = await self.safety_filter.filter_or_rewrite(tail)
+                        tts_text = self._strip_meta_reasoning_text(tts_text)
                 else:
                     tts_text = content
 
@@ -743,6 +1002,11 @@ class FloorManager:
             speaker = self.current_speaker or ""
             if not speaker and len(self.human_agents) == 1:
                 speaker = self.human_agents[0].name
+            if speaker:
+                self.current_speaker = speaker
+                # 人类回合已经真正进入等待输入阶段，清理陈旧点名，
+                # 避免用户提交后再次消费旧目标导致重复请求。
+                self._set_designated_speaker(None)
             if (
                 speaker
                 and speaker == self._last_human_input_requested_speaker
@@ -754,8 +1018,14 @@ class FloorManager:
                     self.state,
                 )
                 return None
-            await self._set_state(FloorState.HUMAN_SPEAKING, reason="human_input_requested")
             self._last_human_input_requested_speaker = speaker
+            if self.state != FloorState.HUMAN_TURN_WAITING:
+                await self._set_state(
+                    FloorState.HUMAN_TURN_WAITING,
+                    reason="human_input_requested_waiting",
+                )
+            else:
+                self._touch_progress("human_input_requested_waiting")
             return {
                 "event_type": "human_input_requested",
                 "data": {"speaker": speaker},
@@ -807,6 +1077,9 @@ class FloorManager:
             await self._emit_message("系统", "你的发言包含不适当的内容，请换一种方式表达。", "system")
             return
 
+        # 进入真实提交前先清空陈旧点名，避免上一轮残留目标在本轮提交后再次触发。
+        self._set_designated_speaker(None)
+
         # 检查用户是否指定了下一位发言者（需求4）
         all_participant_names = list(self.all_names)
         # 使用 display name map if available
@@ -815,7 +1088,11 @@ class FloorManager:
             logger.info("[FloorManager] 用户 %s 指定下一位发言者: %s", normalized_name, designated)
             # 转换为 agent name
             agent_name = self._display_name_to_agent.get(designated, designated) if hasattr(self, '_display_name_to_agent') else designated
-            self._set_designated_speaker(agent_name)
+            current_agent_name = self._display_name_to_agent.get(normalized_name, normalized_name)
+            if agent_name == current_agent_name:
+                logger.info("[FloorManager] 忽略用户 %s 的自指点名: %s", normalized_name, designated)
+            else:
+                self._set_designated_speaker(agent_name)
 
         try:
             await self._put_human_input(normalized_name, normalized_text)

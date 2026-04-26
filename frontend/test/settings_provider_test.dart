@@ -31,11 +31,14 @@ void main() {
     expect(settings.ttsProvider, 'openvoice');
     expect(settings.pushToTalk, isTrue);
     expect(settings.streamUserSubtitles, isTrue);
+    expect(settings.asrStreamingEnabled, isTrue);
     expect(settings.micActivationMode, 'manual');
     expect(settings.micControlMode, 'hold_ctrl');
   });
 
-  test('resolveInitialLocalSettings keeps explicit local speech settings', () {
+  test(
+      'resolveInitialLocalSettings syncs speech settings with remote current config',
+      () {
     final settings = resolveInitialLocalSettings(
       serverUrl: 'http://localhost:8001',
       storedLlmProvider: 'openai',
@@ -48,12 +51,33 @@ void main() {
       remoteConfig: remoteConfig,
     );
 
+    expect(settings.asrProvider, 'browser');
+    expect(settings.ttsProvider, 'openvoice');
+    expect(settings.pushToTalk, isFalse);
+    expect(settings.streamUserSubtitles, isTrue);
+    expect(settings.asrStreamingEnabled, isTrue);
+    expect(settings.micActivationMode, 'auto');
+    expect(settings.micControlMode, 'hold_ctrl');
+  });
+
+  test(
+      'resolveInitialLocalSettings keeps explicit local speech settings when remote is unavailable',
+      () {
+    final settings = resolveInitialLocalSettings(
+      serverUrl: 'http://localhost:8001',
+      storedLlmProvider: 'openai',
+      storedAsrProvider: 'funasr',
+      storedTtsProvider: 'edge_tts',
+      hasStoredPushToTalk: true,
+      storedPushToTalk: false,
+      storedMicActivationMode: 'auto',
+      storedMicControlMode: 'hold_ctrl',
+      remoteConfig: null,
+    );
+
     expect(settings.asrProvider, 'funasr');
     expect(settings.ttsProvider, 'edge_tts');
     expect(settings.pushToTalk, isFalse);
-    expect(settings.streamUserSubtitles, isTrue);
-    expect(settings.micActivationMode, 'auto');
-    expect(settings.micControlMode, 'hold_ctrl');
   });
 
   test('resolveInitialLocalSettings migrates legacy double ctrl to hold ctrl',
@@ -92,6 +116,24 @@ void main() {
     expect(settings.streamUserSubtitles, isFalse);
   });
 
+  test('resolveInitialLocalSettings keeps explicit ASR streaming choice', () {
+    final settings = resolveInitialLocalSettings(
+      serverUrl: 'http://localhost:8001',
+      storedLlmProvider: null,
+      storedAsrProvider: null,
+      storedTtsProvider: null,
+      hasStoredPushToTalk: true,
+      storedPushToTalk: true,
+      hasStoredAsrStreamingEnabled: true,
+      storedAsrStreamingEnabled: false,
+      storedMicActivationMode: null,
+      storedMicControlMode: null,
+      remoteConfig: remoteConfig,
+    );
+
+    expect(settings.asrStreamingEnabled, isFalse);
+  });
+
   test('resolveInitialLocalSettings migrates removed openai_tts to edge_tts',
       () {
     final settings = resolveInitialLocalSettings(
@@ -103,7 +145,7 @@ void main() {
       storedPushToTalk: true,
       storedMicActivationMode: null,
       storedMicControlMode: null,
-      remoteConfig: remoteConfig,
+      remoteConfig: null,
     );
 
     expect(settings.ttsProvider, 'edge_tts');

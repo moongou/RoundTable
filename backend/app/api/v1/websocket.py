@@ -18,10 +18,11 @@ from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
 from app.core.floor_manager import FloorManager
-from app.core.rolling_summary_memory import RollingSummaryMemory
 from app.core.llm_factory import create_character_client, create_moderator_client
+from app.core.meeting_history import MeetingHistoryStore
+from app.core.rolling_summary_memory import RollingSummaryMemory
 from app.core.safety_filter import SafetyFilter
-from app.core.thinkers import get_thinker
+from app.core.thinkers import get_thinker, thinker_label
 from app.core.topics import get_topic_by_id
 from app.core.turn_scheduler import create_discussion_team
 
@@ -59,6 +60,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
     designated_next_speaker: str | None = None
     background_tasks: set[asyncio.Task] = set()
     floor_manager: FloorManager | None = None
+    history_store: MeetingHistoryStore | None = None
+    history_final_status = "running"
+    history_final_reason = ""
     send_drop_total = 0
     send_drop_reasons: dict[str, int] = {}
     last_send_drop: dict[str, str] = {}
@@ -83,8 +87,15 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
     async def send_event(event_type: str, data: dict) -> bool:
         nonlocal ws_closed
+        nonlocal history_final_status, history_final_reason
         if ws_closed:
             record_send_drop("ws_closed_guard", event_type)
+            if history_store is not None:
+                await history_store.append_entry(
+                    "internal",
+                    "send_drop",
+                    {"reason": "ws_closed_guard", "event_type": event_type},
+                )
             return False
         nonlocal event_seq
         event_seq += 1
@@ -95,15 +106,41 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         }
         try:
             await websocket.send_json(payload)
+            if history_store is not None:
+                await history_store.append_entry(
+                    "outbound",
+                    event_type,
+                    data,
+                    event_seq=event_seq,
+                )
+            if event_type == "ended":
+                history_final_status = "completed"
+            elif event_type in {"error", "api_error"}:
+                if history_final_status == "running":
+                    history_final_status = "error"
+                if not history_final_reason:
+                    history_final_reason = str(data.get("message", "") or "").strip()
             return True
         except (RuntimeError, WebSocketDisconnect) as e:
             # RuntimeError: Unexpected ASGI message 'websocket.send' after close.
             reason = "runtime_after_close" if isinstance(e, RuntimeError) else "websocket_disconnect"
             record_send_drop(reason, event_type)
+            if history_store is not None:
+                await history_store.append_entry(
+                    "internal",
+                    "send_drop",
+                    {"reason": reason, "event_type": event_type},
+                )
             ws_closed = True
             return False
         except Exception:
             record_send_drop("send_exception", event_type)
+            if history_store is not None:
+                await history_store.append_entry(
+                    "internal",
+                    "send_drop",
+                    {"reason": "send_exception", "event_type": event_type},
+                )
             ws_closed = True
             logger.debug("send_event failed for type=%s", event_type, exc_info=True)
             return False
@@ -169,6 +206,26 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         max_turns = max(1, int(config.get("max_turns") or settings.max_turns))
         # 需求16：旁听模式——用户只观看讨论，每次轮到用户时系统自动跳过
         observer_mode = bool(config.get("observer_mode", False))
+
+        history_store = MeetingHistoryStore(session_id)
+        await history_store.start(
+            topic={
+                "topic_id": topic_id,
+                "free_topic": free_topic,
+                "free_topic_detail": free_topic_detail,
+            },
+            config={
+                "topic_id": topic_id,
+                "free_topic": free_topic,
+                "free_topic_detail": free_topic_detail,
+                "character_ids": character_ids,
+                "thinker_ids": thinker_ids,
+                "human_names": human_names,
+                "max_turns": max_turns,
+                "observer_mode": observer_mode,
+            },
+        )
+        await history_store.append_entry("inbound", "session_config", config)
 
         # 验证话题；自由话题优先复用已创建 session 中的 topic，避免 websocket
         # 再次把占位 topic_id 当成预设话题去查表。
@@ -262,7 +319,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         # Display names (Chinese) for system prompt and frontend display
         student_names = [templates[cid].name for cid in character_ids if cid in templates and cid != "moderator"]
-        thinker_display_names = [get_thinker(tid).get("name", tid) for tid in thinker_ids]
+        thinker_display_names = [thinker_label(tid, get_thinker(tid)) for tid in thinker_ids]
         all_participant_names = [templates["moderator"].name] + student_names + thinker_display_names + human_names
 
         # internal agent name → Chinese display name (for translating events to frontend)
@@ -271,9 +328,20 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             if cid in templates and cid != "moderator":
                 agent_display_map[cid] = templates[cid].name
         for tid in thinker_ids:
-            agent_display_map[safe_agent_name(tid)] = get_thinker(tid).get("name", tid)
+            agent_display_map[safe_agent_name(tid)] = thinker_label(tid, get_thinker(tid))
         for hn in dict.fromkeys(human_names):
             agent_display_map[safe_agent_name(hn)] = hn
+
+        await history_store.update_context(
+            topic={
+                "id": getattr(topic, "id", ""),
+                "title": topic.title,
+                "description": topic.description,
+                "category": getattr(topic, "category", ""),
+            },
+            participants=all_participant_names,
+            agent_display_map=agent_display_map,
+        )
 
         summary_memory = RollingSummaryMemory()
         shared_memory = [summary_memory]
@@ -422,15 +490,6 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     "session_id": session_id,
                 },
             )
-            # 需求16：旁听模式——轮到用户时立刻自动跳过，让讨论继续
-            if observer_mode and new_state.value == "human_turn_waiting":
-                speaker = floor_manager.current_speaker or ""
-                if speaker:
-                    try:
-                        from app.agents.human_proxy import put_human_input
-                        await put_human_input(speaker, "（旁听）", session_scope=session_id)
-                    except Exception:
-                        logger.debug("observer auto-skip failed", exc_info=True)
 
         async def on_interrupt(interrupter, current_speaker, approved_by):
             await send_event(
@@ -469,6 +528,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 send_event,
                 floor_manager,
                 topic.title + "\n\n" + topic.description,
+                observer_mode=observer_mode,
                 agent_display_map=agent_display_map,
             )
         )
@@ -480,6 +540,12 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 while True:
                     data = await websocket.receive_text()
                     msg = json.loads(data)
+                    if history_store is not None:
+                        await history_store.append_entry(
+                            "inbound",
+                            str(msg.get("type", "unknown") or "unknown"),
+                            msg,
+                        )
 
                     if msg.get("type") == "human_input":
                         speaker = normalize_display_name(msg.get("speaker", ""))
@@ -574,11 +640,17 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         for t in done:
             try:
-                await t
+                result = await t
+                if t is discussion_task and result == "completed":
+                    history_final_status = "completed"
+                elif t is discussion_task and result == "error":
+                    history_final_status = "error"
             except asyncio.CancelledError:
                 pass
             except Exception as e:
                 logger.error(f"讨论运行出错: {e}")
+                history_final_status = "error"
+                history_final_reason = str(e).strip() or history_final_reason
                 msg = str(e).strip()
                 if ws_closed:
                     continue
@@ -590,9 +662,13 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         ws_closed = True
+        history_final_status = "disconnected"
+        history_final_reason = "websocket_disconnect"
         logger.info(f"WebSocket 断开: session_id={session_id}")
     except Exception as e:
         ws_closed = True
+        history_final_status = "error"
+        history_final_reason = str(e).strip() or history_final_reason
         logger.error(f"WebSocket 错误: {e}")
         try:
             msg = str(e).strip()
@@ -615,6 +691,21 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             await asyncio.gather(*background_tasks, return_exceptions=True)
             background_tasks.clear()
         clear_human_queues(session_scope=session_id)
+        if history_store is not None:
+            final_status = history_final_status
+            if final_status == "running":
+                final_status = "disconnected"
+            await history_store.finish(
+                status=final_status,
+                reason=history_final_reason,
+                final_stats={
+                    "send_observability": {
+                        "drop_total": send_drop_total,
+                        "drop_reasons": dict(send_drop_reasons),
+                        "last_drop": dict(last_send_drop) if last_send_drop else None,
+                    }
+                },
+            )
         logger.info(f"WebSocket 清理完成: session_id={session_id}")
 
 
@@ -622,6 +713,7 @@ async def _run_discussion(
     send_event: Callable[[str, dict], Awaitable[bool]],
     floor_manager: FloorManager,
     topic: str,
+    observer_mode: bool = False,
     agent_display_map: dict[str, str] | None = None,
 ):
     """运行讨论并推送事件。"""
@@ -629,17 +721,29 @@ async def _run_discussion(
         # 事件已经通过回调推送，这里只处理特殊事件
         if event["event_type"] == "ended":
             await send_event("ended", event.get("data", {}))
-            break
+            return "completed"
         elif event["event_type"] in ("error", "api_error"):
             await send_event(event["event_type"], event.get("data", {}))
-            break
+            return "error"
         elif event["event_type"] == "stream":
             # 流式文本推送
-            await send_event("stream", event.get("data", {}))
+            data = dict(event.get("data", {}))
+            source = (data.get("source") or "").strip()
+            if source and agent_display_map is not None:
+                data["source"] = agent_display_map.get(source, source)
+            await send_event("stream", data)
         elif event["event_type"] == "human_input_requested":
             # 请求人类输入 - 直接推送给前端
             data = dict(event.get("data", {}))
             speaker = (data.get("speaker") or "").strip()
+            display_speaker = speaker
             if speaker and agent_display_map is not None:
-                data["speaker"] = agent_display_map.get(speaker, speaker)
+                display_speaker = agent_display_map.get(speaker, speaker)
+                data["speaker"] = display_speaker
             await send_event("human_input_requested", data)
+            if observer_mode and display_speaker:
+                try:
+                    await floor_manager.submit_human_input(display_speaker, "（旁听）")
+                except Exception:
+                    logger.debug("observer auto-skip failed", exc_info=True)
+    return "completed"

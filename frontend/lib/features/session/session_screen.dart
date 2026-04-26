@@ -79,6 +79,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   String _asrProviderId = SessionScreen.defaultAsrProvider;
   String _ttsProviderUrl = '';
   String _asrProviderUrl = '';
+  bool _asrStreamingEnabled = true;
   StreamSubscription<AsrResult>? _asrTranscriptionSub;
   ProviderSubscription<AsyncValue<LocalSettings>>? _settingsSubscription;
 
@@ -91,6 +92,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       serverUrl: settings.serverUrl,
       ttsProvider: settings.ttsProvider,
       asrProvider: settings.asrProvider,
+      asrStreamingEnabled: settings.asrStreamingEnabled,
     );
     unawaited(_refreshVoiceServices(settingsOverride: settings));
     _settingsSubscription = ref.listenManual<AsyncValue<LocalSettings>>(
@@ -104,6 +106,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           serverUrl: nextSettings.serverUrl,
           ttsProvider: nextSettings.ttsProvider,
           asrProvider: nextSettings.asrProvider,
+          asrStreamingEnabled: nextSettings.asrStreamingEnabled,
         );
         unawaited(_refreshVoiceServices(settingsOverride: nextSettings));
       },
@@ -132,13 +135,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     required String asrProvider,
     String ttsProviderUrl = '',
     String asrProviderUrl = '',
+    bool asrStreamingEnabled = true,
   }) {
     if (_voiceServicesInitialized &&
         _speechServerUrl == serverUrl &&
         _ttsProviderId == ttsProvider &&
         _asrProviderId == asrProvider &&
         _ttsProviderUrl == ttsProviderUrl &&
-        _asrProviderUrl == asrProviderUrl) {
+        _asrProviderUrl == asrProviderUrl &&
+        _asrStreamingEnabled == asrStreamingEnabled) {
       return;
     }
 
@@ -159,6 +164,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     _asrProviderId = asrProvider;
     _ttsProviderUrl = ttsProviderUrl;
     _asrProviderUrl = asrProviderUrl;
+    _asrStreamingEnabled = asrStreamingEnabled;
     _ttsService = createTtsService(
       ttsProvider,
       serverUrl: serverUrl,
@@ -168,6 +174,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       asrProvider,
       serverUrl: serverUrl,
       providerUrl: asrProviderUrl,
+      preferServerProxy: !asrStreamingEnabled &&
+          asrProvider != 'browser' &&
+          asrProvider != 'disabled',
     );
     _asrTranscriptionSub?.cancel();
     _asrTranscriptionSub =
@@ -200,6 +209,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           _resolveProviderUrl(speechConfig, ttsProvider, asr: false),
       asrProviderUrl:
           _resolveProviderUrl(speechConfig, settings.asrProvider, asr: true),
+      asrStreamingEnabled: settings.asrStreamingEnabled,
     );
   }
 

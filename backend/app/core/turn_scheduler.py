@@ -45,8 +45,12 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 6. 人类学生通常至少间隔2位非人类发言者后可再次安排，但如果讨论需要人类回应则可提前
 7. 如果有人被指定发言（如"请XX发言"），优先安排该角色
 8. 当AI角色发言时，应经常引用或回应人类学生此前的观点，形成以人类为中心的讨论网络
-9. 只输出参与者名字，不要其他内容
+9. 讨论接近收尾时，优先让老师启动收尾流程：第一次请明确用"收尾前，我想先问问大家，还有没有什么想说的或者想要分享的……"征询一次；如果后来又出现新的补充，再让老师明确用"最后我再问一次，还有没有什么想说的或者想要分享的……"进行第二次征询
+10. 只输出参与者名字，不要其他内容
 """
+
+FIRST_CLOSING_PROMPT_MARKER = "收尾前，我想先问问大家"
+SECOND_CLOSING_PROMPT_MARKER = "最后我再问一次"
 
 # 结束讨论的关键词
 TERMINATION_KEYWORDS = ["讨论结束", "END_DISCUSSION", "今天讨论到这里"]
@@ -71,6 +75,47 @@ def get_designated_speaker() -> Optional[str]:
     return name
 
 
+def _build_participant_alias_map(participant_names: list[str]) -> dict[str, str]:
+    """构建参与者别名映射，支持使用简称/姓氏点名。"""
+
+    alias_owner: dict[str, str] = {}
+    ambiguous_aliases: set[str] = set()
+    title_pattern = re.compile(r"(?:同学|老师|先生|女士)$")
+
+    for raw_name in participant_names:
+        canonical = (raw_name or "").strip()
+        if not canonical:
+            continue
+
+        aliases: set[str] = {canonical}
+        stripped = title_pattern.sub("", canonical).strip()
+        if stripped:
+            aliases.add(stripped)
+
+        # 处理中西文复合姓名，支持使用最后一段进行点名（如“阿德勒先生”）。
+        for splitter in ("·", "・", ".", " "):
+            if splitter not in stripped:
+                continue
+            tail = stripped.split(splitter)[-1].strip()
+            if len(tail) >= 2:
+                aliases.add(tail)
+
+        for alias in aliases:
+            normalized_alias = alias.strip()
+            if len(normalized_alias) < 2:
+                continue
+            owner = alias_owner.get(normalized_alias)
+            if owner is None:
+                alias_owner[normalized_alias] = canonical
+            elif owner != canonical:
+                ambiguous_aliases.add(normalized_alias)
+
+    for alias in ambiguous_aliases:
+        alias_owner.pop(alias, None)
+
+    return alias_owner
+
+
 def parse_speaker_designation(text: str, participant_names: list[str]) -> Optional[str]:
     """从发言内容中解析指定发言者。
 
@@ -91,28 +136,34 @@ def parse_speaker_designation(text: str, participant_names: list[str]) -> Option
     if not normalized_text:
         return None
 
-    # 按名字长度降序匹配，避免短名误匹配
-    sorted_names = sorted(participant_names, key=len, reverse=True)
-    for name in sorted_names:
-        # 匹配各种点名模式
+    alias_map = _build_participant_alias_map(participant_names)
+    if not alias_map:
+        return None
+
+    # 按别名长度降序匹配，优先命中更具体的长名。
+    sorted_aliases = sorted(alias_map.items(), key=lambda item: len(item[0]), reverse=True)
+    for alias, canonical_name in sorted_aliases:
+        escaped_alias = re.escape(alias)
         patterns = [
-            rf'请\s*{re.escape(name)}\s*(发言|先说|来谈|谈谈|先来)',
-            rf'接下来\s*请\s*{re.escape(name)}',
-            rf'下一位\s*(请)?\s*{re.escape(name)}',
-            rf'轮到\s*{re.escape(name)}',
-            rf'请\s*{re.escape(name)}\s*同学',
-            rf'{re.escape(name)}[，,]?\s*你(怎么看|觉得|认为|来说|来谈|先说)',
-            rf'{re.escape(name)}[，,]?\s*(你)?(有没有|会不会|能不能|要不要|想不想|愿不愿意|是否|能否)',
-            rf'(想请|也请|不如请|要不请)?\s*{re.escape(name)}\s*(也)?(说说|讲讲|谈谈|分享|回应|补充)',
-            rf'{re.escape(name)}[，,]?\s*(也)?(说说|讲讲|谈谈|分享|回应|补充)\s*(吧|一下)?',
-            rf'(我)?(也)?想请\s*{re.escape(name)}\s*(再)?(说说|讲讲|谈谈|分享|回应|补充)\s*(一下)?',
-            rf'(我们)?来?听听\s*{re.escape(name)}',
-            rf'想听听?\s*{re.escape(name)}',
-            rf'由\s*{re.escape(name)}\s*(先)?发言',
+            rf'请\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(发言|先说|来谈|谈谈|先来|先讲|先分享)?',
+            rf'接下来\s*请\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'下一位\s*(请)?\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'轮到\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'(想请|也请|不如请|要不请|正式邀请|邀请|想问问|问问)\s*(?:一下)?\s*(?:我们的)?(?:思想家)?\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'{escaped_alias}(?:同学|老师|先生|女士)?[，,:：]\s*(您|你)(怎么看|觉得|认为|来说|来谈|先说|先来|有没有|会不会|能不能|要不要|想不想|愿不愿意|是否|能否)',
+            rf'{escaped_alias}\S{{0,3}}[，,]?\s*你(怎么看|觉得|认为|来说|来谈|先说)',
+            rf'{escaped_alias}\S{{0,3}}[，,]?\s*你(先来(?:开个头|说说|讲讲|聊聊|谈谈)?|先开个头|先说说|先讲讲|先聊聊|先谈谈)',
+            rf'{escaped_alias}\S{{0,3}}[，,]?\s*(你)?(有没有|会不会|能不能|要不要|想不想|愿不愿意|是否|能否)',
+            rf'(想请|也请|不如请|要不请)?\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(也)?(说说|讲讲|谈谈|分享|回应|补充)',
+            rf'{escaped_alias}(?:同学|老师|先生|女士)?[，,]?\s*(也)?(说说|讲讲|谈谈|分享|回应|补充)\s*(吧|一下)?',
+            rf'(我)?(也)?想请\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(再)?(说说|讲讲|谈谈|分享|回应|补充)\s*(一下)?',
+            rf'(我们)?来?听听\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'想听听?\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'由\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(先)?发言',
         ]
-        for pat in patterns:
-            if re.search(pat, normalized_text):
-                return name
+        for pattern in patterns:
+            if re.search(pattern, normalized_text):
+                return canonical_name
     return None
 
 
@@ -148,6 +199,10 @@ def create_discussion_team(
     if max_turns is None:
         max_turns = settings.max_turns
 
+    nominal_max_turns = max_turns
+    closing_turn_buffer = 8
+    max_turns = nominal_max_turns + closing_turn_buffer
+
     all_participants = [moderator] + characters + humans
     all_names = [p.name for p in all_participants]
 
@@ -158,6 +213,9 @@ def create_discussion_team(
     termination = MaxMessageTermination(max_turns) | TextMentionTermination(
         "讨论结束"
     )
+
+    first_closing_trigger_turn = max(5, nominal_max_turns - 5)
+    second_closing_trigger_turn = max(first_closing_trigger_turn + 1, nominal_max_turns - 2)
 
     human_name_set = {h.name for h in humans}
 
@@ -180,7 +238,25 @@ def create_discussion_team(
         non_moderator_msgs = [
             m for m in participant_msgs if getattr(m, "source", None) != moderator.name
         ]
+        has_human_spoken = any(
+            getattr(m, "source", None) in human_name_set for m in participant_msgs
+        )
         is_opening_round = last_source == moderator.name and not non_moderator_msgs
+
+        def turns_since_moderator_marker(marker: str) -> int | None:
+            turns = 0
+            for msg in reversed(participant_msgs):
+                if getattr(msg, "source", None) != moderator.name:
+                    turns += 1
+                    continue
+                content = str(getattr(msg, "content", "") or getattr(msg, "messages", ""))
+                if marker in content:
+                    return turns
+                turns += 1
+            return None
+
+        first_closing_seen = turns_since_moderator_marker(FIRST_CLOSING_PROMPT_MARKER)
+        second_closing_seen = turns_since_moderator_marker(SECOND_CLOSING_PROMPT_MARKER)
 
         # ── 优先级1：检查全局指定发言者 ──
         designated = (
@@ -211,6 +287,34 @@ def create_discussion_team(
         # ── 优先级2：用户刚发言 → 老师点评 ──
         if last_source in human_name_set:
             logger.info("[TurnScheduler] 用户 %s 刚发言，安排老师点评", last_source)
+            return moderator.name
+
+        if (
+            human_name_set
+            and not has_human_spoken
+            and len(non_moderator_msgs) >= 2
+            and last_source != moderator.name
+        ):
+            logger.info("[TurnScheduler] 真人学生尚未发言，优先把老师拉回邀请位")
+            return moderator.name
+
+        # ── 优先级2.5：接近收尾时，优先把老师拉回到征询/总结位 ──
+        if (
+            len(participant_msgs) >= first_closing_trigger_turn
+            and first_closing_seen is None
+            and last_source != moderator.name
+        ):
+            logger.info("[TurnScheduler] 接近收尾，安排老师进行第一次收尾征询")
+            return moderator.name
+
+        if (
+            len(participant_msgs) >= second_closing_trigger_turn
+            and first_closing_seen is not None
+            and first_closing_seen >= 1
+            and second_closing_seen is None
+            and last_source != moderator.name
+        ):
+            logger.info("[TurnScheduler] 接近收尾，安排老师进行第二次收尾征询")
             return moderator.name
 
         # ── 优先级3：只解析“最新一条”老师/用户发言中的点名，避免旧消息误触发 ──
@@ -251,6 +355,12 @@ def create_discussion_team(
                     selected = opening_candidates[0]
                     logger.info("[TurnScheduler] moderator 开场后默认首轮交给: %s", selected)
                     return selected
+
+            if latest_source == moderator.name and not is_opening_round and not has_human_spoken:
+                first_human = next((n for n in all_names if n in human_name_set), None)
+                if first_human:
+                    logger.info("[TurnScheduler] 老师已铺垫，优先邀请真人学生发言: %s", first_human)
+                    return first_human
 
         # ── 优先级4：人类发言冷却期 ──
         if since_human < human_cooldown:

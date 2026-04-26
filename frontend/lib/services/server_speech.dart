@@ -444,15 +444,20 @@ class ServerAsrService implements AsrService {
   Future<String> refineTranscript(String text) async {
     final normalized = text.trim();
     if (normalized.isEmpty) return '';
+    final locallyNormalized = normalized.replaceAllMapped(
+      RegExp(r'([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])'),
+      (match) => match.group(1) ?? '',
+    );
     try {
       final response = await _dio.post(
         '/api/v1/voice/asr/refine',
-        data: {'text': normalized},
+        data: {'text': locallyNormalized},
       );
-      final refined = (response.data['text'] as String?)?.trim() ?? normalized;
-      return refined.isEmpty ? normalized : refined;
+      final refined =
+          (response.data['text'] as String?)?.trim() ?? locallyNormalized;
+      return refined.isEmpty ? locallyNormalized : refined;
     } catch (_) {
-      return normalized;
+      return locallyNormalized;
     }
   }
 

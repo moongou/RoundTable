@@ -28,6 +28,15 @@ class _PermanentBadRequestProvider:
         raise httpx.HTTPStatusError("bad request", request=request, response=response)
 
 
+class _CaptureVoiceProvider:
+    def __init__(self) -> None:
+        self.voice: str | None = None
+
+    async def synthesize(self, text: str, voice: str = "alloy", speed: float = 1.0) -> bytes:
+        self.voice = voice
+        return b"ID3fake-mp3"
+
+
 def _make_test_client() -> TestClient:
     app = FastAPI()
     app.include_router(voice_api.router, prefix="/api/v1")
@@ -73,3 +82,27 @@ def test_tts_does_not_retry_non_transient_upstream_errors(monkeypatch) -> None:
 
     assert response.status_code == 500
     assert provider.calls == 1
+
+
+def test_tts_uses_provider_default_voice_when_request_voice_is_omitted(monkeypatch) -> None:
+    provider = _CaptureVoiceProvider()
+    monkeypatch.setattr(voice_api, "create_tts_provider", lambda provider_id=None: provider)
+    monkeypatch.setattr(
+        type(voice_api.settings),
+        "get_tts_voice_for_provider",
+        lambda self, provider_id=None: "FunAudioLLM/CosyVoice2-0.5B:alex",
+    )
+
+    with _make_test_client() as client:
+        response = client.post(
+            "/api/v1/voice/tts",
+            json={
+                "text": "测试默认音色",
+                "provider": "siliconflow_tts",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["x-voice-requested"] == ""
+    assert response.headers["x-voice-used"] == "FunAudioLLM/CosyVoice2-0.5B:alex"
+    assert provider.voice == "FunAudioLLM/CosyVoice2-0.5B:alex"

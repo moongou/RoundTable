@@ -110,7 +110,8 @@ def make_human_input_func(
     """为指定的人类参与者创建 input_func。
 
     该函数会阻塞等待 STT/WebSocket 将转录文本放入队列。
-    若超时，自动返回跳过消息，避免讨论无限期挂起。
+    不再在超时后伪造"我先听听大家的意见"，而是持续等待真人
+    明确发言或前端主动提交"跳过"，确保人类回合始终以真人控制为准。
 
     Args:
         name: 参与者名字。
@@ -132,15 +133,32 @@ def make_human_input_func(
 
         queue = _get_scope_queues(session_scope).get(queue_name)
         if queue is None:
-            logger.warning("参与者 '%s' 的输入队列获取失败，自动跳过本轮", name)
-            return "（我先听听大家的意见）"
-        try:
-            text = await asyncio.wait_for(queue.get(), timeout=timeout)
+            logger.warning("参与者 '%s' 的输入队列获取失败，已自动重建并继续等待", name)
+            queues = _ensure_scope_queues(session_scope)
+            aliases = _ensure_scope_aliases(session_scope)
+            queues[queue_name] = asyncio.Queue()
+            aliases[queue_name] = queue_name
+            queue = queues[queue_name]
+
+        while True:
+            queue_get_task = asyncio.create_task(queue.get())
+            if cancellation_token is not None:
+                cancellation_token.link_future(queue_get_task)
+            try:
+                text = await queue_get_task
+            except asyncio.CancelledError:
+                logger.info("参与者 '%s' 的等待已取消", name)
+                raise
+
             normalized = (text or "").strip()
-            return normalized if normalized else "（我先听听大家的意见）"
-        except asyncio.TimeoutError:
-            logger.warning(f"参与者 '{name}' 等待超时（{timeout}s），自动跳过本轮")
-            return "（我先听听大家的意见）"
+            if normalized:
+                return normalized
+
+            logger.info(
+                "参与者 '%s' 收到空输入，继续等待真人发言（timeout=%.1fs 仅用于观测日志）",
+                name,
+                timeout,
+            )
 
     return input_func
 

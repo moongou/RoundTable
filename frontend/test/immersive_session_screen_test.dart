@@ -261,6 +261,33 @@ void main() {
     );
   });
 
+  test('incoming ai speech clears completed human turn marker', () {
+    expect(
+      ImmersiveSessionScreen.shouldResetCompletedHumanTurnOnIncomingSpeech(
+        source: '李老师',
+        humanName: '豆苗',
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldResetCompletedHumanTurnOnIncomingSpeech(
+        source: '豆苗',
+        humanName: '豆苗',
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldResetCompletedHumanTurnOnIncomingSpeech(
+        source: '系统',
+        humanName: '豆苗',
+        msgType: 'system',
+      ),
+      isFalse,
+    );
+  });
+
   test('human state text is ignored while finalizing or after speaker moved on',
       () {
     expect(
@@ -314,6 +341,20 @@ void main() {
       ),
       isFalse,
     );
+
+    expect(
+      ImmersiveSessionScreen.shouldApplyHumanStateStatus(
+        newState: 'human_turn_waiting',
+        humanName: '豆苗',
+        currentSpeaker: '豆苗',
+        isMyTurn: true,
+        isRecording: false,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+        hasStartedSpeechThisTurn: true,
+      ),
+      isFalse,
+    );
   });
 
   test('turn countdown stops once speech has begun or turn is finishing', () {
@@ -355,6 +396,38 @@ void main() {
         isFinalizingSpeech: false,
       ),
       isFalse,
+    );
+  });
+
+  test('human turn prompt cue is hidden while speech is finalizing', () {
+    expect(
+      ImmersiveSessionScreen.shouldShowHumanTurnPromptCue(
+        isMyTurn: true,
+        isRecording: false,
+        isCompletingHumanTurn: true,
+        isFinalizingSpeech: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldShowHumanTurnPromptCue(
+        isMyTurn: true,
+        isRecording: false,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: true,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldShowHumanTurnPromptCue(
+        isMyTurn: true,
+        isRecording: false,
+        isCompletingHumanTurn: false,
+        isFinalizingSpeech: false,
+      ),
+      isTrue,
     );
   });
 

@@ -160,44 +160,18 @@ String resolveHomeAsrProviderUrl({
   required String url,
   required String defaultUrl,
 }) {
-  final normalizedProviderId = providerId.trim().toLowerCase();
   final trimmedUrl = url.trim();
   final trimmedDefaultUrl = defaultUrl.trim();
-
-  if (normalizedProviderId != 'capswriter' && normalizedProviderId != 'vosk') {
-    return trimmedUrl.isNotEmpty ? trimmedUrl : trimmedDefaultUrl;
-  }
-
-  for (final candidate in [trimmedUrl, trimmedDefaultUrl]) {
-    final uri = Uri.tryParse(candidate);
-    if (candidate.isEmpty || uri == null) {
-      continue;
-    }
-    if (uri.port == 6666) {
-      return candidate;
-    }
-  }
-
-  final fallback = trimmedUrl.isNotEmpty ? trimmedUrl : trimmedDefaultUrl;
-  final fallbackUri = Uri.tryParse(fallback);
-  if (fallbackUri != null && fallbackUri.host.isNotEmpty) {
-    return Uri(
-      scheme: fallbackUri.scheme.isEmpty ? 'http' : fallbackUri.scheme,
-      host: fallbackUri.host,
-      port: 6666,
-    ).toString();
-  }
-
-  return 'http://localhost:6666';
+  return trimmedUrl.isNotEmpty ? trimmedUrl : trimmedDefaultUrl;
 }
 
-bool shouldPreferServerProxyForHomeAsr(String providerId) {
-  switch (providerId.trim().toLowerCase()) {
-    case 'capswriter':
-      return true;
-    default:
-      return false;
-  }
+bool shouldPreferServerProxyForHomeAsr({
+  required String providerId,
+  required bool streamingEnabled,
+}) {
+  return !streamingEnabled &&
+      providerId != 'browser' &&
+      providerId != 'disabled';
 }
 
 String resolvePreferredHomeAsrProviderId({
@@ -232,7 +206,7 @@ String resolvePreferredHomeAsrProviderId({
           ImmersiveSessionScreen.defaultAsrProvider,
           'capswriter',
           'vosk',
-        'siliconflow_asr',
+          'siliconflow_asr',
           'browser',
         ];
 
@@ -1535,6 +1509,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
   String _asrProviderId = '';
   String _asrProviderUrl = '';
   String _asrServerUrl = '';
+  bool _asrStreamingEnabled = true;
   String _submissionSourceText = '';
 
   @override
@@ -1601,8 +1576,13 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     super.dispose();
   }
 
-  Future<({String providerId, String providerUrl, String serverUrl})>
-      _resolveAsrConfig() async {
+  Future<
+      ({
+        String providerId,
+        String providerUrl,
+        String serverUrl,
+        bool asrStreamingEnabled,
+      })> _resolveAsrConfig() async {
     final settings = ref.read(localSettingsProvider).valueOrNull;
     final serverUrl = settings?.serverUrl ?? 'http://localhost:8001';
     final preferredProviderId =
@@ -1670,14 +1650,25 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
       providerId: providerId,
       providerUrl: providerUrl,
       serverUrl: serverUrl,
+      asrStreamingEnabled: settings?.asrStreamingEnabled ?? true,
     );
   }
 
-  Future<List<({String providerId, String providerUrl, String serverUrl})>>
-      _resolveAsrCandidates() async {
+  Future<
+      List<
+          ({
+            String providerId,
+            String providerUrl,
+            String serverUrl,
+            bool asrStreamingEnabled,
+          })>> _resolveAsrCandidates() async {
     final primary = await _resolveAsrConfig();
-    final candidates =
-        <({String providerId, String providerUrl, String serverUrl})>[
+    final candidates = <({
+      String providerId,
+      String providerUrl,
+      String serverUrl,
+      bool asrStreamingEnabled,
+    })>[
       primary,
     ];
     final seen = <String>{
@@ -1703,6 +1694,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
           defaultUrl: provider.defaultUrl,
         ),
         serverUrl: primary.serverUrl,
+        asrStreamingEnabled: primary.asrStreamingEnabled,
       );
       final key =
           '${candidate.providerId}|${candidate.providerUrl}|${candidate.serverUrl}';
@@ -1727,16 +1719,23 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     _asrProviderId = '';
     _asrProviderUrl = '';
     _asrServerUrl = '';
+    _asrStreamingEnabled = true;
   }
 
   Future<AsrService> _ensureAsr({
-    ({String providerId, String providerUrl, String serverUrl})? configOverride,
+    ({
+      String providerId,
+      String providerUrl,
+      String serverUrl,
+      bool asrStreamingEnabled,
+    })? configOverride,
   }) async {
     final config = configOverride ?? await _resolveAsrConfig();
     final shouldRebuild = _asr == null ||
         _asrProviderId != config.providerId ||
         _asrProviderUrl != config.providerUrl ||
-        _asrServerUrl != config.serverUrl;
+        _asrServerUrl != config.serverUrl ||
+        _asrStreamingEnabled != config.asrStreamingEnabled;
 
     if (!shouldRebuild) {
       return _asr!;
@@ -1751,17 +1750,26 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
     _asrProviderId = config.providerId;
     _asrProviderUrl = config.providerUrl;
     _asrServerUrl = config.serverUrl;
+    _asrStreamingEnabled = config.asrStreamingEnabled;
     _asr = createAsrService(
       config.providerId,
       serverUrl: config.serverUrl,
       providerUrl: config.providerUrl,
-      preferServerProxy: shouldPreferServerProxyForHomeAsr(config.providerId),
+      preferServerProxy: shouldPreferServerProxyForHomeAsr(
+        providerId: config.providerId,
+        streamingEnabled: config.asrStreamingEnabled,
+      ),
     );
     return _asr!;
   }
 
   Future<void> _startListeningWithConfig(
-    ({String providerId, String providerUrl, String serverUrl}) config,
+    ({
+      String providerId,
+      String providerUrl,
+      String serverUrl,
+      bool asrStreamingEnabled,
+    }) config,
   ) async {
     final asr = await _ensureAsr(configOverride: config);
     await _asrSub?.cancel();

@@ -373,6 +373,7 @@ class LocalSettings {
   final String ttsProvider;
   final bool pushToTalk;
   final bool streamUserSubtitles;
+  final bool asrStreamingEnabled;
   final String micActivationMode;
   final String micControlMode;
 
@@ -383,6 +384,7 @@ class LocalSettings {
     this.ttsProvider = 'edge_tts',
     this.pushToTalk = true,
     this.streamUserSubtitles = true,
+    this.asrStreamingEnabled = true,
     this.micActivationMode = 'manual',
     this.micControlMode = 'hold_ctrl',
   });
@@ -394,6 +396,7 @@ class LocalSettings {
     String? ttsProvider,
     bool? pushToTalk,
     bool? streamUserSubtitles,
+    bool? asrStreamingEnabled,
     String? micActivationMode,
     String? micControlMode,
   }) =>
@@ -404,6 +407,7 @@ class LocalSettings {
         ttsProvider: ttsProvider ?? this.ttsProvider,
         pushToTalk: pushToTalk ?? this.pushToTalk,
         streamUserSubtitles: streamUserSubtitles ?? this.streamUserSubtitles,
+        asrStreamingEnabled: asrStreamingEnabled ?? this.asrStreamingEnabled,
         micActivationMode: micActivationMode ?? this.micActivationMode,
         micControlMode: micControlMode ?? this.micControlMode,
       );

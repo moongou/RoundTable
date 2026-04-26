@@ -12,18 +12,22 @@ import shutil
 import subprocess
 import tempfile
 import time
+from array import array
+import wave
 from dataclasses import asdict
+from io import BytesIO
 
 import httpx
 from fastapi import APIRouter
 
 from app.api.v1.config_api import _semantic_voice_probe
 from app.config import (
-    AVAILABLE_PROVIDERS,
     LOCAL_SERVICE_DEFAULTS,
     PROVIDER_DEFAULTS,
     PROVIDER_NAMES,
     VOICE_SERVICE_META,
+    canonical_provider_id,
+    provider_candidate_ids,
     settings,
 )
 
@@ -36,6 +40,14 @@ _TEST_TEXT_LONG = "在这个充满挑战和机遇的时代，教育不仅是知�
 _LLM_TEST_PROMPT = "简述什么是批判性思维，不超过20个字"
 
 
+def _provider_config_value(provider_id: str, field_suffix: str, default: str = "") -> str:
+    for pid in provider_candidate_ids(provider_id):
+        value = getattr(settings, f"{pid}_{field_suffix}", "")
+        if value:
+            return value
+    return default
+
+
 def _synthesize_silent_wav(duration_sec: int = 2, sample_rate: int = 16000) -> bytes:
     import struct
 
@@ -45,6 +57,75 @@ def _synthesize_silent_wav(duration_sec: int = 2, sample_rate: int = 16000) -> b
     wav_data += b'data' + struct.pack('<I', samples * 2)
     wav_data += b'\x00' * (samples * 2)
     return wav_data
+
+
+def _wav_to_pcm16_mono_16k(wav_bytes: bytes) -> bytes:
+    with wave.open(BytesIO(wav_bytes), "rb") as wav_file:
+        if wav_file.getcomptype() != "NONE":
+            raise RuntimeError("仅支持未压缩 PCM WAV")
+        sample_rate = wav_file.getframerate() or 16000
+        sample_width = wav_file.getsampwidth() or 2
+        channels = wav_file.getnchannels() or 1
+        frames = wav_file.readframes(wav_file.getnframes())
+
+    def _decode_interleaved_mono(raw: bytes, width: int, ch: int) -> list[float]:
+        if width not in (1, 2, 3, 4):
+            raise RuntimeError(f"不支持的 WAV 位深: {width * 8}bit")
+
+        values: list[float] = []
+        frame_size = width * ch
+        if frame_size <= 0:
+            return values
+
+        total_frames = len(raw) // frame_size
+        for frame_idx in range(total_frames):
+            base = frame_idx * frame_size
+            accum = 0.0
+            for c in range(ch):
+                offset = base + c * width
+                if width == 1:
+                    v = (raw[offset] - 128) / 128.0
+                elif width == 2:
+                    s = int.from_bytes(raw[offset : offset + 2], "little", signed=True)
+                    v = s / 32768.0
+                elif width == 3:
+                    b0, b1, b2 = raw[offset], raw[offset + 1], raw[offset + 2]
+                    s = b0 | (b1 << 8) | (b2 << 16)
+                    if s & 0x800000:
+                        s -= 0x1000000
+                    v = s / 8388608.0
+                else:  # width == 4
+                    s = int.from_bytes(raw[offset : offset + 4], "little", signed=True)
+                    v = s / 2147483648.0
+                accum += v
+            values.append(accum / ch)
+        return values
+
+    def _resample_linear(samples: list[float], src_rate: int, dst_rate: int) -> list[float]:
+        if not samples or src_rate <= 0 or dst_rate <= 0 or src_rate == dst_rate:
+            return samples
+        dst_len = max(1, int(len(samples) * dst_rate / src_rate))
+        last = len(samples) - 1
+        out: list[float] = []
+        for i in range(dst_len):
+            src_pos = i * src_rate / dst_rate
+            left = int(src_pos)
+            if left >= last:
+                out.append(samples[last])
+                continue
+            right = left + 1
+            frac = src_pos - left
+            out.append(samples[left] + (samples[right] - samples[left]) * frac)
+        return out
+
+    mono = _decode_interleaved_mono(frames, sample_width, channels)
+    mono_16k = _resample_linear(mono, sample_rate, 16000)
+
+    pcm16 = array("h")
+    for s in mono_16k:
+        clamped = max(-1.0, min(1.0, s))
+        pcm16.append(int(round(clamped * 32767.0)))
+    return pcm16.tobytes()
 
 
 def _convert_audio_with_ffmpeg(audio_bytes: bytes, src_suffix: str, dst_suffix: str) -> bytes:
@@ -88,6 +169,28 @@ def _convert_audio_with_ffmpeg(audio_bytes: bytes, src_suffix: str, dst_suffix: 
 async def _build_asr_test_audio(text: str = _TEST_TEXT_SHORT) -> tuple[bytes, str]:
     from app.voice.factory import create_tts_provider
 
+    async def _synthesize_edge_tts_wav(sample_text: str) -> bytes:
+        base_url = settings.edge_tts_url or LOCAL_SERVICE_DEFAULTS.get("edge_tts", {}).get("url", "http://localhost:5051")
+        payload = {
+            "model": "tts-1",
+            "input": sample_text,
+            "voice": "zh-CN-XiaoxiaoNeural",
+            "response_format": "wav",
+        }
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/v1/audio/speech",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+            audio = resp.content
+            if not audio.startswith(b"RIFF"):
+                raise RuntimeError("edge_tts 未返回 WAV 数据")
+            return audio
+
+    has_ffmpeg = bool(shutil.which("ffmpeg"))
+
     try:
         tts = create_tts_provider("edge_tts")
         audio = b""
@@ -101,15 +204,24 @@ async def _build_asr_test_audio(text: str = _TEST_TEXT_SHORT) -> tuple[bytes, st
                 await asyncio.sleep(0.2)
         if not audio:
             raise last_error or RuntimeError("edge_tts returned empty audio")
-        if shutil.which("ffmpeg"):
+        if audio.startswith(b"RIFF"):
+            return _wav_to_pcm16_mono_16k(audio), "pcm"
+        if has_ffmpeg:
             try:
-                return _convert_audio_with_ffmpeg(audio, ".mp3", ".wav"), "wav"
+                wav_audio = _convert_audio_with_ffmpeg(audio, ".mp3", ".wav")
+                return _wav_to_pcm16_mono_16k(wav_audio), "pcm"
             except Exception as e:
-                logger.warning("ASR benchmark 音频转码失败，回退到 mp3: %s", e)
-        return audio, "mp3"
+                logger.warning("ASR benchmark 音频转码失败，尝试直出 WAV: %s", e)
+
+        try:
+            wav_audio = await _synthesize_edge_tts_wav(text)
+            return _wav_to_pcm16_mono_16k(wav_audio), "pcm"
+        except Exception as e:
+            logger.warning("ASR benchmark WAV 样本生成失败，回退到静音 WAV: %s", e)
+            return _wav_to_pcm16_mono_16k(_synthesize_silent_wav()), "pcm"
     except Exception as e:
         logger.warning("ASR benchmark TTS 样本生成失败，回退到静音 WAV: %s", e)
-        return _synthesize_silent_wav(), "wav"
+        return _wav_to_pcm16_mono_16k(_synthesize_silent_wav()), "pcm"
 
 
 async def _measure_latency(coro, rounds: int = 3) -> dict:
@@ -205,24 +317,34 @@ async def _benchmark_one_asr(service_id: str, url: str, rounds: int) -> dict:
 
 
 async def _benchmark_one_llm(provider_id: str, rounds: int) -> dict:
-    """基准测试单个 LLM 提供商的响应延迟。使用 httpx 直接调用 OpenAI-兼容 API。"""
-    provider_name = PROVIDER_NAMES.get(provider_id, provider_id)
+    """基准测试单个 LLM 提供商的响应延迟。"""
+    canonical_id = canonical_provider_id(provider_id)
+    provider_name = PROVIDER_NAMES.get(canonical_id, canonical_id)
+
+    if canonical_id in {"anthropic", "gemini"}:
+        return {
+            "provider": canonical_id,
+            "provider_name": provider_name,
+            "model": _provider_config_value(canonical_id, "model", PROVIDER_DEFAULTS.get(canonical_id, {}).get("model", "")),
+            "status": "skipped",
+            "reason": "当前测速仅支持 OpenAI 兼容接口，请先使用连接测试验证该供应商。",
+        }
 
     # 获取配置
-    api_key = getattr(settings, f"{provider_id}_api_key", "")
-    base_url = getattr(settings, f"{provider_id}_base_url", "")
-    model = getattr(settings, f"{provider_id}_model", "")
+    api_key = _provider_config_value(canonical_id, "api_key", "")
+    base_url = _provider_config_value(canonical_id, "base_url", "")
+    model = _provider_config_value(canonical_id, "model", "")
 
     if not model:
-        defaults = PROVIDER_DEFAULTS.get(provider_id, {})
+        defaults = PROVIDER_DEFAULTS.get(canonical_id, {})
         model = defaults.get("model", "")
 
     # Ollama 不需要 API Key
-    if provider_id == "ollama":
+    if canonical_id == "ollama":
         api_key = api_key or "ollama"
     elif not api_key or api_key in ("sk-xxx", "your-api-key", ""):
         return {
-            "provider": provider_id,
+            "provider": canonical_id,
             "provider_name": provider_name,
             "model": model,
             "status": "skipped",
@@ -231,7 +353,7 @@ async def _benchmark_one_llm(provider_id: str, rounds: int) -> dict:
 
     if not base_url:
         return {
-            "provider": provider_id,
+            "provider": canonical_id,
             "provider_name": provider_name,
             "model": model,
             "status": "skipped",
@@ -239,61 +361,57 @@ async def _benchmark_one_llm(provider_id: str, rounds: int) -> dict:
         }
 
     latencies = []
-    first_token_latencies = []
     errors = []
 
     for _ in range(rounds):
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                headers = {"Authorization": f"Bearer {api_key}"}
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
                 body = {
                     "model": model,
                     "messages": [{"role": "user", "content": _LLM_TEST_PROMPT}],
                     "max_tokens": 50,
-                    "stream": True,
+                    "stream": False,
                 }
                 url = f"{base_url.rstrip('/')}/chat/completions"
 
                 t0 = time.perf_counter()
-                first_token_time = None
-
-                async with client.stream("POST", url, json=body, headers=headers) as resp:
-                    if resp.status_code != 200:
-                        error_body = await resp.aread()
-                        errors.append(f"HTTP {resp.status_code}: {error_body.decode()[:200]}")
-                        continue
-                    async for line in resp.aiter_lines():
-                        if line.startswith("data: ") and line != "data: [DONE]":
-                            if first_token_time is None:
-                                first_token_time = (time.perf_counter() - t0) * 1000
-
+                resp = await client.post(url, json=body, headers=headers)
                 total_ms = (time.perf_counter() - t0) * 1000
+                if resp.status_code != 200:
+                    error_body = (resp.text or "")[:200]
+                    errors.append(f"HTTP {resp.status_code}: {error_body}")
+                    continue
+
+                payload = resp.json() if resp.content else {}
+                if not isinstance(payload, dict) or not payload.get("choices"):
+                    errors.append("响应格式异常：缺少 choices")
+                    continue
+
                 latencies.append(total_ms)
-                if first_token_time is not None:
-                    first_token_latencies.append(first_token_time)
         except Exception as e:
             errors.append(str(e)[:200])
 
     result = {
-        "provider": provider_id,
+        "provider": canonical_id,
         "provider_name": provider_name,
         "model": model,
     }
 
     if latencies:
+        avg_ms = round(sum(latencies) / len(latencies), 1)
         result.update({
             "status": "ok",
-            "total_avg_ms": round(sum(latencies) / len(latencies), 1),
-            "total_min_ms": round(min(latencies), 1),
-            "total_max_ms": round(max(latencies), 1),
+            "avg_ms": avg_ms,
+            "min_ms": round(min(latencies), 1),
+            "max_ms": round(max(latencies), 1),
             "rounds": len(latencies),
             "errors": len(errors),
+            "first_token_avg_ms": avg_ms,
         })
-        if first_token_latencies:
-            result["first_token_avg_ms"] = round(
-                sum(first_token_latencies) / len(first_token_latencies), 1
-            )
-            result["first_token_min_ms"] = round(min(first_token_latencies), 1)
     else:
         result.update({
             "status": "error",
@@ -343,33 +461,26 @@ async def benchmark_asr(rounds: int = 3, services: list[str] | None = None):
 
 @router.post("/llm")
 async def benchmark_llm(rounds: int = 2, providers: list[str] | None = None):
-    """基准测试 LLM 提供商响应延迟。自动扫描所有已配置（API Key 非空）的提供商。"""
+    """基准测试 LLM 提供商响应延迟。默认仅测试当前启用供应商。"""
     if providers:
-        target = providers
+        target = list(
+            dict.fromkeys(
+                canonical_provider_id((provider_id or "").strip())
+                for provider_id in providers
+                if (provider_id or "").strip()
+            )
+        )
     else:
-        # 自动扫描所有已配置 API Key 的提供商
-        target = []
-        for pid in AVAILABLE_PROVIDERS:
-            api_key = getattr(settings, f"{pid}_api_key", "")
-            if pid == "ollama":
-                # Ollama 本地不需要 API Key，但检查 base_url 是否配置
-                base_url = getattr(settings, f"{pid}_base_url", "")
-                if base_url:
-                    target.append(pid)
-            elif api_key and api_key not in ("sk-xxx", "your-api-key", ""):
-                target.append(pid)
-        # 确保当前使用的提供商在列表中
-        if settings.llm_provider not in target:
-            target.insert(0, settings.llm_provider)
+        target = [canonical_provider_id(settings.llm_provider)]
 
     results = await asyncio.gather(
         *[_benchmark_one_llm(p, rounds) for p in target]
     )
     results = list(results)
 
-    # 排序：按首 token 延迟
+    # 排序：按平均耗时
     ok_results = [r for r in results if r.get("status") == "ok"]
-    ok_results.sort(key=lambda r: r.get("first_token_avg_ms", r.get("total_avg_ms", 99999)))
+    ok_results.sort(key=lambda r: r.get("avg_ms", 99999))
     recommended = ok_results[0]["provider"] if ok_results else None
 
     return {"results": results, "recommended": recommended}
@@ -461,6 +572,7 @@ async def test_voice_service(service_id: str, service_type: str, text: str = _TE
     elif service_type == "asr":
         try:
             from app.voice.factory import create_asr_provider
+
             provider = create_asr_provider(service_id)
             available = await provider.is_available()
             result["available"] = available
@@ -483,27 +595,51 @@ async def deep_test_voice_service(service_id: str, service_type: str):
             "expected_text": sample_text,
         }
         try:
-            from app.voice.factory import create_tts_provider, create_asr_provider
+            from app.voice.factory import create_asr_provider
 
             audio, audio_format = await _build_asr_test_audio(sample_text)
 
-            asr = create_asr_provider(service_id)
-            t0 = time.perf_counter()
-            recognized = await asr.transcribe(audio, format=audio_format)
-            elapsed_ms = (time.perf_counter() - t0) * 1000
+            candidates = [service_id]
+            if service_id == "capswriter":
+                candidates.append("vosk")
+            elif service_id == "vosk":
+                candidates.append("capswriter")
 
-            normalized_expected = sample_text.replace("。", "").replace("，", "")
-            normalized_recognized = (recognized or "").replace("。", "").replace("，", "")
-            match = 0.0
-            if normalized_expected:
-                same = sum(1 for c in normalized_expected if c in normalized_recognized)
-                match = round(same / max(len(normalized_expected), 1) * 100, 1)
+            attempts: list[dict] = []
+            last_error = ""
+
+            for candidate in candidates:
+                t0 = time.perf_counter()
+                try:
+                    asr = create_asr_provider(candidate)
+                    recognized = await asr.transcribe(audio, format=audio_format)
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+                    normalized_expected = sample_text.replace("。", "").replace("，", "")
+                    normalized_recognized = (recognized or "").replace("。", "").replace("，", "")
+                    match = 0.0
+                    if normalized_expected:
+                        same = sum(1 for c in normalized_expected if c in normalized_recognized)
+                        match = round(same / max(len(normalized_expected), 1) * 100, 1)
+
+                    result.update({
+                        "status": "ok",
+                        "recognized_text": recognized,
+                        "latency_ms": round(elapsed_ms, 1),
+                        "match_percent": match,
+                        "provider_used": candidate,
+                        "fallback_used": candidate != service_id,
+                        "attempts": attempts,
+                    })
+                    return result
+                except Exception as e:
+                    last_error = str(e)
+                    attempts.append({"service": candidate, "error": last_error})
 
             result.update({
-                "status": "ok",
-                "recognized_text": recognized,
-                "latency_ms": round(elapsed_ms, 1),
-                "match_percent": match,
+                "status": "error",
+                "error": last_error or "ASR deep test failed",
+                "attempts": attempts,
             })
         except Exception as e:
             result.update({"status": "error", "error": str(e)})

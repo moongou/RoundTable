@@ -15,6 +15,7 @@ const PORT = 8888;
 const ROOT = __dirname;
 const BACKEND_DIR = path.join(ROOT, 'backend');
 const FRONTEND_DIR = path.join(ROOT, 'frontend');
+const MEETING_HISTORY_DIR = path.join(BACKEND_DIR, 'runtime', 'meeting_history');
 
 // ── 进程管理 ──────────────────────────────────────────────
 const processes = {
@@ -47,11 +48,25 @@ function startBackend() {
     broadcastStatus();
     return { ok: false, msg: '端口 8001 已被占用，请先停止再重试' };
   }
-  const venvPy = path.join(BACKEND_DIR, 'venv', 'bin', 'python');
-  const pyBin = fs.existsSync(venvPy) ? venvPy : 'python3';
-  const proc = spawn(pyBin, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', '8001'], {
-    cwd: BACKEND_DIR,
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+  const rootVenvPy = path.join(ROOT, '.venv', 'bin', 'python');
+  const backendVenvPy = path.join(BACKEND_DIR, 'venv', 'bin', 'python');
+  const pyBin = fs.existsSync(rootVenvPy)
+    ? rootVenvPy
+    : (fs.existsSync(backendVenvPy) ? backendVenvPy : 'python3');
+  const envFile = path.join(BACKEND_DIR, '.env');
+  const args = [
+    '-m', 'uvicorn',
+    'app.main:app',
+    '--app-dir', BACKEND_DIR,
+    '--host', '0.0.0.0',
+    '--port', '8001',
+  ];
+  if (fs.existsSync(envFile)) {
+    args.splice(5, 0, '--env-file', envFile);
+  }
+  const proc = spawn(pyBin, args, {
+    cwd: ROOT,
+    env: { ...process.env, PYTHONUNBUFFERED: '1', DEBUG: process.env.DEBUG || 'false' },
   });
   processes.backend.proc = proc;
   proc.stdout.on('data', d => d.toString().split('\n').filter(Boolean).forEach(l => log('backend', l)));
@@ -273,6 +288,57 @@ function httpGet(reqUrl) {
   });
 }
 
+function safeHistoryId(sessionId) {
+  return String(sessionId || '').trim().replace(/[^A-Za-z0-9._-]+/g, '_');
+}
+
+function readJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function listMeetingHistories() {
+  if (!fs.existsSync(MEETING_HISTORY_DIR)) return [];
+  return fs.readdirSync(MEETING_HISTORY_DIR, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => {
+      const summaryPath = path.join(MEETING_HISTORY_DIR, entry.name, 'summary.json');
+      if (!fs.existsSync(summaryPath)) return null;
+      try {
+        return readJsonFile(summaryPath);
+      } catch (e) {
+        return {
+          session_id: entry.name,
+          safe_session_id: entry.name,
+          status: 'error',
+          updated_at: '',
+          last_event_preview: 'summary.json 读取失败: ' + e.message,
+        };
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+}
+
+function readMeetingHistory(sessionId) {
+  const safeId = safeHistoryId(sessionId);
+  const sessionDir = path.join(MEETING_HISTORY_DIR, safeId);
+  const summaryPath = path.join(sessionDir, 'summary.json');
+  const eventsPath = path.join(sessionDir, 'events.jsonl');
+  if (!fs.existsSync(summaryPath)) {
+    const err = new Error('history_not_found');
+    err.code = 'ENOENT';
+    throw err;
+  }
+  const summary = readJsonFile(summaryPath);
+  const events = fs.existsSync(eventsPath)
+    ? fs.readFileSync(eventsPath, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map(line => JSON.parse(line))
+    : [];
+  return { summary, events };
+}
+
 // ── Dashboard HTML ────────────────────────────────────────
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -351,9 +417,56 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .runtime-col + .runtime-col{border-left:1px solid rgba(15,52,96,0.75);padding-left:20px}
   .health-grid{margin-top:10px;background:#0d0d1a;border:1px solid #0f3460;border-radius:8px;overflow:hidden}
   .health-empty{padding:14px;color:#666;text-align:center}
+  .history-split{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px;align-items:start}
+  .history-list,.history-detail{background:#0d0d1a;border:1px solid #0f3460;border-radius:10px;min-height:280px}
+  .history-list{padding:10px;display:flex;flex-direction:column;gap:10px;max-height:620px;overflow:auto}
+  .history-item{border:1px solid rgba(27,51,95,0.9);border-radius:10px;padding:12px 14px;background:linear-gradient(180deg,rgba(17,25,47,0.92),rgba(11,17,32,0.96));cursor:pointer;transition:border-color .2s,transform .2s}
+  .history-item:hover{border-color:#80cbc4;transform:translateY(-1px)}
+  .history-item.active{border-color:#d4a017;box-shadow:0 0 0 1px rgba(212,160,23,0.25) inset}
+  .history-topic{font-size:13px;color:#f3f5ff;font-weight:700;line-height:1.5;margin-bottom:8px}
+  .history-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#8b98b7;margin-bottom:8px}
+  .history-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid #244274;background:#10203d;color:#c9d4f2}
+  .history-pill.ok{border-color:#2f7a46;color:#7edb92;background:#112619}
+  .history-pill.warn{border-color:#8a6825;color:#ffd976;background:#2b2212}
+  .history-pill.fail{border-color:#874040;color:#ffb1b1;background:#2b1616}
+  .history-preview{font-size:11px;line-height:1.6;color:#aab2c8}
+  .history-detail{padding:16px;overflow:auto}
+  .history-detail-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .history-detail-title{font-size:18px;color:#f3f5ff;font-weight:700;line-height:1.5}
+  .history-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:14px}
+  .history-summary-card{border:1px solid rgba(27,51,95,0.9);border-radius:10px;background:#11192f;padding:12px}
+  .history-summary-label{font-size:11px;color:#7f90b5;margin-bottom:4px}
+  .history-summary-value{font-size:13px;color:#e5ebff;line-height:1.5;word-break:break-word}
+  .history-events{display:flex;flex-direction:column;gap:10px}
+  .history-event{border:1px solid rgba(27,51,95,0.7);border-radius:10px;padding:12px;background:rgba(17,25,47,0.75)}
+  .history-event-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;font-size:11px;color:#8b98b7}
+  .history-event-body{font-size:12px;line-height:1.7;color:#e5ebff;white-space:pre-wrap;word-break:break-word}
+  .history-json{margin-top:8px;padding:10px;border-radius:8px;background:#09101d;border:1px solid rgba(27,51,95,0.7);font-size:11px;color:#9db0db;overflow:auto}
+  .history-empty{display:flex;align-items:center;justify-content:center;min-height:220px;padding:16px;color:#5f6f95;font-size:12px;text-align:center}
+  .history-filter-panel{margin-bottom:14px;padding:14px;border-radius:14px;border:1px solid rgba(36,66,116,0.92);background:linear-gradient(180deg,rgba(10,19,35,0.96),rgba(15,28,52,0.88))}
+  .history-filter-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .history-filter-title{font-size:11px;color:#f6e3a5;font-weight:700;letter-spacing:2px}
+  .history-filter-summary{font-size:11px;color:#93a8d3;line-height:1.6}
+  .history-filter-clear{border:1px solid #34588f;background:#10203d;color:#dce8ff;padding:7px 12px;border-radius:999px;font-size:11px}
+  .history-filter-clear:hover{border-color:#80cbc4;color:#f0fffc}
+  .history-filter-clear:disabled{opacity:.42;cursor:default;border-color:#244274;color:#6c7ea5}
+  .history-filter-groups{display:flex;flex-direction:column;gap:12px}
+  .history-filter-group{display:flex;flex-direction:column;gap:8px}
+  .history-filter-label{font-size:10px;color:#7088b6;font-weight:700;letter-spacing:1.8px;text-transform:uppercase}
+  .history-filter-chips{display:flex;flex-wrap:wrap;gap:8px}
+  .history-filter-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;border:1px solid #1c3762;background:#0f1b35;color:#c6d4f4;font-size:11px;cursor:pointer;transition:transform .18s,border-color .18s,background .18s,color .18s}
+  .history-filter-chip:hover{transform:translateY(-1px);border-color:#80cbc4;color:#f0fffc}
+  .history-filter-chip.active{background:linear-gradient(135deg,rgba(110,75,31,0.92),rgba(38,59,104,0.94));border-color:#d4a017;color:#fff3cb;box-shadow:0 0 0 1px rgba(212,160,23,0.22) inset}
+  .history-filter-chip-count{font-size:10px;opacity:.72}
+  .history-event-raw{color:#5f6f95}
+  .history-event-tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 0}
+  .history-mini-pill{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;border:1px solid rgba(52,88,143,0.68);background:rgba(16,32,61,0.86);color:#cfe0ff;font-size:10px;line-height:1.2}
+  .history-mini-pill.active{border-color:#d4a017;background:rgba(80,56,19,0.92);color:#fff1c8}
+  .history-empty-note{min-height:160px;flex-direction:column;gap:12px}
   @media (max-width: 1080px){
     .runtime-split{grid-template-columns:1fr}
     .runtime-col + .runtime-col{border-left:none;border-top:1px solid rgba(15,52,96,0.75);padding-left:0;padding-top:18px}
+    .history-split{grid-template-columns:1fr}
   }
   .footer{margin-top:24px;color:#444;font-size:12px}
 </style>
@@ -394,6 +507,21 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="health-grid" id="health-grid">
           <div class="health-empty">加载中…</div>
         </div>
+      </section>
+    </div>
+  </div>
+  <div class="card" id="card-history">
+    <div class="card-title">
+      🗂 历史发言记录板
+      <span class="status-label" id="history-summary">加载中…</span>
+      <button class="btn-refresh" onclick="refreshMeetingHistory()" style="margin-left:auto">🔄 刷新</button>
+    </div>
+    <div class="history-split">
+      <aside class="history-list" id="history-list">
+        <div class="history-empty">正在读取会议历史…</div>
+      </aside>
+      <section class="history-detail" id="history-detail">
+        <div class="history-empty">选择左侧一场会议以查看完整时间线。</div>
       </section>
     </div>
   </div>
@@ -521,6 +649,483 @@ function renderHealth(data) {
 function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 refreshHealth();
 
+var activeMeetingHistoryId = '';
+var currentMeetingHistoryRecord = null;
+var ALL_MEETING_FILTER_VALUE = '__all__';
+var meetingHistoryFilters = {
+  speaker: ALL_MEETING_FILTER_VALUE,
+  eventType: ALL_MEETING_FILTER_VALUE,
+};
+
+function resetMeetingHistoryFilters() {
+  meetingHistoryFilters = {
+    speaker: ALL_MEETING_FILTER_VALUE,
+    eventType: ALL_MEETING_FILTER_VALUE,
+  };
+}
+
+function formatMeetingTime(value) {
+  if (!value) return '-';
+  var date = new Date(value);
+  if (isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function meetingStatusClass(status) {
+  if (status === 'completed') return 'ok';
+  if (status === 'running' || status === 'disconnected') return 'warn';
+  return 'fail';
+}
+
+function meetingStatusLabel(status) {
+  if (status === 'completed') return '已完成';
+  if (status === 'running') return '进行中';
+  if (status === 'disconnected') return '连接断开';
+  if (status === 'error') return '异常结束';
+  return status || '未知状态';
+}
+
+function meetingDirectionLabel(direction) {
+  if (direction === 'outbound') return '后端→前端';
+  if (direction === 'inbound') return '前端→后端';
+  if (direction === 'internal') return '内部记录';
+  return direction || 'unknown';
+}
+
+function prettyMeetingEventType(entryType) {
+  var labels = {
+    message: '发言消息',
+    stream: '流式片段',
+    turn_change: '轮次切换',
+    human_input_requested: '请求用户发言',
+    human_input: '用户输入',
+    state_change: '状态变化',
+    phase_telemetry: '阶段遥测',
+    interrupt: '打断',
+    system: '系统消息',
+    session_config: '会话配置',
+    designate_speaker: '指定发言者',
+    push_to_talk_start: '按住说话开始',
+    push_to_talk_end: '按住说话结束',
+    asr_status: 'ASR 状态',
+    pause: '暂停',
+    resume: '恢复',
+    send_drop: '发送丢弃',
+    ended: '会话结束',
+    error: '错误',
+    api_error: '接口错误',
+  };
+  return labels[entryType] || entryType || 'unknown';
+}
+
+function extractMeetingEventSpeakers(event) {
+  var data = event && event.data ? event.data : {};
+  var speakers = [];
+  var seen = {};
+
+  function pushSpeaker(value) {
+    var normalized = String(value || '').trim();
+    if (!normalized || seen[normalized]) return;
+    seen[normalized] = true;
+    speakers.push(normalized);
+  }
+
+  switch (event && event.entry_type) {
+    case 'message':
+      pushSpeaker(data.source);
+      break;
+    case 'stream':
+      pushSpeaker(data.source || data.speaker);
+      break;
+    case 'human_input':
+    case 'human_input_requested':
+    case 'turn_change':
+    case 'push_to_talk_start':
+    case 'push_to_talk_end':
+    case 'asr_status':
+    case 'state_change':
+      pushSpeaker(data.speaker);
+      break;
+    case 'interrupt':
+      pushSpeaker(data.interrupter);
+      pushSpeaker(data.interrupted_speaker);
+      pushSpeaker(data.approved_by);
+      break;
+    case 'phase_telemetry':
+      pushSpeaker(data.speaker);
+      pushSpeaker(data.designate_target);
+      break;
+    case 'designate_speaker':
+      pushSpeaker(data.target);
+      pushSpeaker(data.speaker);
+      break;
+    default:
+      break;
+  }
+
+  return speakers;
+}
+
+function buildMeetingHistorySpeakerStats(summary, events) {
+  var counts = {};
+  if (summary && Array.isArray(summary.participants)) {
+    summary.participants.forEach(function(name) {
+      var normalized = String(name || '').trim();
+      if (!normalized || counts.hasOwnProperty(normalized)) return;
+      counts[normalized] = 0;
+    });
+  }
+  events.forEach(function(event) {
+    extractMeetingEventSpeakers(event).forEach(function(name) {
+      counts[name] = (counts[name] || 0) + 1;
+    });
+  });
+
+  return Object.keys(counts)
+    .map(function(name) {
+      return { name: name, count: counts[name] || 0 };
+    })
+    .sort(function(a, b) {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.name.localeCompare(b.name, 'zh-CN');
+    });
+}
+
+function buildMeetingHistoryTypeStats(events) {
+  var counts = {};
+  var order = [
+    'message',
+    'stream',
+    'turn_change',
+    'human_input_requested',
+    'human_input',
+    'state_change',
+    'phase_telemetry',
+    'interrupt',
+    'system',
+    'session_config',
+    'designate_speaker',
+    'push_to_talk_start',
+    'push_to_talk_end',
+    'asr_status',
+    'pause',
+    'resume',
+    'send_drop',
+    'ended',
+    'error',
+    'api_error',
+  ];
+
+  events.forEach(function(event) {
+    var type = String(event && event.entry_type || '').trim();
+    if (!type) return;
+    counts[type] = (counts[type] || 0) + 1;
+  });
+
+  return Object.keys(counts)
+    .map(function(type) {
+      return { type: type, count: counts[type] };
+    })
+    .sort(function(a, b) {
+      var indexA = order.indexOf(a.type);
+      var indexB = order.indexOf(b.type);
+      if (indexA === -1) indexA = order.length + 1;
+      if (indexB === -1) indexB = order.length + 1;
+      if (indexA !== indexB) return indexA - indexB;
+      return a.type.localeCompare(b.type);
+    });
+}
+
+function eventMatchesMeetingHistoryFilters(event) {
+  if (meetingHistoryFilters.eventType !== ALL_MEETING_FILTER_VALUE && event.entry_type !== meetingHistoryFilters.eventType) {
+    return false;
+  }
+  if (meetingHistoryFilters.speaker !== ALL_MEETING_FILTER_VALUE) {
+    return extractMeetingEventSpeakers(event).indexOf(meetingHistoryFilters.speaker) >= 0;
+  }
+  return true;
+}
+
+function buildMeetingHistoryFilterChip(filterKind, value, label, count, active) {
+  var encodedValue = encodeURIComponent(String(value || ''));
+  var handler = filterKind === 'speaker'
+    ? 'setMeetingHistorySpeakerFilter'
+    : 'setMeetingHistoryEventTypeFilter';
+  return '' +
+    '<button type="button" class="history-filter-chip' + (active ? ' active' : '') + '" onclick="' + handler + '(decodeURIComponent(&quot;' + encodedValue + '&quot;))">' +
+      '<span>' + escHtml(label) + '</span>' +
+      '<span class="history-filter-chip-count">' + escHtml(String(count)) + '</span>' +
+    '</button>';
+}
+
+function activeMeetingHistoryFilterSummary() {
+  var parts = [];
+  if (meetingHistoryFilters.speaker !== ALL_MEETING_FILTER_VALUE) {
+    parts.push('人物：' + meetingHistoryFilters.speaker);
+  }
+  if (meetingHistoryFilters.eventType !== ALL_MEETING_FILTER_VALUE) {
+    parts.push('类型：' + prettyMeetingEventType(meetingHistoryFilters.eventType));
+  }
+  return parts.length ? parts.join(' ｜ ') : '未启用筛选';
+}
+
+function renderMeetingHistoryFilterPanel(summary, events, filteredEvents) {
+  var speakerStats = buildMeetingHistorySpeakerStats(summary, events);
+  var typeStats = buildMeetingHistoryTypeStats(events);
+  var filtersActive = meetingHistoryFilters.speaker !== ALL_MEETING_FILTER_VALUE ||
+    meetingHistoryFilters.eventType !== ALL_MEETING_FILTER_VALUE;
+
+  return '' +
+    '<div class="history-filter-panel">' +
+      '<div class="history-filter-toolbar">' +
+        '<div>' +
+          '<div class="history-filter-title">调试筛选</div>' +
+          '<div class="history-filter-summary">显示 ' + escHtml(String(filteredEvents.length)) + ' / ' + escHtml(String(events.length)) + ' 条事件 · ' + escHtml(activeMeetingHistoryFilterSummary()) + '</div>' +
+        '</div>' +
+        '<button type="button" class="history-filter-clear" onclick="clearMeetingHistoryFilters()"' + (filtersActive ? '' : ' disabled') + '>清除筛选</button>' +
+      '</div>' +
+      '<div class="history-filter-groups">' +
+        '<div class="history-filter-group">' +
+          '<div class="history-filter-label">Speaker</div>' +
+          '<div class="history-filter-chips">' +
+            buildMeetingHistoryFilterChip('speaker', ALL_MEETING_FILTER_VALUE, '全部人物', events.length, meetingHistoryFilters.speaker === ALL_MEETING_FILTER_VALUE) +
+            speakerStats.map(function(item) {
+              return buildMeetingHistoryFilterChip('speaker', item.name, item.name, item.count, meetingHistoryFilters.speaker === item.name);
+            }).join('') +
+          '</div>' +
+        '</div>' +
+        '<div class="history-filter-group">' +
+          '<div class="history-filter-label">Event Type</div>' +
+          '<div class="history-filter-chips">' +
+            buildMeetingHistoryFilterChip('eventType', ALL_MEETING_FILTER_VALUE, '全部事件', events.length, meetingHistoryFilters.eventType === ALL_MEETING_FILTER_VALUE) +
+            typeStats.map(function(item) {
+              return buildMeetingHistoryFilterChip('eventType', item.type, prettyMeetingEventType(item.type), item.count, meetingHistoryFilters.eventType === item.type);
+            }).join('') +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+function renderMeetingEventSpeakerTags(event) {
+  var speakers = extractMeetingEventSpeakers(event);
+  if (!speakers.length) return '';
+  return '<div class="history-event-tags">' + speakers.map(function(name) {
+    var active = meetingHistoryFilters.speaker === name;
+    return '<span class="history-mini-pill' + (active ? ' active' : '') + '">' + escHtml(name) + '</span>';
+  }).join('') + '</div>';
+}
+
+function buildMeetingProcessIndexMap(events) {
+  var map = new Map();
+  (Array.isArray(events) ? events : []).forEach(function(event, index) {
+    map.set(event, index + 1);
+  });
+  return map;
+}
+
+function setMeetingHistorySpeakerFilter(value) {
+  meetingHistoryFilters.speaker = value || ALL_MEETING_FILTER_VALUE;
+  if (currentMeetingHistoryRecord) renderMeetingHistoryDetail(currentMeetingHistoryRecord);
+}
+
+function setMeetingHistoryEventTypeFilter(value) {
+  meetingHistoryFilters.eventType = value || ALL_MEETING_FILTER_VALUE;
+  if (currentMeetingHistoryRecord) renderMeetingHistoryDetail(currentMeetingHistoryRecord);
+}
+
+function clearMeetingHistoryFilters() {
+  resetMeetingHistoryFilters();
+  if (currentMeetingHistoryRecord) renderMeetingHistoryDetail(currentMeetingHistoryRecord);
+}
+
+function summarizeMeetingEvent(event) {
+  var data = event && event.data ? event.data : {};
+  if (event.entry_type === 'message') {
+    return ((data.source || '未知发言者') + '：' + (data.content || '')).trim();
+  }
+  if (event.entry_type === 'human_input') {
+    return ((data.speaker || '用户') + '：' + (data.content || '')).trim();
+  }
+  if (event.entry_type === 'turn_change') {
+    return '轮到 ' + (data.speaker || '未知角色') + ' 发言';
+  }
+  if (event.entry_type === 'human_input_requested') {
+    return '等待 ' + (data.speaker || '用户') + ' 发言';
+  }
+  if (event.entry_type === 'state_change') {
+    return (data.old_label || data.old_state || '未知状态') + ' → ' + (data.new_label || data.new_state || '未知状态');
+  }
+  if (event.entry_type === 'interrupt') {
+    return (data.interrupter || '有人') + ' 打断了 ' + (data.interrupted_speaker || '当前发言者');
+  }
+  if (event.entry_type === 'session_config') {
+    return '会话初始化：' + ((data.topic_id || data.free_topic || '未命名话题') + ' ｜ max_turns=' + (data.max_turns || '-'));
+  }
+  if (event.entry_type === 'phase_telemetry') {
+    return (data.phase || 'unknown') + (data.reason ? ' ｜ ' + data.reason : '') + (data.speaker ? ' ｜ ' + data.speaker : '');
+  }
+  if (event.entry_type === 'system') {
+    return data.message || '系统消息';
+  }
+  if (event.entry_type === 'push_to_talk_start') {
+    return (data.speaker || '用户') + ' 开始按住说话';
+  }
+  if (event.entry_type === 'push_to_talk_end') {
+    return (data.speaker || '用户') + ' 结束按住说话';
+  }
+  if (event.entry_type === 'asr_status') {
+    return (data.speaker || '用户') + ' 的 ASR 状态：' + (data.status || 'unknown') + (data.provider ? ' ｜ ' + data.provider : '');
+  }
+  if (event.entry_type === 'designate_speaker') {
+    return '指定下一位发言者：' + (data.target || data.speaker || 'unknown');
+  }
+  if (event.entry_type === 'send_drop') {
+    return '发送丢弃：' + (data.reason || 'unknown') + ' ｜ ' + (data.event_type || 'unknown');
+  }
+  if (event.entry_type === 'error' || event.entry_type === 'api_error') {
+    return data.message || '发生错误';
+  }
+  if (event.entry_type === 'ended') {
+    return data.message || '会话结束';
+  }
+  return JSON.stringify(data, null, 2);
+}
+
+function renderMeetingHistoryList(items) {
+  var listEl = document.getElementById('history-list');
+  var detailEl = document.getElementById('history-detail');
+  var summaryEl = document.getElementById('history-summary');
+  if (!Array.isArray(items) || items.length === 0) {
+    listEl.innerHTML = '<div class="history-empty">还没有持久化的会议记录。下一次讨论开始后，这里会自动出现完整时间线。</div>';
+    detailEl.innerHTML = '<div class="history-empty">暂无会议记录可查看。</div>';
+    summaryEl.textContent = '暂无记录';
+    summaryEl.style.color = '#5f6f95';
+    activeMeetingHistoryId = '';
+    return;
+  }
+
+  summaryEl.textContent = items.length + ' 场会议';
+  summaryEl.style.color = '#80cbc4';
+  if (!items.some(function(item) { return item.session_id === activeMeetingHistoryId; })) {
+    activeMeetingHistoryId = items[0].session_id;
+  }
+
+  listEl.innerHTML = items.map(function(item) {
+    var topicTitle = item.topic && item.topic.title ? item.topic.title : (item.config && item.config.free_topic) || item.session_id;
+    var participants = Array.isArray(item.participants) ? item.participants.join(' · ') : '-';
+    var preview = item.last_event_preview || '暂无事件预览';
+    var encodedSessionId = encodeURIComponent(item.session_id || '');
+    return '' +
+      '<div class="history-item' + (item.session_id === activeMeetingHistoryId ? ' active' : '') + '" data-session-id="' + escHtml(item.session_id) + '" onclick="openMeetingHistory(decodeURIComponent(&quot;' + encodedSessionId + '&quot;))">' +
+        '<div class="history-topic">' + escHtml(topicTitle) + '</div>' +
+        '<div class="history-meta">' +
+          '<span class="history-pill ' + meetingStatusClass(item.status) + '">' + escHtml(meetingStatusLabel(item.status)) + '</span>' +
+          '<span class="history-pill">' + escHtml(String(item.event_count || 0)) + ' 条</span>' +
+          '<span class="history-pill">' + escHtml(formatMeetingTime(item.updated_at)) + '</span>' +
+        '</div>' +
+        '<div class="history-preview">' + escHtml(preview) + '</div>' +
+        '<div class="history-preview" style="margin-top:8px;color:#7787ad">参与者：' + escHtml(participants) + '</div>' +
+      '</div>';
+  }).join('');
+}
+
+function renderMeetingHistoryDetail(record) {
+  var detailEl = document.getElementById('history-detail');
+  var summary = record && record.summary ? record.summary : {};
+  var events = Array.isArray(record && record.events) ? record.events : [];
+  var filteredEvents = events.filter(eventMatchesMeetingHistoryFilters);
+  var processIndexMap = buildMeetingProcessIndexMap(events);
+  var topicTitle = summary.topic && summary.topic.title ? summary.topic.title : summary.session_id || '未命名会议';
+  var cards = [
+    ['Session ID', summary.session_id || '-'],
+    ['状态', meetingStatusLabel(summary.status)],
+    ['开始时间', formatMeetingTime(summary.started_at)],
+    ['结束时间', formatMeetingTime(summary.ended_at)],
+    ['参与者', Array.isArray(summary.participants) ? summary.participants.join(' · ') : '-'],
+    ['事件总数', String(summary.event_count || 0)],
+  ];
+  detailEl.innerHTML = '' +
+    '<div class="history-detail-head">' +
+      '<div>' +
+        '<div class="history-detail-title">' + escHtml(topicTitle) + '</div>' +
+        '<div class="history-meta" style="margin-top:8px">' +
+          '<span class="history-pill ' + meetingStatusClass(summary.status) + '">' + escHtml(meetingStatusLabel(summary.status)) + '</span>' +
+          '<span class="history-pill">最后更新 ' + escHtml(formatMeetingTime(summary.updated_at)) + '</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="history-summary-grid">' + cards.map(function(card) {
+      return '<div class="history-summary-card"><div class="history-summary-label">' + escHtml(card[0]) + '</div><div class="history-summary-value">' + escHtml(card[1]) + '</div></div>';
+    }).join('') + '</div>' +
+    renderMeetingHistoryFilterPanel(summary, events, filteredEvents) +
+    '<div class="history-events">' + (filteredEvents.length ? filteredEvents.map(function(event) {
+      var processIndex = processIndexMap.get(event) || '-';
+      return '' +
+        '<div class="history-event">' +
+          '<div class="history-event-head">' +
+            '<span class="history-pill ' + meetingStatusClass(event.direction === 'outbound' ? 'completed' : event.direction === 'internal' ? 'error' : 'running') + '">' + escHtml(meetingDirectionLabel(event.direction)) + '</span>' +
+            '<span>' + escHtml(prettyMeetingEventType(event.entry_type || 'unknown')) + '</span>' +
+            '<span class="history-event-raw">' + escHtml(event.entry_type || 'unknown') + '</span>' +
+            '<span>过程 ' + escHtml(String(processIndex)) + '</span>' +
+            '<span>' + escHtml(formatMeetingTime(event.timestamp)) + '</span>' +
+          '</div>' +
+          '<div class="history-event-body">' + escHtml(summarizeMeetingEvent(event)) + '</div>' +
+          renderMeetingEventSpeakerTags(event) +
+          '<details><summary style="margin-top:8px;color:#7f90b5;cursor:pointer">查看原始数据</summary><div class="history-event-raw" style="margin-top:8px">原始事件序号 #' + escHtml(String(event.event_seq || '-')) + '</div><pre class="history-json">' + escHtml(JSON.stringify(event.data || {}, null, 2)) + '</pre></details>' +
+        '</div>';
+    }).join('') : '<div class="history-empty history-empty-note">当前筛选下没有匹配事件。<button type="button" class="history-filter-clear" onclick="clearMeetingHistoryFilters()">清除筛选</button></div>') + '</div>';
+}
+
+function openMeetingHistory(sessionId, preserveFilters) {
+  var previousSessionId = activeMeetingHistoryId;
+  activeMeetingHistoryId = sessionId;
+  if (!preserveFilters || previousSessionId !== sessionId) {
+    resetMeetingHistoryFilters();
+  }
+  var detailEl = document.getElementById('history-detail');
+  detailEl.innerHTML = '<div class="history-empty">正在加载完整时间线…</div>';
+  fetch('/api/meeting-history/' + encodeURIComponent(sessionId))
+    .then(function(r) {
+      if (!r.ok) throw new Error('history_detail_failed');
+      return r.json();
+    })
+    .then(function(data) {
+      currentMeetingHistoryRecord = data;
+      renderMeetingHistoryDetail(data);
+      return fetch('/api/meeting-history');
+    })
+    .then(function(r) { return r.json(); })
+    .then(renderMeetingHistoryList)
+    .catch(function(err) {
+      detailEl.innerHTML = '<div class="history-empty">读取会议历史失败：' + escHtml((err && err.message) || 'unknown') + '</div>';
+    });
+}
+
+function refreshMeetingHistory() {
+  var listEl = document.getElementById('history-list');
+  listEl.innerHTML = '<div class="history-empty">正在读取会议历史…</div>';
+  document.getElementById('history-summary').textContent = '加载中…';
+  fetch('/api/meeting-history')
+    .then(function(r) {
+      if (!r.ok) throw new Error('history_list_failed');
+      return r.json();
+    })
+    .then(function(items) {
+      renderMeetingHistoryList(items);
+      if (items.length > 0) openMeetingHistory(activeMeetingHistoryId || items[0].session_id, true);
+    })
+    .catch(function(err) {
+      document.getElementById('history-list').innerHTML = '<div class="history-empty">读取会议历史失败：' + escHtml((err && err.message) || 'unknown') + '</div>';
+      document.getElementById('history-detail').innerHTML = '<div class="history-empty">请先确认后端已写入历史文件。</div>';
+      var summaryEl = document.getElementById('history-summary');
+      summaryEl.textContent = '读取失败';
+      summaryEl.style.color = '#ef5350';
+    });
+}
+
+refreshMeetingHistory();
+
 function writeHardwareReport(win, title, bodyHtml) {
   if (!win) return;
   win.document.open();
@@ -635,6 +1240,26 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify(health));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: e.message }));
+    }
+  }
+  if (pathname === '/api/meeting-history') {
+    try {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(listMeetingHistories()));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: e.message }));
+    }
+  }
+  if (pathname.startsWith('/api/meeting-history/')) {
+    const sessionId = decodeURIComponent(pathname.slice('/api/meeting-history/'.length));
+    try {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(readMeetingHistory(sessionId)));
+    } catch (e) {
+      const statusCode = e && e.code === 'ENOENT' ? 404 : 500;
+      res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ error: e.message }));
     }
   }

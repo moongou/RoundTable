@@ -150,6 +150,19 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
         normalizeSpeakerLabel(completedSpeaker);
   }
 
+  static bool shouldResetCompletedHumanTurnOnIncomingSpeech({
+    required String source,
+    required String humanName,
+    String msgType = 'text',
+  }) {
+    final normalizedSource = normalizeSpeakerLabel(source);
+    final normalizedHuman = normalizeSpeakerLabel(humanName);
+    if (normalizedSource.isEmpty || normalizedSource == normalizedHuman) {
+      return false;
+    }
+    return msgType != 'system';
+  }
+
   static bool shouldApplyHumanStateStatus({
     required String newState,
     required String humanName,
@@ -158,11 +171,14 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool isRecording,
     required bool isCompletingHumanTurn,
     required bool isFinalizingSpeech,
+    bool hasStartedSpeechThisTurn = false,
   }) {
     if (newState != 'human_turn_waiting' && newState != 'human_speaking') {
       return true;
     }
-    if (isCompletingHumanTurn || isFinalizingSpeech) {
+    if (isCompletingHumanTurn ||
+        isFinalizingSpeech ||
+        (newState == 'human_turn_waiting' && hasStartedSpeechThisTurn)) {
       return false;
     }
 
@@ -187,6 +203,18 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   }) {
     return isMyTurn &&
         !hasSpeechDraft &&
+        !isCompletingHumanTurn &&
+        !isFinalizingSpeech;
+  }
+
+  static bool shouldShowHumanTurnPromptCue({
+    required bool isMyTurn,
+    required bool isRecording,
+    required bool isCompletingHumanTurn,
+    required bool isFinalizingSpeech,
+  }) {
+    return isMyTurn &&
+        !isRecording &&
         !isCompletingHumanTurn &&
         !isFinalizingSpeech;
   }
@@ -712,6 +740,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _isFinalizingSpeech = false; // 防止多次快速按 Ctrl 导致并发 finalize
   bool _speechFinalizeRunning = false;
   bool _isCompletingHumanTurn = false;
+  bool _hasStartedSpeechThisTurn = false;
+  bool _awaitingAiResponseAfterHumanSubmit = false;
   bool get _pendingHumanTurn => _commander.pendingHumanTurn;
   String get _pendingHumanSpeaker => _commander.pendingHumanSpeaker;
   bool get _handApprovedToSpeak => _commander.handApprovedToSpeak;
@@ -727,6 +757,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   Timer? _humanSubtitleLockTimer;
   Timer? _pendingHumanTurnGuardTimer;
   Timer? _ttsPumpGuardTimer;
+  Timer? _humanResponseWatchdogTimer;
   Timer? _deferredAutoSkipTimer;
 
   // 参与者
@@ -775,6 +806,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   String _asrProviderUrl = '';
   String _ttsProviderUrl = '';
   String _speechServerUrl = ImmersiveSessionScreen.defaultServerUrl;
+  bool _asrStreamingEnabled = true;
   bool _voiceServicesInitialized = false;
   ({
     String serverUrl,
@@ -782,6 +814,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     String asrProvider,
     String ttsProviderUrl,
     String asrProviderUrl,
+    bool asrStreamingEnabled,
   })? _pendingVoiceConfig;
   StreamSubscription<AsrResult>? _asrTranscriptionSub;
   ProviderSubscription<AsyncValue<LocalSettings>>? _settingsSubscription;
@@ -830,13 +863,15 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     required String asrProvider,
     required String ttsProviderUrl,
     required String asrProviderUrl,
+    required bool asrStreamingEnabled,
   }) {
     if (_voiceServicesInitialized &&
         _speechServerUrl == serverUrl &&
         _ttsProviderId == ttsProvider &&
         _ttsProviderUrl == ttsProviderUrl &&
         _asrProviderId == asrProvider &&
-        _asrProviderUrl == asrProviderUrl) {
+        _asrProviderUrl == asrProviderUrl &&
+        _asrStreamingEnabled == asrStreamingEnabled) {
       return;
     }
 
@@ -862,6 +897,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _asrProviderId = asrProvider;
     _ttsProviderUrl = ttsProviderUrl;
     _asrProviderUrl = asrProviderUrl;
+    _asrStreamingEnabled = asrStreamingEnabled;
 
     _ttsService = createTtsService(
       ttsProvider,
@@ -872,7 +908,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       asrProvider,
       serverUrl: serverUrl,
       providerUrl: asrProviderUrl,
-      preferServerProxy: asrProvider != 'browser' && asrProvider != 'disabled',
+      preferServerProxy: !asrStreamingEnabled &&
+          asrProvider != 'browser' &&
+          asrProvider != 'disabled',
     );
     // Do not replay server-side TTS failures through the browser voice layer.
     // It can duplicate the same sentence with an unrelated default voice.
@@ -963,6 +1001,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       asrProvider: pending.asrProvider,
       ttsProviderUrl: pending.ttsProviderUrl,
       asrProviderUrl: pending.asrProviderUrl,
+      asrStreamingEnabled: pending.asrStreamingEnabled,
     );
   }
 
@@ -1010,6 +1049,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       asrProvider: initialSettings.asrProvider,
       ttsProviderUrl: '',
       asrProviderUrl: '',
+      asrStreamingEnabled: true,
     );
     unawaited(_initVoiceServices(settingsOverride: initialSettings));
     _settingsSubscription = ref.listenManual<AsyncValue<LocalSettings>>(
@@ -1130,13 +1170,15 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       asrProvider: asrProvider,
       ttsProviderUrl: ttsProviderUrl,
       asrProviderUrl: asrProviderUrl,
+      asrStreamingEnabled: resolvedSettings.asrStreamingEnabled,
     );
     if (_voiceServicesInitialized &&
         _speechServerUrl == nextConfig.serverUrl &&
         _ttsProviderId == nextConfig.ttsProvider &&
         _ttsProviderUrl == nextConfig.ttsProviderUrl &&
         _asrProviderId == nextConfig.asrProvider &&
-        _asrProviderUrl == nextConfig.asrProviderUrl) {
+        _asrProviderUrl == nextConfig.asrProviderUrl &&
+        _asrStreamingEnabled == nextConfig.asrStreamingEnabled) {
       return;
     }
 
@@ -1152,6 +1194,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       asrProvider: nextConfig.asrProvider,
       ttsProviderUrl: nextConfig.ttsProviderUrl,
       asrProviderUrl: nextConfig.asrProviderUrl,
+      asrStreamingEnabled: nextConfig.asrStreamingEnabled,
     );
   }
 
@@ -1340,6 +1383,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case 'human_turn_waiting':
         if (_isPaused) {
           return '暂停中...';
+        }
+        if (_hasStartedSpeechThisTurn) {
+          return '正在整理你的话……';
         }
         final normalizedHuman =
             ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
@@ -1898,6 +1944,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _cancelTurnCountdown();
     _cancelMaxSpeechTimer();
     _cancelPendingHumanTurnGuard();
+    _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
     final activateSpeaker = speaker.isEmpty ? widget.humanName : speaker;
     _completedHumanTurnSpeaker = '';
     _commander.markHumanTurnActivated(speaker: activateSpeaker);
@@ -1947,6 +1994,40 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   void _cancelPendingHumanTurnGuard() {
     _pendingHumanTurnGuardTimer?.cancel();
     _pendingHumanTurnGuardTimer = null;
+  }
+
+  void _cancelHumanResponseWatchdog() {
+    _humanResponseWatchdogTimer?.cancel();
+    _humanResponseWatchdogTimer = null;
+  }
+
+  void _clearAwaitingAiResponseAfterHumanSubmit({
+    bool resetSpeechTurnLatch = false,
+  }) {
+    _awaitingAiResponseAfterHumanSubmit = false;
+    _cancelHumanResponseWatchdog();
+    if (resetSpeechTurnLatch) {
+      _hasStartedSpeechThisTurn = false;
+    }
+  }
+
+  void _scheduleHumanResponseWatchdog({
+    Duration delay = const Duration(seconds: 7),
+  }) {
+    _cancelHumanResponseWatchdog();
+    _humanResponseWatchdogTimer = Timer(delay, () {
+      if (!mounted || !_awaitingAiResponseAfterHumanSubmit) {
+        return;
+      }
+      if (_isMyTurn || _isRecording || _isPaused) {
+        return;
+      }
+      if (_statusText == '你说完了，大家正在回应……') {
+        setState(() {
+          _statusText = ImmersiveSessionScreen.humanResponseBufferText();
+        });
+      }
+    });
   }
 
   void _scheduleTtsPumpGuard(
@@ -2299,6 +2380,19 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           final content = ((data['content'] ?? '') as Object).toString();
           final msgType = ((data['msg_type'] ?? 'text') as Object).toString();
           final shouldSpeak = msgType != 'system' && source != humanName;
+          if (shouldSpeak) {
+            _clearAwaitingAiResponseAfterHumanSubmit(
+              resetSpeechTurnLatch: true,
+            );
+          }
+          if (ImmersiveSessionScreen
+              .shouldResetCompletedHumanTurnOnIncomingSpeech(
+            source: source,
+            humanName: humanName,
+            msgType: msgType,
+          )) {
+            _completedHumanTurnSpeaker = '';
+          }
           final queuedTtsSegments = shouldSpeak
               ? ImmersiveSessionScreen.normalizeTtsSegmentsPayload(
                   rawSegments: data['tts_segments'] ?? data['tts_text'],
@@ -2389,6 +2483,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             ((data['speaker'] ?? '') as Object).toString(),
           );
           final isHuman = data['is_human'] ?? false;
+          if (!isHuman || speaker != humanName) {
+            _clearAwaitingAiResponseAfterHumanSubmit(
+              resetSpeechTurnLatch: true,
+            );
+          }
           _completedHumanTurnSpeaker = '';
           if (isHuman &&
               speaker == humanName &&
@@ -2508,6 +2607,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           );
           // 语音与字幕同步：AI 流式文本不提前渲染，统一在 TTS 开始时显示。
           if (source != humanName) {
+            _clearAwaitingAiResponseAfterHumanSubmit(
+              resetSpeechTurnLatch: true,
+            );
+            _completedHumanTurnSpeaker = '';
             _isRealtimeSessionMatched(
               data: data,
               triggerRole: source,
@@ -2553,6 +2656,15 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         if (data != null) {
           final newState = data['new_state'] ?? '';
           final newLabel = data['new_label'] ?? newState;
+          if (newState == 'ai_speaking' ||
+              newState == 'selecting_speaker' ||
+              newState == 'moderator_opening' ||
+              newState == 'closing' ||
+              newState == 'ended') {
+            _clearAwaitingAiResponseAfterHumanSubmit(
+              resetSpeechTurnLatch: true,
+            );
+          }
           if (!ImmersiveSessionScreen.shouldApplyHumanStateStatus(
             newState: newState,
             humanName: widget.humanName,
@@ -2561,6 +2673,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             isRecording: _isRecording,
             isCompletingHumanTurn: _isCompletingHumanTurn,
             isFinalizingSpeech: _isFinalizingSpeech,
+            hasStartedSpeechThisTurn: _hasStartedSpeechThisTurn,
           )) {
             break;
           }
@@ -2645,9 +2758,20 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case WsEventType.humanInputRequested:
         final humanName =
             ImmersiveSessionScreen.normalizeSpeakerLabel(widget.humanName);
+        if (_awaitingAiResponseAfterHumanSubmit) {
+          break;
+        }
         final requestedSpeaker = ImmersiveSessionScreen.normalizeSpeakerLabel(
           ((event.data?['speaker'] ?? '') as Object).toString(),
         );
+        final normalizedCurrentSpeaker =
+            ImmersiveSessionScreen.normalizeSpeakerLabel(_currentSpeaker);
+        if (requestedSpeaker.isEmpty &&
+            normalizedCurrentSpeaker.isNotEmpty &&
+            normalizedCurrentSpeaker != humanName &&
+            !_isMyTurn) {
+          break;
+        }
         if (requestedSpeaker.isNotEmpty && requestedSpeaker != humanName) {
           break;
         }
@@ -2693,6 +2817,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
         break;
       case WsEventType.apiError:
+        _clearAwaitingAiResponseAfterHumanSubmit();
         final data = event.data;
         final errMsg = data?['message'] ?? data?['original_error'] ?? 'AI 服务错误';
         final friendly = _friendlyError(errMsg.toString());
@@ -2706,6 +2831,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _showStatusToast(_lastErrorMessage!, isError: true);
         break;
       case WsEventType.error:
+        _clearAwaitingAiResponseAfterHumanSubmit();
         final data = event.data;
         final errMsg = data?['message'] ?? data?['original_error'] ?? '未知错误';
         final friendly = _friendlyError(errMsg.toString());
@@ -2719,6 +2845,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _showStatusToast(_lastErrorMessage!, isError: true);
         break;
       case WsEventType.ended:
+        _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
         final endedWithError = _lastErrorMessage != null;
         final shouldGenerateGoldenQuotes = !endedWithError &&
             ImmersiveSessionScreen.hasGoldenQuoteMaterial(_messages);
@@ -2825,10 +2952,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _speechFinalizeTimer = null;
     _deferredAutoSkipTimer?.cancel();
     _deferredAutoSkipTimer = null;
+    _clearAwaitingAiResponseAfterHumanSubmit();
 
     // 需求2：纯语音模式，不存在文字输入
 
     _recordingControlledByHoldCtrl = startedFromHoldCtrl;
+    _hasStartedSpeechThisTurn = true;
     setState(() {
       _isRecording = true;
       _centerSpeaker = widget.humanName;
@@ -2868,6 +2997,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           listening: _asrService.isListening,
         );
         _recordingControlledByHoldCtrl = false;
+        _hasStartedSpeechThisTurn = false;
         setState(() {
           _isRecording = false;
           _statusText = '麦克风没有成功打开，请再试一次';
@@ -2886,6 +3016,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     if (_isFinalizingSpeech) return; // 防止并发 finalize
     _isFinalizingSpeech = true;
     _isCompletingHumanTurn = true;
+    _clearAwaitingAiResponseAfterHumanSubmit();
     _cancelMaxSpeechTimer();
     _recordingControlledByHoldCtrl = false;
     setState(() {
@@ -2956,7 +3087,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           .trim();
     }
 
-    final refined = rawText.isNotEmpty ? await _refineTranscript(rawText) : '';
+    var refined = '';
+    if (rawText.isNotEmpty) {
+      try {
+        refined = await _refineTranscript(rawText).timeout(
+          const Duration(milliseconds: 1600),
+          onTimeout: () => _polishTranscript(rawText),
+        );
+      } catch (_) {
+        refined = _polishTranscript(rawText);
+      }
+    }
     if (!mounted) return;
     setState(() => _sttPartialText = '');
 
@@ -2987,6 +3128,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
 
     _wsClient.sendHumanInput(speaker: widget.humanName, content: submitText);
+    _awaitingAiResponseAfterHumanSubmit = true;
+    _scheduleHumanResponseWatchdog();
     _completedHumanTurnSpeaker = widget.humanName;
     setState(() {
       // 不直接添加到 _messages，避免后端 message 事件重复添加
@@ -3023,6 +3166,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _cancelMaxSpeechTimer();
     _deferredAutoSkipTimer?.cancel();
     _deferredAutoSkipTimer = null;
+    _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
     _activeTtsItem = null;
     _activeTtsSessionId = '';
     _wsClient.sendHumanInput(speaker: widget.humanName, content: '（跳过）');
@@ -3457,6 +3601,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _cancelMaxSpeechTimer();
       _speechFinalizeTimer?.cancel();
       _speechFinalizeTimer = null;
+      _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
       _glowController.stop();
       _thinkingController.stop();
       if (_isRecording) {
@@ -3509,6 +3654,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _humanSubtitleLockTimer?.cancel();
     _pendingHumanTurnGuardTimer?.cancel();
     _ttsPumpGuardTimer?.cancel();
+    _humanResponseWatchdogTimer?.cancel();
     _deferredAutoSkipTimer?.cancel();
     _statusToastTimer?.cancel();
     _statusToastEntry?.remove();
@@ -4298,9 +4444,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   alignment: Alignment.centerRight,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.00115)
-                    ..translate(shiftX, liftY)
+                    ..translateByDouble(shiftX, liftY, 0, 1)
                     ..rotateY(pageTurn)
-                    ..scale(0.965 + eased * 0.035, 0.986 + eased * 0.014),
+                    ..scaleByDouble(
+                      0.965 + eased * 0.035,
+                      0.986 + eased * 0.014,
+                      1,
+                      1,
+                    ),
                   child: Stack(
                     children: [
                       child!,
@@ -4384,6 +4535,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _currentSpeaker.isNotEmpty &&
         !_hasRaisedHand &&
         !_handApprovedToSpeak;
+    final showHumanTurnPromptCue =
+        ImmersiveSessionScreen.shouldShowHumanTurnPromptCue(
+      isMyTurn: _isMyTurn,
+      isRecording: _isRecording,
+      isCompletingHumanTurn: _isCompletingHumanTurn,
+      isFinalizingSpeech: _isFinalizingSpeech,
+    );
     final showHumanCue =
         (_pendingHumanTurn || _handApprovedToSpeak || _isMyTurn) &&
             !_discussionEnded;
@@ -4676,7 +4834,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 ),
 
               // ── 操作提示：圆桌下方 ──
-              if (_isMyTurn && !_isRecording)
+              if (showHumanTurnPromptCue)
                 Positioned(
                   top: tableCenterY + tableRadius + 16,
                   left: tableCenterX - 180,
@@ -4745,7 +4903,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                       isRecording: _isRecording,
                       onStart: _onPttStart,
                       onEnd: _onPttEnd,
-                      showSkip: _isMyTurn && !_isRecording,
+                      showSkip: showHumanTurnPromptCue,
                       onSkip: () => _onSkipTurn(reason: '您已跳过本次发言'),
                       hasRaisedHand: _hasRaisedHand,
                       canInterrupt: canInterrupt,

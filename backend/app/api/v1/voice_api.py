@@ -8,10 +8,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
 
 import httpx
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -31,9 +30,9 @@ class TTSRequest(BaseModel):
     """TTS 请求"""
 
     text: str
-    provider: Optional[str] = None
-    voice: str = "alloy"
-    character_id: Optional[str] = None
+    provider: str | None = None
+    voice: str | None = None
+    character_id: str | None = None
     speed: float = Field(default=1.0, ge=0.8, le=1.1)
 
 
@@ -41,7 +40,7 @@ class TTSResponse(BaseModel):
     """TTS 响应元数据（音频数据直接作为二进制返回）"""
 
     content_type: str = "audio/mpeg"
-    duration_seconds: Optional[float] = None
+    duration_seconds: float | None = None
 
 
 class ASRResponse(BaseModel):
@@ -49,7 +48,7 @@ class ASRResponse(BaseModel):
 
     text: str
     confidence: float = 0.0
-    language: Optional[str] = None
+    language: str | None = None
 
 
 class ASRRefineRequest(BaseModel):
@@ -67,7 +66,9 @@ class ASRRefineResponse(BaseModel):
 def _detect_audio_content_type(audio_data: bytes) -> tuple[str, str]:
     if audio_data.startswith(b"RIFF") and audio_data[8:12] == b"WAVE":
         return "audio/wav", "wav"
-    if audio_data.startswith(b"ID3") or (len(audio_data) >= 2 and audio_data[0] == 0xFF and (audio_data[1] & 0xE0) == 0xE0):
+    if audio_data.startswith(b"ID3") or (
+        len(audio_data) >= 2 and audio_data[0] == 0xFF and (audio_data[1] & 0xE0) == 0xE0
+    ):
         return "audio/mpeg", "mp3"
     return "application/octet-stream", "bin"
 
@@ -80,6 +81,7 @@ def _should_retry_tts_error(error: Exception) -> bool:
 
 
 # ── 角色音色映射 ──────────────────────────────────────────────────────────────
+
 
 def _get_voice_for_character(character_id: str, provider_id: str | None = None) -> str:
     """根据角色 ID 获取对应的 TTS 音色。
@@ -94,6 +96,7 @@ def _get_voice_for_character(character_id: str, provider_id: str | None = None) 
 
     try:
         from app.core.thinkers import get_thinker
+
         thinker = get_thinker(character_id)
         if thinker:
             if provider_id == "openvoice":
@@ -105,6 +108,7 @@ def _get_voice_for_character(character_id: str, provider_id: str | None = None) 
         pass
     try:
         from app.agents.character_templates import load_all_templates
+
         templates = load_all_templates()
         if character_id in templates:
             if provider_id == "openvoice":
@@ -122,6 +126,7 @@ def _get_voice_for_character(character_id: str, provider_id: str | None = None) 
 
 # ── TTS 端点 ──────────────────────────────────────────────────────────────────
 
+
 @router.post("/tts")
 async def text_to_speech(request: TTSRequest) -> Response:
     """将文本合成为语音音频。
@@ -132,11 +137,16 @@ async def text_to_speech(request: TTSRequest) -> Response:
     Returns:
         音频二进制数据（MP3 格式）。
     """
-    # 确定音色：角色指定的 > 请求指定的 > 默认值
-    voice = request.voice
+    provider_id = (request.provider or settings.tts_provider or "").strip()
+    requested_voice = (request.voice or "").strip()
+
+    # 确定音色：角色指定的 > 请求指定的 > provider 默认值 > alloy。
     if request.character_id:
-        voice = _get_voice_for_character(request.character_id, request.provider)
-    provider_id = request.provider or settings.tts_provider
+        voice = _get_voice_for_character(request.character_id, provider_id)
+    elif requested_voice:
+        voice = requested_voice
+    else:
+        voice = settings.get_tts_voice_for_provider(provider_id) or "alloy"
 
     try:
         provider = create_tts_provider(request.provider)
@@ -169,7 +179,7 @@ async def text_to_speech(request: TTSRequest) -> Response:
             media_type=media_type,
             headers={
                 "Content-Disposition": f"inline; filename=tts_output.{suffix}",
-                "X-Voice-Requested": request.voice,
+                "X-Voice-Requested": requested_voice,
                 "X-Voice-Used": voice,
                 "X-TTS-Provider": provider_id,
                 "X-TTS-Attempts": str(attempts),
@@ -183,11 +193,12 @@ async def text_to_speech(request: TTSRequest) -> Response:
 
 # ── ASR 端点 ─────────────────────────────────────────────────────────────────
 
+
 @router.post("/asr")
 async def speech_to_text(
     audio: UploadFile = File(...),
     format: str = Form("wav"),
-    provider: Optional[str] = Form(None),
+    provider: str | None = Form(None),
 ) -> ASRResponse:
     """将语音音频转录为文本。
 
@@ -211,9 +222,12 @@ async def speech_to_text(
         if not await provider_impl.is_available():
             raise HTTPException(
                 status_code=503,
-                detail=f"语音识别服务 ({effective_provider}) 当前不可用，请检查服务是否已启动或在设置中切换其他服务。",
+                detail=(
+                    f"语音识别服务 ({effective_provider}) 当前不可用，"
+                    "请检查服务是否已启动或在设置中切换其他服务。"
+                ),
             )
-        text = await provider_impl.transcribe(audio_data, format=format)
+        text = _refine_transcript_text(await provider_impl.transcribe(audio_data, format=format))
         return ASRResponse(
             text=text,
             confidence=0.9,  # 本地服务无法提供准确置信度
@@ -239,6 +253,7 @@ def _refine_transcript_text(text: str) -> str:
         return ""
 
     v = re.sub(r"\s+", " ", v)
+    v = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", v)
     v = re.sub(r"([，。！？；,.!?;])\1+", r"\1", v)
     v = re.sub(r"(嗯|呃|啊|那个|就是)(\s*\1)+", r"\1", v)
     v = re.sub(r"(我觉得){2,}", "我觉得", v)

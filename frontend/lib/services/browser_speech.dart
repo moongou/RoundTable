@@ -88,9 +88,50 @@ class BrowserAsrService implements AsrService {
   final StreamController<AsrResult> _controller =
       StreamController<AsrResult>.broadcast();
   js.JsObject? _recognition;
+  String _lastTranscript = '';
+  bool _lastTranscriptIsFinal = false;
+  bool _stopRequested = false;
+  Completer<void>? _stopCompleter;
 
   BrowserAsrService() {
     _checkAvailability();
+  }
+
+  String _describeRecognitionError(dynamic event) {
+    try {
+      final jsEvent = event as js.JsObject?;
+      final errorCode = (jsEvent?['error'] ?? '').toString();
+      final message = (jsEvent?['message'] ?? '').toString().trim();
+      final suffix = message.isEmpty ? '' : '：$message';
+      switch (errorCode) {
+        case 'not-allowed':
+        case 'service-not-allowed':
+          return '麦克风或浏览器语音识别权限被拒绝$suffix';
+        case 'audio-capture':
+          return '没有检测到可用麦克风$suffix';
+        case 'no-speech':
+          return '没有检测到语音输入，请靠近麦克风后重试$suffix';
+        case 'network':
+          return '浏览器语音识别网络异常$suffix';
+        case 'aborted':
+          return '浏览器语音识别被中断$suffix';
+        case 'bad-grammar':
+          return '浏览器语音识别语法配置错误$suffix';
+      }
+      if (errorCode.isNotEmpty) {
+        return '浏览器语音识别错误($errorCode)$suffix';
+      }
+    } catch (_) {}
+    return '浏览器语音识别错误';
+  }
+
+  Future<void> _ensureMicrophoneAccess() async {
+    final mediaDevices = html.window.navigator.mediaDevices;
+    if (mediaDevices == null) {
+      throw StateError('当前浏览器不支持麦克风访问');
+    }
+    final stream = await mediaDevices.getUserMedia({'audio': true});
+    stream.getTracks().forEach((track) => track.stop());
   }
 
   void _checkAvailability() {
@@ -115,11 +156,50 @@ class BrowserAsrService implements AsrService {
   @override
   Stream<AsrResult> get transcriptionStream => _controller.stream;
 
+  void _emitTranscript(String transcript, {required bool isFinal}) {
+    final value = transcript.trim();
+    if (value.isEmpty || _controller.isClosed) {
+      return;
+    }
+    _lastTranscript = value;
+    _lastTranscriptIsFinal = isFinal;
+    _controller.add(AsrResult(text: value, isFinal: isFinal));
+  }
+
+  void _flushPendingTranscript() {
+    if (_lastTranscript.isEmpty ||
+        _lastTranscriptIsFinal ||
+        _controller.isClosed) {
+      return;
+    }
+    _lastTranscriptIsFinal = true;
+    _controller.add(AsrResult(text: _lastTranscript, isFinal: true));
+  }
+
+  void _completeRecognitionCycle({bool flushPending = false}) {
+    if (flushPending) {
+      _flushPendingTranscript();
+    }
+    _isListening = false;
+    _stopRequested = false;
+    _recognition = null;
+    final completer = _stopCompleter;
+    _stopCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete();
+    }
+  }
+
   @override
   Future<void> startListening() async {
-    if (_isListening || !_isAvailable) return;
+    if (_isListening) return;
+    if (!_isAvailable) {
+      throw StateError('当前浏览器不支持原生语音识别，请改用 CapsWriter、Vosk 或 FunASR');
+    }
 
     try {
+      await _ensureMicrophoneAccess();
+
       final context = js.context;
       final speechRecognitionCtor =
           context.hasProperty('webkitSpeechRecognition')
@@ -130,51 +210,81 @@ class BrowserAsrService implements AsrService {
       _recognition!['continuous'] = true;
       _recognition!['interimResults'] = true;
       _recognition!['lang'] = 'zh-CN';
+      _recognition!['maxAlternatives'] = 1;
+      _lastTranscript = '';
+      _lastTranscriptIsFinal = false;
+      _stopRequested = false;
+      _stopCompleter = null;
 
       // 绑定结果事件
-      _recognition!['onresult'] = (js.JsObject event) {
+      _recognition!['onresult'] = js.JsFunction.withThis((_, dynamic event) {
         try {
-          final results = event['results'];
-          final len = (results['length'] as num).toInt();
-          if (len > 0 && !_controller.isClosed) {
-            for (var i = 0; i < len; i++) {
+          final jsEvent = event as js.JsObject?;
+          final results = jsEvent?['results'];
+          final len = ((results?['length'] ?? 0) as num).toInt();
+          final startIndex = ((jsEvent?['resultIndex'] ?? 0) as num).toInt();
+          if (len > 0) {
+            for (var i = startIndex; i < len; i++) {
               final item = results[i];
               final transcript =
                   ((item[0]['transcript'] ?? '') as String).trim();
               if (transcript.isEmpty) continue;
               final isFinal = item['isFinal'] == true;
-              _controller.add(AsrResult(text: transcript, isFinal: isFinal));
+              _emitTranscript(transcript, isFinal: isFinal);
             }
           }
         } catch (_) {}
-      };
+      });
 
-      _recognition!['onend'] = () {
-        _isListening = false;
-      };
+      _recognition!['onend'] = js.JsFunction.withThis((_, dynamic event) {
+        _completeRecognitionCycle(flushPending: true);
+      });
 
-      _recognition!['onerror'] = (dynamic event) {
-        _isListening = false;
-        if (!_controller.isClosed) {
-          final err = event != null ? event.toString() : 'browser_asr_error';
-          _controller.addError('浏览器语音识别错误: $err');
+      _recognition!['onerror'] = js.JsFunction.withThis((_, dynamic event) {
+        final jsEvent = event as js.JsObject?;
+        final errorCode = (jsEvent?['error'] ?? '').toString();
+        final isExpectedAbort = _stopRequested && errorCode == 'aborted';
+        _completeRecognitionCycle(flushPending: _stopRequested);
+        if (!isExpectedAbort && !_controller.isClosed) {
+          _controller.addError(_describeRecognitionError(event));
         }
-      };
+      });
 
       _recognition!.callMethod('start');
       _isListening = true;
     } catch (e) {
-      _isListening = false;
+      _completeRecognitionCycle();
+      if (!_controller.isClosed) {
+        _controller.addError(e.toString());
+      }
+      rethrow;
     }
   }
 
   @override
   Future<void> stopListening() async {
-    if (!_isListening || _recognition == null) return;
-    try {
-      _recognition!.callMethod('stop');
-    } catch (_) {}
+    final recognition = _recognition;
+    if (recognition == null) {
+      _completeRecognitionCycle(flushPending: true);
+      return;
+    }
+
     _isListening = false;
+    _stopRequested = true;
+    final completer = _stopCompleter ??= Completer<void>();
+    try {
+      recognition.callMethod('stop');
+    } catch (_) {
+      _completeRecognitionCycle(flushPending: true);
+      return;
+    }
+
+    await completer.future.timeout(
+      const Duration(milliseconds: 400),
+      onTimeout: () {
+        _completeRecognitionCycle(flushPending: true);
+      },
+    );
   }
 
   @override

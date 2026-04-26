@@ -36,6 +36,9 @@ const _defaultGatewayUrl = 'http://localhost:6666';
 class GatewayStreamingAsrService implements AsrService {
   final String gatewayUrl;
   final String service; // 'vosk' or 'capswriter'
+  final String wsPath;
+  final List<String> wsProtocols;
+  final bool capsWriterJsonProtocol;
   bool _isListening = false;
   final StreamController<AsrResult> _controller =
       StreamController<AsrResult>.broadcast();
@@ -48,6 +51,8 @@ class GatewayStreamingAsrService implements AsrService {
   Completer<void>? _stopCompleter;
   Completer<void>? _finalResultCompleter;
   bool _disposed = false;
+  String? _capsWriterTaskId;
+  double _capsWriterStartSeconds = 0;
 
   // 预热的 WebSocket 连接
   html.WebSocket? _warmWs;
@@ -56,9 +61,84 @@ class GatewayStreamingAsrService implements AsrService {
   GatewayStreamingAsrService({
     this.gatewayUrl = _defaultGatewayUrl,
     this.service = 'vosk',
+    this.wsPath = '/asr/stream',
+    this.wsProtocols = const <String>[],
+    this.capsWriterJsonProtocol = false,
   }) {
     // 启动时预热 WebSocket 连接
     _preWarmConnection();
+  }
+
+  html.WebSocket _createWebSocket() {
+    if (wsProtocols.isEmpty) {
+      return html.WebSocket(_buildWsUrl());
+    }
+    return html.WebSocket(_buildWsUrl(), wsProtocols);
+  }
+
+  String _describeStartError(Object error) {
+    if (error is TimeoutException) {
+      return '${service.toUpperCase()} 连接超时，请确认本地服务地址可达';
+    }
+
+    final raw = error.toString();
+    if (raw.contains('NotAllowedError')) {
+      return '麦克风权限被拒绝，请允许浏览器访问麦克风';
+    }
+    if (raw.contains('NotFoundError')) {
+      return '未检测到可用的麦克风设备';
+    }
+    if (raw.contains('NotReadableError')) {
+      return '麦克风当前不可读，可能正被其他程序占用';
+    }
+    if (raw.contains('SecurityError')) {
+      return '当前页面不允许访问麦克风，请使用 localhost 或受信任来源打开';
+    }
+    return '语音识别启动失败: $raw';
+  }
+
+  void _cleanupAfterStartFailure() {
+    try {
+      _processorNode?.callMethod('disconnect');
+    } catch (_) {}
+    try {
+      _sourceNode?.callMethod('disconnect');
+    } catch (_) {}
+    try {
+      _audioContext?.callMethod('close');
+    } catch (_) {}
+    try {
+      _mediaStream?.getTracks().forEach((track) => track.stop());
+    } catch (_) {}
+    try {
+      _ws?.close();
+    } catch (_) {}
+
+    _processorNode = null;
+    _sourceNode = null;
+    _audioContext = null;
+    _mediaStream = null;
+    _ws = null;
+  }
+
+  String _buildWsUrl() {
+    final normalizedPath = wsPath.startsWith('/') ? wsPath : '/$wsPath';
+    final parsed = Uri.tryParse(gatewayUrl);
+    if (parsed == null || parsed.host.isEmpty) {
+      final wsBase = gatewayUrl
+          .replaceFirst('https://', 'wss://')
+          .replaceFirst('http://', 'ws://');
+      return '$wsBase$normalizedPath';
+    }
+    final scheme = parsed.scheme == 'https' ? 'wss' : 'ws';
+    return parsed
+        .replace(
+          scheme: scheme,
+          path: normalizedPath,
+          query: null,
+          fragment: null,
+        )
+        .toString();
   }
 
   /// 预热 WebSocket 连接，减少首次录音延迟
@@ -70,8 +150,7 @@ class GatewayStreamingAsrService implements AsrService {
       return;
     }
     try {
-      final wsUrl = gatewayUrl.replaceFirst('http', 'ws');
-      _warmWs = html.WebSocket('$wsUrl/asr/stream');
+      _warmWs = _createWebSocket();
       _warmWs!.binaryType = 'arraybuffer';
       // 30秒后关闭预热连接避免资源浪费
       _warmupTimer = Timer(const Duration(seconds: 30), () {
@@ -107,8 +186,7 @@ class GatewayStreamingAsrService implements AsrService {
       // 1. 获取麦克风
       final mediaDevices = html.window.navigator.mediaDevices;
       if (mediaDevices == null) {
-        _isListening = false;
-        return;
+        throw StateError('当前浏览器不支持麦克风采集');
       }
       _mediaStream = await mediaDevices.getUserMedia({
         'audio': {
@@ -127,8 +205,7 @@ class GatewayStreamingAsrService implements AsrService {
       } else {
         _warmWs?.close();
         _warmWs = null;
-        final wsUrl = gatewayUrl.replaceFirst('http', 'ws');
-        _ws = html.WebSocket('$wsUrl/asr/stream');
+        _ws = _createWebSocket();
         _ws!.binaryType = 'arraybuffer';
         // 等待连接打开
         await _ws!.onOpen.first.timeout(const Duration(seconds: 5));
@@ -142,8 +219,30 @@ class GatewayStreamingAsrService implements AsrService {
         if (_controller.isClosed) return;
         try {
           final data = jsonDecode(event.data as String) as Map<String, dynamic>;
+          if (data.containsKey('is_final')) {
+            final isFinal = data['is_final'] == true;
+            final text = ((data['text_accu'] as String?) ??
+                    (data['text'] as String?) ??
+                    '')
+                .trim();
+            if (text.isNotEmpty) {
+              _controller.add(AsrResult(text: text, isFinal: isFinal));
+            }
+            if (isFinal && !(_finalResultCompleter?.isCompleted ?? true)) {
+              _finalResultCompleter!.complete();
+            }
+            return;
+          }
+
           final type = data['type'] as String? ?? '';
           final text = (data['text'] as String? ?? '').trim();
+          if (type == 'error') {
+            _controller.addError(data['error'] ?? '语音识别服务返回错误');
+            if (!(_finalResultCompleter?.isCompleted ?? true)) {
+              _finalResultCompleter!.complete();
+            }
+            return;
+          }
           if (text.isEmpty) return;
 
           switch (type) {
@@ -153,12 +252,6 @@ class GatewayStreamingAsrService implements AsrService {
             case 'result':
             case 'final':
               _controller.add(AsrResult(text: text, isFinal: true));
-              if (!(_finalResultCompleter?.isCompleted ?? true)) {
-                _finalResultCompleter!.complete();
-              }
-              break;
-            case 'error':
-              _controller.addError(data['error'] ?? '语音识别服务返回错误');
               if (!(_finalResultCompleter?.isCompleted ?? true)) {
                 _finalResultCompleter!.complete();
               }
@@ -185,10 +278,49 @@ class GatewayStreamingAsrService implements AsrService {
       });
     } catch (e) {
       _isListening = false;
+      _cleanupAfterStartFailure();
+      final message = _describeStartError(e);
+      if (!_controller.isClosed) {
+        _controller.addError(message);
+      }
+      throw StateError(message);
     }
   }
 
-  /// 构建 Web Audio 管道：Mic → AudioContext → ScriptProcessor → PCM → WebSocket
+  String _encodeFloat32Base64(js.JsObject channelData, int length) {
+    final byteData = ByteData(length * 4);
+    for (var i = 0; i < length; i++) {
+      final sample =
+          (channelData[i] as num).toDouble().clamp(-1.0, 1.0).toDouble();
+      byteData.setFloat32(i * 4, sample, Endian.little);
+    }
+    return base64Encode(byteData.buffer.asUint8List());
+  }
+
+  String _newCapsWriterTaskId() =>
+      'roundtable-${DateTime.now().microsecondsSinceEpoch}';
+
+  void _sendCapsWriterAudioChunk(js.JsObject channelData, int length) {
+    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
+    _capsWriterTaskId ??= _newCapsWriterTaskId();
+    if (_capsWriterStartSeconds <= 0) {
+      _capsWriterStartSeconds = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    }
+
+    _ws!.sendString(jsonEncode({
+      'task_id': _capsWriterTaskId,
+      'seg_duration': 60,
+      'seg_overlap': 4,
+      'is_final': false,
+      'time_start': _capsWriterStartSeconds,
+      'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
+      'source': 'mic',
+      'data': _encodeFloat32Base64(channelData, length),
+      'context': '',
+    }));
+  }
+
+  /// 构建 Web Audio 管道：Mic → AudioContext → ScriptProcessor → WebSocket
   void _setupAudioPipeline() {
     final ctx = js.context;
 
@@ -222,6 +354,11 @@ class GatewayStreamingAsrService implements AsrService {
 
       // 获取 Float32Array 的长度和数据
       final length = (channelData['length'] as num).toInt();
+      if (capsWriterJsonProtocol) {
+        _sendCapsWriterAudioChunk(channelData, length);
+        return;
+      }
+
       final int16Data = Int16List(length);
 
       for (var i = 0; i < length; i++) {
@@ -259,7 +396,28 @@ class GatewayStreamingAsrService implements AsrService {
 
       // 发送 eof 获取最终结果
       if (_ws != null && _ws!.readyState == html.WebSocket.OPEN) {
-        _ws!.sendString(jsonEncode({'type': 'eof'}));
+        if (service == 'vosk') {
+          _ws!.sendString('eof');
+        } else if (capsWriterJsonProtocol) {
+          _capsWriterTaskId ??= _newCapsWriterTaskId();
+          if (_capsWriterStartSeconds <= 0) {
+            _capsWriterStartSeconds =
+                DateTime.now().millisecondsSinceEpoch / 1000.0;
+          }
+          _ws!.sendString(jsonEncode({
+            'task_id': _capsWriterTaskId,
+            'seg_duration': 60,
+            'seg_overlap': 4,
+            'is_final': true,
+            'time_start': _capsWriterStartSeconds,
+            'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
+            'source': 'mic',
+            'data': '',
+            'context': '',
+          }));
+        } else {
+          _ws!.sendString(jsonEncode({'type': 'eof'}));
+        }
         await _finalResultCompleter?.future.timeout(
           const Duration(milliseconds: 1800),
           onTimeout: () {},
@@ -275,6 +433,8 @@ class GatewayStreamingAsrService implements AsrService {
     _ws?.close();
     _ws = null;
     _isListening = false;
+    _capsWriterTaskId = null;
+    _capsWriterStartSeconds = 0;
   }
 
   @override
@@ -283,6 +443,10 @@ class GatewayStreamingAsrService implements AsrService {
     if (v.isEmpty) return '';
     // 本地简单后处理
     v = v.replaceAll(RegExp(r'\s+'), ' ');
+    v = v.replaceAllMapped(
+      RegExp(r'([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])'),
+      (match) => match.group(1) ?? '',
+    );
     v = v.replaceAll(RegExp(r'(我觉得){2,}'), '我觉得');
     v = v.replaceAll(RegExp(r'(然后){2,}'), '然后');
     if (!RegExp(r'[。！？!?]$').hasMatch(v)) {

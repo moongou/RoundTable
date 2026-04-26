@@ -18,9 +18,17 @@ logger = logging.getLogger(__name__)
 class OpenAITTSProvider(TTSProvider):
     """OpenAI TTS API 提供商。"""
 
-    def __init__(self, base_url: str = "https://api.openai.com/v1", api_key: str = ""):
+    def __init__(
+        self,
+        base_url: str = "https://api.openai.com/v1",
+        api_key: str = "",
+        model: str = "tts-1",
+        default_voice: str = "alloy",
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.model = model
+        self.default_voice = default_voice
 
     async def synthesize(
         self,
@@ -34,9 +42,9 @@ class OpenAITTSProvider(TTSProvider):
         }
 
         payload = {
-            "model": "tts-1",
+            "model": self.model,
             "input": text,
-            "voice": voice,
+            "voice": voice or self.default_voice,
             "response_format": "mp3",
         }
         if speed != 1.0:

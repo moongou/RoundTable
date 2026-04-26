@@ -7,11 +7,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 # ── LLM 提供商默认配置 ──────────────────────────────────────────────────────
 
@@ -27,6 +24,10 @@ PROVIDER_DEFAULTS = {
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
+    },
+    "siliconflow": {
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
     },
     "ollama": {
         "base_url": "http://localhost:11434/v1",
@@ -66,11 +67,32 @@ PROVIDER_DEFAULTS = {
 # 所有可用的提供商列表
 AVAILABLE_PROVIDERS = list(PROVIDER_DEFAULTS.keys())
 
+
+def canonical_provider_id(provider_id: str) -> str:
+    normalized = (provider_id or "").strip().lower()
+    alias_of = PROVIDER_DEFAULTS.get(normalized, {}).get("alias_of")
+    return alias_of or normalized
+
+
+def provider_candidate_ids(provider_id: str) -> list[str]:
+    normalized = (provider_id or "").strip().lower()
+    canonical = canonical_provider_id(normalized)
+    candidates: list[str] = []
+    for candidate in (normalized, canonical):
+        if candidate and candidate in PROVIDER_DEFAULTS and candidate not in candidates:
+            candidates.append(candidate)
+    for pid, defaults in PROVIDER_DEFAULTS.items():
+        if defaults.get("alias_of") == canonical and pid not in candidates:
+            candidates.append(pid)
+    return candidates
+
+
 # 提供商中文名映射
 PROVIDER_NAMES = {
     "openai": "OpenAI",
     "qwen": "通义千问",
     "deepseek": "DeepSeek",
+    "siliconflow": "硅基流动",
     "ollama": "Ollama (本地)",
     "ollama_cloud": "Ollama (云端)",
     "doubao": "豆包（=火山引擎）",
@@ -90,6 +112,8 @@ ASR_PROVIDERS = {
     "vosk": "Vosk 本地服务（支持流式）",
     "funasr": "FunASR 本地服务",
     "openai_whisper": "OpenAI Whisper API",
+    "siliconflow_asr": "硅基流动 ASR",
+    "groq_whisper": "Groq Whisper API",
     "disabled": "禁用语音识别（纯文本输入）",
 }
 
@@ -101,6 +125,8 @@ TTS_PROVIDERS = {
     "fireredtts": "FireRedTTS 本地服务（支持流式）",
     "openvoice": "OpenVoice 本地服务（支持变声）",
     "cosyvoice": "CosyVoice 本地服务",
+    "openai_tts": "OpenAI TTS API",
+    "siliconflow_tts": "硅基流动 TTS",
     "disabled": "禁用语音合成（纯文本显示）",
 }
 
@@ -110,7 +136,7 @@ LOCAL_SERVICE_DEFAULTS = {
     "cosyvoice": {"url": "http://localhost:50000", "health": "/health"},
     "funasr": {"url": "ws://localhost:10095", "health": "/"},
     "ollama": {"url": "http://localhost:11434", "health": "/api/tags"},
-    "capswriter": {"url": "http://localhost:6701", "health": "/health"},
+    "capswriter": {"url": "ws://localhost:6016", "health": "/"},
     "vosk": {"url": "http://localhost:6702", "health": "/health"},
     "vibevoice": {"url": "http://localhost:6704", "health": "/health"},
     "fireredtts": {"url": "http://localhost:6706", "health": "/health"},
@@ -122,10 +148,10 @@ LOCAL_SERVICE_DEFAULTS = {
 VOICE_SERVICE_META = {
     "capswriter": {
         "name": "CapsWriter 本地语音识别（推荐）",
-        "default_url": "http://localhost:6666",
+        "default_url": "ws://localhost:6016",
         "type": "asr",
         "needs_api_key": False,
-        "health_path": "/health/capswriter",
+        "health_path": "/",
     },
     "vosk": {
         "name": "Vosk 本地语音识别（流式）",
@@ -147,13 +173,34 @@ VOICE_SERVICE_META = {
         "name": "OpenAI Whisper API",
         "default_url": "https://api.openai.com/v1",
         "type": "asr",
+        "mode": "cloud",
         "needs_api_key": True,
         "health_path": "/models",
+        "default_model": "whisper-1",
+    },
+    "siliconflow_asr": {
+        "name": "硅基流动 ASR",
+        "default_url": "https://api.siliconflow.cn/v1",
+        "type": "asr",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/models",
+        "default_model": "TeleAI/TeleSpeechASR",
+    },
+    "groq_whisper": {
+        "name": "Groq Whisper API",
+        "default_url": "https://api.groq.com/openai/v1",
+        "type": "asr",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/models",
+        "default_model": "whisper-large-v3-turbo",
     },
     "edge_tts": {
         "name": "OpenAI Edge TTS 本地服务",
         "default_url": "http://localhost:5051",
         "type": "tts",
+        "mode": "local",
         "needs_api_key": False,
         "health_path": "/v1/models",
     },
@@ -161,36 +208,61 @@ VOICE_SERVICE_META = {
         "name": "ChatTTS 本地服务（对话风格）",
         "default_url": "http://localhost:9998",
         "type": "tts",
+        "mode": "local",
         "needs_api_key": False,
         "health_path": "/gradio_api/info",
     },
     "vibevoice": {
         "name": "VibeVoice 微软高品质语音合成",
-        "default_url": "http://localhost:6666",
+        "default_url": LOCAL_SERVICE_DEFAULTS["vibevoice"]["url"],
         "type": "tts",
+        "mode": "local",
         "needs_api_key": False,
-        "health_path": "/health/vibevoice",
+        "health_path": LOCAL_SERVICE_DEFAULTS["vibevoice"]["health"],
     },
     "fireredtts": {
         "name": "FireRedTTS 本地语音合成（流式）",
-        "default_url": "http://localhost:6666",
+        "default_url": LOCAL_SERVICE_DEFAULTS["fireredtts"]["url"],
         "type": "tts",
+        "mode": "local",
         "needs_api_key": False,
-        "health_path": "/health/fireredtts",
+        "health_path": LOCAL_SERVICE_DEFAULTS["fireredtts"]["health"],
     },
     "openvoice": {
         "name": "OpenVoice 本地语音合成（变声）",
-        "default_url": "http://localhost:6666",
+        "default_url": LOCAL_SERVICE_DEFAULTS["openvoice"]["url"],
         "type": "tts",
+        "mode": "local",
         "needs_api_key": False,
-        "health_path": "/health/openvoice",
+        "health_path": LOCAL_SERVICE_DEFAULTS["openvoice"]["health"],
     },
     "cosyvoice": {
         "name": "CosyVoice 本地语音合成",
         "default_url": "http://localhost:50000",
         "type": "tts",
+        "mode": "local",
         "needs_api_key": False,
         "health_path": "/health",
+    },
+    "openai_tts": {
+        "name": "OpenAI TTS API",
+        "default_url": "https://api.openai.com/v1",
+        "type": "tts",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/models",
+        "default_model": "tts-1",
+        "default_voice": "alloy",
+    },
+    "siliconflow_tts": {
+        "name": "硅基流动 TTS",
+        "default_url": "https://api.siliconflow.cn/v1",
+        "type": "tts",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/models",
+        "default_model": "FunAudioLLM/CosyVoice2-0.5B",
+        "default_voice": "FunAudioLLM/CosyVoice2-0.5B:alex",
     },
 }
 
@@ -220,6 +292,11 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-chat"
+
+    # 硅基流动
+    siliconflow_api_key: str = ""
+    siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+    siliconflow_model: str = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 
     # Ollama 本地
     ollama_api_key: str = "ollama"
@@ -269,9 +346,20 @@ class Settings(BaseSettings):
     # ASR (语音识别)
     asr_provider: str = "funasr"  # browser / funasr / openai_whisper
     asr_url: str = "ws://localhost:10095"  # deprecated, use funasr_url
-    funasr_url: str = "ws://localhost:10095"  # WS 模式（当前运行）；HTTP 模式改为 http://localhost:8000
+    capswriter_url: str = "ws://localhost:6016"
+    vosk_url: str = "http://localhost:6702"
+    funasr_url: str = (
+        "ws://localhost:10095"  # WS 模式（当前运行）；HTTP 模式改为 http://localhost:8000
+    )
     openai_whisper_api_key: str = ""  # uses openai_api_key if blank
     openai_whisper_base_url: str = "https://api.openai.com/v1"
+    openai_whisper_model: str = "whisper-1"
+    siliconflow_asr_api_key: str = ""  # uses siliconflow_api_key if blank
+    siliconflow_asr_base_url: str = "https://api.siliconflow.cn/v1"
+    siliconflow_asr_model: str = "TeleAI/TeleSpeechASR"
+    groq_whisper_api_key: str = ""
+    groq_whisper_base_url: str = "https://api.groq.com/openai/v1"
+    groq_whisper_model: str = "whisper-large-v3-turbo"
 
     # TTS (语音合成)
     tts_provider: str = "edge_tts"  # browser / edge_tts / cosyvoice / local services
@@ -279,6 +367,17 @@ class Settings(BaseSettings):
     chattts_url: str = "http://localhost:9998"
     edge_tts_url: str = "http://localhost:5051"
     cosyvoice_url: str = "http://localhost:50000"
+    vibevoice_url: str = "http://localhost:6704"
+    fireredtts_url: str = "http://localhost:6706"
+    openvoice_url: str = "http://localhost:6707"
+    openai_tts_api_key: str = ""  # uses openai_api_key if blank
+    openai_tts_base_url: str = "https://api.openai.com/v1"
+    openai_tts_model: str = "tts-1"
+    openai_tts_voice: str = "alloy"
+    siliconflow_tts_api_key: str = ""  # uses siliconflow_api_key if blank
+    siliconflow_tts_base_url: str = "https://api.siliconflow.cn/v1"
+    siliconflow_tts_model: str = "FunAudioLLM/CosyVoice2-0.5B"
+    siliconflow_tts_voice: str = "FunAudioLLM/CosyVoice2-0.5B:alex"
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     cosyvoice_voice: str = "default"
 
@@ -311,10 +410,18 @@ class Settings(BaseSettings):
     @property
     def model_config_dict(self) -> dict:
         """根据当前提供商返回模型配置字典，用于创建 AutoGen ChatCompletionClient。"""
-        provider = self.llm_provider
-        api_key = getattr(self, f"{provider}_api_key", "")
-        base_url = getattr(self, f"{provider}_base_url", "")
-        model = getattr(self, f"{provider}_model", "")
+        provider = canonical_provider_id(self.llm_provider)
+
+        def _first_config_value(field_suffix: str) -> str:
+            for pid in provider_candidate_ids(self.llm_provider):
+                value = getattr(self, f"{pid}_{field_suffix}", "")
+                if value:
+                    return value
+            return ""
+
+        api_key = _first_config_value("api_key")
+        base_url = _first_config_value("base_url")
+        model = _first_config_value("model")
 
         if not model:
             defaults = PROVIDER_DEFAULTS.get(provider, {})
@@ -355,17 +462,18 @@ class Settings(BaseSettings):
         Returns:
             (is_valid, error_message) 元组。is_valid=True 表示配置有效。
         """
-        provider = self.llm_provider
+        provider = canonical_provider_id(self.llm_provider)
 
         # Ollama 本地不需要 API key
         if provider == "ollama":
             return True, ""
 
         # 尝试从已知字段或通用字段读取 api_key
-        api_key = getattr(self, f"{provider}_api_key", None)
-        if api_key is None:
-            # 自定义提供商：只要 provider 字段非空且非占位符就认为有效
-            api_key = ""
+        api_key = ""
+        for pid in provider_candidate_ids(self.llm_provider):
+            api_key = getattr(self, f"{pid}_api_key", "")
+            if api_key:
+                break
 
         # 检查 API key 是否为空或占位符
         _placeholder = ("sk-xxx", "your-api-key", "api-key", "placeholder")
@@ -375,7 +483,7 @@ class Settings(BaseSettings):
 
         return True, ""
 
-    def get_runtime_config(self, runtime_override: Optional[dict] = None) -> dict:
+    def get_runtime_config(self, runtime_override: dict | None = None) -> dict:
         """获取运行时配置（支持前端传入的覆盖）。
 
         Args:
@@ -398,15 +506,46 @@ class Settings(BaseSettings):
             updates: 配置字段与新值的映射。
         """
         allowed_fields = {
-            "llm_provider", "asr_provider", "tts_provider", "push_to_talk",
-            "max_turns", "human_turn_timeout",
+            "llm_provider",
+            "asr_provider",
+            "tts_provider",
+            "push_to_talk",
+            "max_turns",
+            "human_turn_timeout",
             "hardware_detection_on_startup",
             # Voice service URLs
-            "funasr_url", "edge_tts_url", "cosyvoice_url",
-            "openai_whisper_api_key", "openai_whisper_base_url",
-            "tts_voice", "cosyvoice_voice",
+            "chattts_url",
+            "capswriter_url",
+            "vosk_url",
+            "funasr_url",
+            "edge_tts_url",
+            "cosyvoice_url",
+            "vibevoice_url",
+            "fireredtts_url",
+            "openvoice_url",
+            "openai_whisper_api_key",
+            "openai_whisper_base_url",
+            "openai_whisper_model",
+            "siliconflow_asr_api_key",
+            "siliconflow_asr_base_url",
+            "siliconflow_asr_model",
+            "groq_whisper_api_key",
+            "groq_whisper_base_url",
+            "groq_whisper_model",
+            "openai_tts_api_key",
+            "openai_tts_base_url",
+            "openai_tts_model",
+            "openai_tts_voice",
+            "siliconflow_tts_api_key",
+            "siliconflow_tts_base_url",
+            "siliconflow_tts_model",
+            "siliconflow_tts_voice",
+            "tts_voice",
+            "cosyvoice_voice",
             # Web search
-            "tavily_api_key", "tavily_base_url", "web_search_enabled",
+            "tavily_api_key",
+            "tavily_base_url",
+            "web_search_enabled",
         }
         # 动态允许所有提供商的 api_key / base_url / model 字段
         for pid in PROVIDER_DEFAULTS:
@@ -415,6 +554,8 @@ class Settings(BaseSettings):
             allowed_fields.add(f"{pid}_model")
 
         for field, value in updates.items():
+            if field == "llm_provider":
+                value = canonical_provider_id(str(value))
             if field in allowed_fields and hasattr(self, field):
                 object.__setattr__(self, field, value)
 
@@ -423,17 +564,62 @@ class Settings(BaseSettings):
         sid = (service_id or "").strip().lower()
         url_map = {
             "chattts": self.chattts_url,
+            "capswriter": self.capswriter_url,
+            "vosk": self.vosk_url,
             "funasr": self.funasr_url,
             "edge_tts": self.edge_tts_url,
             "cosyvoice": self.cosyvoice_url,
+            "vibevoice": self.vibevoice_url,
+            "fireredtts": self.fireredtts_url,
+            "openvoice": self.openvoice_url,
             "openai_whisper": self.openai_whisper_base_url,
+            "siliconflow_asr": self.siliconflow_asr_base_url,
+            "groq_whisper": self.groq_whisper_base_url,
+            "openai_tts": self.openai_tts_base_url,
+            "siliconflow_tts": self.siliconflow_tts_base_url,
         }
         url = url_map.get(sid, "")
         if url:
             return url
-        return (
-            LOCAL_SERVICE_DEFAULTS.get(sid, {}).get("url", "")
-            or VOICE_SERVICE_META.get(sid, {}).get("default_url", "")
+        return LOCAL_SERVICE_DEFAULTS.get(sid, {}).get("url", "") or VOICE_SERVICE_META.get(
+            sid, {}
+        ).get("default_url", "")
+
+    def get_voice_service_api_key(self, service_id: str) -> str:
+        """获取语音服务的 API Key。"""
+        sid = (service_id or "").strip().lower()
+        api_key_map = {
+            "openai_whisper": self.openai_whisper_api_key or self.openai_api_key,
+            "siliconflow_asr": self.siliconflow_asr_api_key or self.siliconflow_api_key,
+            "groq_whisper": self.groq_whisper_api_key,
+            "openai_tts": self.openai_tts_api_key or self.openai_api_key,
+            "siliconflow_tts": self.siliconflow_tts_api_key or self.siliconflow_api_key,
+        }
+        return api_key_map.get(sid, "")
+
+    def get_voice_service_model(self, service_id: str) -> str:
+        """获取语音服务当前模型名。"""
+        sid = (service_id or "").strip().lower()
+        model_map = {
+            "openai_whisper": self.openai_whisper_model,
+            "siliconflow_asr": self.siliconflow_asr_model,
+            "groq_whisper": self.groq_whisper_model,
+            "openai_tts": self.openai_tts_model,
+            "siliconflow_tts": self.siliconflow_tts_model,
+        }
+        return model_map.get(sid, VOICE_SERVICE_META.get(sid, {}).get("default_model", ""))
+
+    def get_tts_voice_for_provider(self, provider_id: str | None = None) -> str:
+        """获取指定 TTS provider 的默认音色。"""
+        sid = (provider_id or self.tts_provider or "").strip().lower()
+        voice_map = {
+            "openai_tts": self.openai_tts_voice,
+            "siliconflow_tts": self.siliconflow_tts_voice,
+            "cosyvoice": self.cosyvoice_voice,
+            "edge_tts": self.tts_voice,
+        }
+        return voice_map.get(
+            sid, VOICE_SERVICE_META.get(sid, {}).get("default_voice", self.tts_voice)
         )
 
 

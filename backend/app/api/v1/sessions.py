@@ -26,7 +26,7 @@ from app.core.golden_quotes import (
 )
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
-from app.core.thinkers import get_thinker
+from app.core.thinkers import get_thinker, thinker_label
 from app.core.topics import FREE_TOPIC_CATEGORY_ID, FREE_TOPIC_CATEGORY_NAME, get_topic_by_id
 from app.core.turn_scheduler import create_discussion_team
 from app.models.session import (
@@ -122,6 +122,8 @@ async def create_session(request: CreateSessionRequest):
 
     # AI 虚拟角色
     for char_id in request.character_ids:
+        if char_id == "moderator":
+            continue
         template = templates[char_id]
         participants.append(
             Participant(
@@ -138,7 +140,7 @@ async def create_session(request: CreateSessionRequest):
         if thinker:
             participants.append(
                 Participant(
-                    name=thinker.get("name", tid),
+                    name=thinker_label(tid, thinker),
                     type=ParticipantType.AI_CHARACTER,
                     description=thinker.get("description", ""),
                     avatar=thinker.get("avatar", "🧠"),

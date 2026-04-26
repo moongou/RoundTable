@@ -1,8 +1,7 @@
-"""Gateway 语音服务提供商
+"""本地语音服务提供商。
 
-通过本地 voice-services gateway (端口 6666) 代理访问多种本地语音服务：
-- ASR: CapsWriter, Vosk
-- TTS: VibeVoice, FireRedTTS, OpenVoice
+ASR 仍通过本地 voice-services gateway 访问；
+TTS 改为按各服务各自的直连 URL 调用，不再依赖 6666 聚合链路。
 """
 
 from __future__ import annotations
@@ -16,32 +15,49 @@ from pathlib import Path
 
 import httpx
 
-from app.config import LOCAL_SERVICE_DEFAULTS
+from app.config import LOCAL_SERVICE_DEFAULTS, settings
 from app.voice.base import ASRProvider, TTSProvider
 from app.voice.openvoice_profiles import get_openvoice_profile
 
 logger = logging.getLogger(__name__)
 
 GATEWAY_URL = "http://localhost:6666"
-OPENVOICE_URL = LOCAL_SERVICE_DEFAULTS.get("openvoice", {}).get(
+DEFAULT_OPENVOICE_URL = LOCAL_SERVICE_DEFAULTS.get("openvoice", {}).get(
     "url", "http://localhost:6707"
 )
 
 
 class GatewayTTSProvider(TTSProvider):
-    """通过 gateway 访问本地 TTS 服务。"""
+    """通过各自直连 URL 访问本地 TTS 服务。"""
 
     def __init__(
         self,
         service: str = "vibevoice",
-        gateway_url: str = GATEWAY_URL,
-        openvoice_url: str = OPENVOICE_URL,
+        service_url: str | None = None,
+        openvoice_url: str | None = None,
+        health_path: str | None = None,
     ):
         self.service = service
-        self.gateway_url = gateway_url.rstrip("/")
-        self.openvoice_url = openvoice_url.rstrip("/")
+        resolved_service_url = (
+            service_url
+            or settings.get_voice_service_url(service)
+            or LOCAL_SERVICE_DEFAULTS.get(service, {}).get("url", "")
+        )
+        self.service_url = resolved_service_url.rstrip("/")
+        resolved_openvoice_url = (
+            openvoice_url
+            or (self.service_url if service == "openvoice" and self.service_url else "")
+            or settings.get_voice_service_url("openvoice")
+            or DEFAULT_OPENVOICE_URL
+        )
+        self.openvoice_url = resolved_openvoice_url.rstrip("/")
+        self.health_path = (
+            health_path
+            or LOCAL_SERVICE_DEFAULTS.get(service, {}).get("health")
+            or "/health"
+        )
 
-    async def _synthesize_via_gateway(
+    async def _synthesize_direct(
         self,
         text: str,
         *,
@@ -51,13 +67,27 @@ class GatewayTTSProvider(TTSProvider):
         payload = {"text": text, "speaker": speaker}
         if speed != 1.0:
             payload["speed"] = speed
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
-                f"{self.gateway_url}/tts/{self.service}",
+                f"{self.service_url}/synthesize",
                 json=payload,
             )
             response.raise_for_status()
             return response.content
+
+    def _resolve_speaker(self, voice: str) -> str:
+        normalized = (voice or "default").strip()
+        if self.service == "openvoice":
+            if normalized in {"", "default", "alloy"} or normalized.startswith("zh-"):
+                return "zh"
+            return normalized
+        if (
+            normalized in {"", "default", "alloy"}
+            or normalized.startswith("zh-")
+            or normalized.startswith("ov:")
+        ):
+            return "zh"
+        return normalized
 
     async def _synthesize_openvoice_profile(
         self,
@@ -68,7 +98,7 @@ class GatewayTTSProvider(TTSProvider):
     ) -> bytes:
         profile = get_openvoice_profile(profile_id)
         if profile is None:
-            return await self._synthesize_via_gateway(
+            return await self._synthesize_direct(
                 text,
                 speaker="zh",
                 speed=speed,
@@ -81,7 +111,7 @@ class GatewayTTSProvider(TTSProvider):
                 profile.profile_id,
                 reference_audio,
             )
-            return await self._synthesize_via_gateway(
+            return await self._synthesize_direct(
                 text,
                 speaker=profile.base_speaker,
                 speed=speed,
@@ -122,25 +152,23 @@ class GatewayTTSProvider(TTSProvider):
                 speed=speed,
             )
 
-        speaker = voice
-        if self.service == "openvoice" and (
-            voice == "default" or voice == "alloy" or voice.startswith("zh-")
-        ):
-            speaker = "zh"
-
-        return await self._synthesize_via_gateway(
+        return await self._synthesize_direct(
             text,
-            speaker=speaker,
+            speaker=self._resolve_speaker(voice),
             speed=speed,
         )
 
     async def is_available(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.gateway_url}/health/{self.service}")
+                resp = await client.get(f"{self.service_url}{self.health_path}")
                 if resp.status_code == 200:
-                    data = resp.json()
-                    return data.get("status") == "healthy"
+                    content_type = resp.headers.get("content-type", "")
+                    if "application/json" in content_type:
+                        data = resp.json()
+                        if isinstance(data, dict) and "status" in data:
+                            return data.get("status") == "healthy"
+                    return True
             return False
         except Exception:
             return False

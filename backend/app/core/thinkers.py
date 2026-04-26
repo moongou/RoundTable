@@ -65,6 +65,16 @@ def get_thinker(thinker_id: str) -> Optional[dict]:
     return thinkers.get(thinker_id)
 
 
+def thinker_label(thinker_id: str, thinker: Optional[dict] = None) -> str:
+    """返回会话内用于展示和引用的稳定思想家名字。"""
+    data = thinker or get_thinker(thinker_id) or {}
+    for key in ("name", "display_name"):
+        value = str(data.get(key, "") or "").strip()
+        if value:
+            return value
+    return thinker_id
+
+
 def get_thinkers_by_domain(domain: str) -> list[dict]:
     """获取指定领域的思想家列表。"""
     thinkers = load_all_thinkers()

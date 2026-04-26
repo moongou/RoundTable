@@ -40,6 +40,31 @@ AsrService createWebAsrService(
     return ServerAsrService(serverUrl: serverUrl, providerId: providerId);
   }
 
+  if (providerId == 'capswriter' || providerId == 'vosk') {
+    final resolvedUrl = providerUrl?.trim().isNotEmpty == true
+        ? providerUrl!.trim()
+        : (providerId == 'capswriter'
+            ? 'ws://localhost:6016'
+            : 'http://localhost:6702');
+    return GatewayStreamingAsrService(
+      service: providerId,
+      gatewayUrl: resolvedUrl,
+      wsPath: providerId == 'capswriter' ? '/ws' : '/stream',
+      wsProtocols: providerId == 'capswriter'
+          ? const <String>['binary']
+          : const <String>[],
+      capsWriterJsonProtocol: providerId == 'capswriter',
+    );
+  }
+
+  if (providerId == 'funasr') {
+    return FunasrStreamingAsrService(
+      wsUrl: providerUrl?.trim().isNotEmpty == true
+          ? providerUrl!.trim()
+          : 'ws://localhost:10095',
+    );
+  }
+
   switch (providerId) {
     case 'browser':
       return BrowserAsrService();
@@ -49,21 +74,18 @@ AsrService createWebAsrService(
         gatewayUrl: providerUrl?.trim().isNotEmpty == true
             ? providerUrl!.trim()
             : 'http://localhost:6702',
+        wsPath: '/stream',
+        wsProtocols: const <String>[],
       );
     case 'capswriter':
       return GatewayStreamingAsrService(
         service: providerId,
         gatewayUrl: providerUrl?.trim().isNotEmpty == true
             ? providerUrl!.trim()
-            : 'http://localhost:6701',
-      );
-    case 'funasr':
-      // 需求5b：FunASR 直连流式，优先使用后端配置页返回的 WebSocket 地址。
-      // 提供在线增量（text_online）+ 离线整句（text_offline）。
-      return FunasrStreamingAsrService(
-        wsUrl: providerUrl?.trim().isNotEmpty == true
-            ? providerUrl!.trim()
-            : 'ws://localhost:10095',
+            : 'ws://localhost:6016',
+        wsPath: '/ws',
+        wsProtocols: const <String>['binary'],
+        capsWriterJsonProtocol: true,
       );
     case 'openai_whisper':
     case 'siliconflow_asr':
