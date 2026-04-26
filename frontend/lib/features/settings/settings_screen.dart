@@ -70,8 +70,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   final _aiScrollCtrl = ScrollController();
   final _asrScrollCtrl = ScrollController();
   final _ttsScrollCtrl = ScrollController();
+  final _voiceStudioScrollCtrl = ScrollController();
   final _generalScrollCtrl = ScrollController();
   final _profilesScrollCtrl = ScrollController();
+  String _voiceStudioProviderId = 'edge_tts';
 
   final TextEditingController _profileNameCtrl = TextEditingController();
   final TextEditingController _profileDescriptionCtrl = TextEditingController();
@@ -106,7 +108,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 6, vsync: this);
+    _tabController = TabController(length: 7, vsync: this);
   }
 
   @override
@@ -117,6 +119,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     _aiScrollCtrl.dispose();
     _asrScrollCtrl.dispose();
     _ttsScrollCtrl.dispose();
+    _voiceStudioScrollCtrl.dispose();
     _generalScrollCtrl.dispose();
     _profilesScrollCtrl.dispose();
     _profileNameCtrl.dispose();
@@ -612,6 +615,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             Tab(icon: Icon(Icons.smart_toy_outlined, size: 18), text: 'AI 模型'),
             Tab(icon: Icon(Icons.mic_outlined, size: 18), text: '语音识别'),
             Tab(icon: Icon(Icons.volume_up_outlined, size: 18), text: '语音合成'),
+            Tab(icon: Icon(Icons.graphic_eq_outlined, size: 18), text: '音色工坊'),
             Tab(icon: Icon(Icons.forum_outlined, size: 18), text: '话题'),
             Tab(icon: Icon(Icons.settings_outlined, size: 18), text: '通用'),
             Tab(
@@ -626,6 +630,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           _buildAiModelTab(s, providersAsync, currentAsync),
           _buildAsrTab(s, speechAsync),
           _buildTtsTab(s, speechAsync),
+          _buildVoiceStudioTab(s, speechAsync),
           const _TopicsTab(),
           _buildGeneralTab(s, currentAsync, healthAsync),
           _buildConfigProfilesTab(s, currentAsync, profilesAsync),
@@ -694,6 +699,568 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           speechConfig: speechConfig,
         ),
         const SizedBox(height: 32),
+      ],
+    );
+  }
+
+  List<SpeechProviderInfo> _voiceStudioProviders(SpeechConfig? speechConfig) {
+    const order = <String>[
+      'edge_tts',
+      'openvoice',
+      'vibevoice',
+      'chattts',
+    ];
+    final existing = <String, SpeechProviderInfo>{
+      for (final provider
+          in speechConfig?.ttsProviders ?? const <SpeechProviderInfo>[])
+        provider.id: provider,
+    };
+    return [
+      for (final providerId in order)
+        existing[providerId] ??
+            SpeechProviderInfo(
+              id: providerId,
+              name: voiceServicePalette(providerId)?.title ?? providerId,
+              isActive: false,
+              available: false,
+            ),
+    ];
+  }
+
+  String _voiceStudioRoleForSpeaker(String speaker) {
+    if (speaker == teacherVoiceSpeaker) {
+      return voiceRoleTeacher;
+    }
+    if (speaker == thinkerVoiceSpeaker) {
+      return voiceRoleThinker;
+    }
+    if (maleStudentVoiceSpeakers.contains(speaker)) {
+      return voiceRoleStudentMale;
+    }
+    return voiceRoleStudentFemale;
+  }
+
+  String _voiceStudioCurrentVoice(
+    LocalSettings settings,
+    String providerId,
+    String speaker,
+  ) {
+    return resolveConfiguredVoiceForSpeaker(
+          settings: settings,
+          providerId: providerId,
+          speaker: speaker,
+        ) ??
+        '';
+  }
+
+  Future<void> _applyVoiceStudioVoice({
+    required String providerId,
+    required String speaker,
+    required String voice,
+  }) async {
+    await ref.read(localSettingsProvider.notifier).setTtsVoiceAssignment(
+          providerId: providerId,
+          speaker: speaker,
+          voice: voice,
+        );
+    final paletteTitle = voiceServicePalette(providerId)?.title ?? providerId;
+    _snack('已更新 $paletteTitle 的 $speaker 音色');
+  }
+
+  Future<void> _resetVoiceStudioSpeaker({
+    required String providerId,
+    required String speaker,
+  }) async {
+    await ref.read(localSettingsProvider.notifier).setTtsVoiceAssignment(
+          providerId: providerId,
+          speaker: speaker,
+          voice: '',
+        );
+    _snack('已恢复 $speaker 的默认音色');
+  }
+
+  Future<void> _resetVoiceStudioProvider(String providerId) async {
+    await ref
+        .read(localSettingsProvider.notifier)
+        .resetTtsVoiceAssignmentsForProvider(providerId);
+    final paletteTitle = voiceServicePalette(providerId)?.title ?? providerId;
+    _snack('已恢复 $paletteTitle 的默认分配');
+  }
+
+  Future<void> _previewVoiceStudioVoice({
+    required LocalSettings settings,
+    required SpeechConfig? speechConfig,
+    required String providerId,
+    required String voice,
+    required String label,
+  }) async {
+    if (_interactiveTtsRunning) {
+      try {
+        await _interactiveTtsService?.stop();
+      } catch (_) {}
+      _interactiveTtsService?.dispose();
+    }
+
+    final sampleText = _interactiveTtsTextCtrl.text.trim();
+    if (sampleText.isEmpty) {
+      _snackErr('请先输入一段要试听的文本。');
+      return;
+    }
+
+    final serverUrl = _resolvedServerUrl(settings);
+    final providerUrl =
+        _resolveSpeechProviderUrl(speechConfig, providerId, isAsr: false);
+    final tts = createTtsService(
+      providerId,
+      serverUrl: serverUrl,
+      providerUrl: providerUrl,
+    );
+
+    setState(() {
+      _interactiveTtsService = tts;
+      _interactiveTtsRunning = true;
+      _interactiveTtsError = null;
+      _interactiveTtsStatus = '正在试听 ${label.split('·').last.trim()}…';
+    });
+
+    try {
+      await tts.speak(sampleText, voice: voice);
+      if (!mounted) return;
+      setState(() {
+        _interactiveTtsStatus = '试听完成：$label';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _interactiveTtsStatus = null;
+        _interactiveTtsError = e.toString();
+      });
+    } finally {
+      tts.dispose();
+      if (mounted) {
+        setState(() {
+          _interactiveTtsService = null;
+          _interactiveTtsRunning = false;
+        });
+      }
+    }
+  }
+
+  Widget _buildVoiceStudioTab(
+    LocalSettings settings,
+    AsyncValue<SpeechConfig> speechAsync,
+  ) {
+    final speechConfig = speechAsync.valueOrNull;
+    final providers = _voiceStudioProviders(speechConfig);
+    final activeProviderId =
+        providers.any((p) => p.id == _voiceStudioProviderId)
+            ? _voiceStudioProviderId
+            : providers.first.id;
+    final activeProvider =
+        providers.firstWhere((p) => p.id == activeProviderId);
+    final palette = voiceServicePalette(activeProviderId);
+    final actualPresetCount = palette?.presets.length ?? 0;
+    final targetPresetCount = palette?.targetPresetCount ?? 0;
+
+    Widget buildSpeakerCard(String speaker) {
+      final role = _voiceStudioRoleForSpeaker(speaker);
+      final presets = palette?.presetsForRole(role) ?? const <VoicePreset>[];
+      final selectedVoice =
+          _voiceStudioCurrentVoice(settings, activeProviderId, speaker);
+      final hasOverride = settings.resolveVoiceAssignment(
+            providerId: activeProviderId,
+            speaker: speaker,
+          ) !=
+          null;
+      VoicePreset? selectedPreset;
+      for (final preset in presets) {
+        if (preset.voice == selectedVoice) {
+          selectedPreset = preset;
+          break;
+        }
+      }
+      selectedPreset ??= presets.isNotEmpty ? presets.first : null;
+
+      final roleLabel = switch (role) {
+        voiceRoleTeacher => '老师',
+        voiceRoleThinker => '思想家',
+        voiceRoleStudentMale => '男童声',
+        _ => '女童声',
+      };
+      final previewPreset = selectedPreset;
+
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          color: AppColors.studyWall.withValues(alpha: 0.55),
+          border: Border.all(
+            color: hasOverride
+                ? AppColors.amberGold.withValues(alpha: 0.46)
+                : AppColors.warmGray.withValues(alpha: 0.18),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        speaker,
+                        style: const TextStyle(
+                          color: AppColors.warmWhite,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          _Chip(roleLabel, AppColors.amberGold),
+                          const SizedBox(width: 6),
+                          _Chip(
+                            hasOverride ? '已自定义' : '默认',
+                            hasOverride
+                                ? const Color(0xFF8BC34A)
+                                : AppColors.warmGray,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                if (selectedPreset != null)
+                  SizedBox(
+                    width: 132,
+                    child: Text(
+                      selectedPreset.label,
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                        color: AppColors.warmWhite,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (presets.isEmpty)
+              const Text(
+                '当前服务暂无这一角色的预设音色。',
+                style: TextStyle(color: Colors.orange, fontSize: 11),
+              )
+            else
+              DropdownButtonFormField<String>(
+                initialValue: presets.any((p) => p.voice == selectedVoice)
+                    ? selectedVoice
+                    : presets.first.voice,
+                dropdownColor: AppColors.studyWallLight,
+                style: const TextStyle(
+                  color: AppColors.warmWhite,
+                  fontSize: 13,
+                ),
+                decoration: InputDecoration(
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(9),
+                    borderSide: BorderSide(
+                      color: AppColors.warmGray.withValues(alpha: 0.3),
+                    ),
+                  ),
+                  filled: true,
+                  fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  isDense: true,
+                ),
+                items: presets
+                    .map(
+                      (preset) => DropdownMenuItem<String>(
+                        value: preset.voice,
+                        child: Text(
+                          preset.label,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value == null || value.isEmpty) {
+                    return;
+                  }
+                  unawaited(
+                    _applyVoiceStudioVoice(
+                      providerId: activeProviderId,
+                      speaker: speaker,
+                      voice: value,
+                    ),
+                  );
+                },
+              ),
+            if (selectedPreset != null && selectedPreset.note.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                selectedPreset.note,
+                style: TextStyle(
+                  color: AppColors.warmGray.withValues(alpha: 0.96),
+                  fontSize: 11,
+                ),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _OutBtn(
+                  _interactiveTtsRunning ? '试听中…' : '试听当前音色',
+                  onTap: previewPreset == null || _interactiveTtsRunning
+                      ? null
+                      : () => unawaited(
+                            _previewVoiceStudioVoice(
+                              settings: settings,
+                              speechConfig: speechConfig,
+                              providerId: activeProviderId,
+                              voice: previewPreset.voice,
+                              label: previewPreset.label,
+                            ),
+                          ),
+                ),
+                _OutBtn(
+                  '恢复默认',
+                  onTap: hasOverride
+                      ? () => unawaited(
+                            _resetVoiceStudioSpeaker(
+                              providerId: activeProviderId,
+                              speaker: speaker,
+                            ),
+                          )
+                      : null,
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView(
+      controller: _voiceStudioScrollCtrl,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      children: [
+        _Section(
+          title: '音色工坊',
+          icon: Icons.graphic_eq_outlined,
+          children: [
+            Text(
+              '分别为 Edge TTS、OpenVoice、VibeVoice、ChatTTS 维护一套独立音色库。这里改的是“角色到音色”的映射，不会强制切换你当前正在使用的 TTS 服务。',
+              style: TextStyle(
+                color: AppColors.warmGray.withValues(alpha: 0.96),
+                fontSize: 12.5,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                for (final provider in providers)
+                  GestureDetector(
+                    onTap: () =>
+                        setState(() => _voiceStudioProviderId = provider.id),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        color: provider.id == activeProviderId
+                            ? AppColors.amberGold.withValues(alpha: 0.14)
+                            : AppColors.studyWall.withValues(alpha: 0.48),
+                        border: Border.all(
+                          color: provider.id == activeProviderId
+                              ? AppColors.amberGold
+                              : AppColors.warmGray.withValues(alpha: 0.22),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(provider.icon,
+                              style: const TextStyle(fontSize: 16)),
+                          const SizedBox(width: 8),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                provider.name,
+                                style: const TextStyle(
+                                  color: AppColors.warmWhite,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                provider.available ? '服务在线' : '按当前状态显示',
+                                style: TextStyle(
+                                  color: provider.available
+                                      ? Colors.greenAccent
+                                      : AppColors.warmGray,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            if (palette != null)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF3F2E21), Color(0xFF1E1A17)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  border: Border.all(
+                    color: AppColors.amberGold.withValues(alpha: 0.24),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      palette.title,
+                      style: AppTheme.calligraphyStyleDark(fontSize: 18),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      palette.summary,
+                      style: TextStyle(
+                        color: AppColors.warmGray.withValues(alpha: 0.95),
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _Chip('预设 $actualPresetCount/$targetPresetCount',
+                            AppColors.amberGold),
+                        _Chip(
+                          settings.ttsProvider == activeProviderId
+                              ? '当前 TTS'
+                              : '独立配置',
+                          settings.ttsProvider == activeProviderId
+                              ? const Color(0xFF8BC34A)
+                              : AppColors.warmGray,
+                        ),
+                        _Chip(
+                          activeProvider.available ? '在线' : '离线可配',
+                          activeProvider.available
+                              ? const Color(0xFF4CAF50)
+                              : const Color(0xFFB0BEC5),
+                        ),
+                      ],
+                    ),
+                    if (palette.note.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        palette.note,
+                        style: const TextStyle(
+                          color: Color(0xFFFFCC80),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            const SizedBox(height: 14),
+            const _Label('试听文本（与下方 TTS 实机试听共用）'),
+            TextField(
+              controller: _interactiveTtsTextCtrl,
+              style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
+              maxLines: 2,
+              decoration: InputDecoration(
+                hintText: '输入一段要试听的文本…',
+                hintStyle:
+                    const TextStyle(color: AppColors.warmGray, fontSize: 12),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(9),
+                  borderSide: BorderSide(
+                    color: AppColors.warmGray.withValues(alpha: 0.3),
+                  ),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(9),
+                  borderSide: BorderSide(
+                    color: AppColors.warmGray.withValues(alpha: 0.3),
+                  ),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(9),
+                  borderSide: const BorderSide(color: AppColors.amberGold),
+                ),
+                filled: true,
+                fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+              ),
+            ),
+            if (_interactiveTtsStatus != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                _interactiveTtsStatus!,
+                style: const TextStyle(color: AppColors.warmGray, fontSize: 11),
+              ),
+            ],
+            if (_interactiveTtsError != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                '试听错误：$_interactiveTtsError',
+                style: const TextStyle(color: Colors.redAccent, fontSize: 11),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 14),
+        _Section(
+          title: '角色分配',
+          icon: Icons.groups_2_outlined,
+          action: _OutBtn(
+            '整组恢复默认',
+            onTap: () => unawaited(_resetVoiceStudioProvider(activeProviderId)),
+          ),
+          children: [
+            Text(
+              '老师、每位学生和思想家都可以在当前服务下拥有单独音色；默认分配保留你现在熟悉的基线，新分配只会覆盖这一项。',
+              style: TextStyle(
+                color: AppColors.warmGray.withValues(alpha: 0.95),
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 12),
+            for (final speaker in configurableVoiceSpeakers) ...[
+              buildSpeakerCard(speaker),
+              if (speaker != configurableVoiceSpeakers.last)
+                const SizedBox(height: 10),
+            ],
+          ],
+        ),
       ],
     );
   }

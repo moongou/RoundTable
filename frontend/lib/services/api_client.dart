@@ -193,6 +193,27 @@ class ApiClient {
     return List<String>.from(data['quotes'] ?? const <String>[]);
   }
 
+  /// 让后端为真人用户生成一段会后点评。
+  Future<String> generateHumanReview({
+    required String topic,
+    required String humanName,
+    required List<ChatMessage> messages,
+  }) async {
+    final response = await _dio.post('/api/v1/sessions/human-review', data: {
+      'topic': topic,
+      'human_name': humanName,
+      'messages': messages
+          .map((message) => {
+                'source': message.source,
+                'content': message.content,
+                'type': message.type,
+              })
+          .toList(growable: false),
+    });
+    final data = Map<String, dynamic>.from(response.data as Map);
+    return (data['review'] ?? '').toString();
+  }
+
   // ── 配置 API ──────────────────────────────────────────────────────────────
 
   /// 获取所有 LLM 提供商列表及配置状态

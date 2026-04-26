@@ -5,9 +5,18 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 import logging
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import time
+import wave
+from io import BytesIO
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -21,6 +30,14 @@ from app.voice.openvoice_profiles import openvoice_profile_for_character_id
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+_WAV_VOLUME_GUARD_PROVIDERS = {
+    "chattts",
+    "vibevoice",
+    "openvoice",
+    "fireredtts",
+    "cosyvoice",
+}
 
 
 # ── 请求/响应模型 ────────────────────────────────────────────────────────────
@@ -78,6 +95,194 @@ def _should_retry_tts_error(error: Exception) -> bool:
         status_code = error.response.status_code if error.response is not None else None
         return bool(status_code and (status_code >= 500 or status_code == 429))
     return isinstance(error, httpx.RequestError)
+
+
+def _normalize_wav_with_ffmpeg(audio_data: bytes) -> bytes | None:
+    if not shutil.which("ffmpeg"):
+        return None
+
+    src_path = ""
+    dst_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as src_file:
+            src_file.write(audio_data)
+            src_path = src_file.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as dst_file:
+            dst_path = dst_file.name
+
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                src_path,
+                "-af",
+                (
+                    "acompressor=threshold=-20dB:ratio=2.6:attack=5:release=55:makeup=1.8,"
+                    "loudnorm=I=-18:TP=-1.5:LRA=7"
+                ),
+                "-c:a",
+                "pcm_s16le",
+                dst_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "ffmpeg TTS loudness normalization failed: %s",
+                result.stderr.strip() or "unknown error",
+            )
+            return None
+
+        with open(dst_path, "rb") as audio_file:
+            normalized_audio = audio_file.read()
+        return normalized_audio or None
+    except Exception as exc:
+        logger.warning("ffmpeg TTS normalization exception: %s", exc)
+        return None
+    finally:
+        for path in (src_path, dst_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+def _iter_pcm_samples(frames: bytes, sample_width: int):
+    if sample_width == 1:
+        return [sample - 128 for sample in frames]
+
+    if sample_width == 2:
+        samples = array.array("h")
+    elif sample_width == 4:
+        samples = array.array("i")
+    else:
+        return None
+
+    if len(frames) % sample_width != 0:
+        return None
+
+    samples.frombytes(frames)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples
+
+
+def _measure_pcm_levels(frames: bytes, sample_width: int) -> tuple[int, int] | None:
+    samples = _iter_pcm_samples(frames, sample_width)
+    if not samples:
+        return None
+
+    peak = max(abs(sample) for sample in samples)
+    if peak <= 0:
+        return (0, 0)
+
+    square_sum = sum(sample * sample for sample in samples)
+    rms = int(math.sqrt(square_sum / len(samples)))
+    return peak, rms
+
+
+def _pcm_limits(sample_width: int) -> tuple[int, int] | None:
+    if sample_width == 1:
+        return (-128, 127)
+    if sample_width == 2:
+        return (-32768, 32767)
+    if sample_width == 4:
+        return (-2147483648, 2147483647)
+    return None
+
+
+def _apply_pcm_gain(frames: bytes, sample_width: int, gain: float) -> bytes | None:
+    samples = _iter_pcm_samples(frames, sample_width)
+    limits = _pcm_limits(sample_width)
+    if not samples or limits is None:
+        return None
+
+    min_sample, max_sample = limits
+
+    if sample_width == 1:
+        adjusted = bytearray(len(samples))
+        for index, sample in enumerate(samples):
+            scaled = int(round(sample * gain))
+            clipped = min(max(scaled, min_sample), max_sample)
+            adjusted[index] = clipped + 128
+        return bytes(adjusted)
+
+    typecode = "h" if sample_width == 2 else "i"
+    adjusted = array.array(
+        typecode,
+        (
+            min(max(int(round(sample * gain)), min_sample), max_sample)
+            for sample in samples
+        ),
+    )
+    if sys.byteorder != "little":
+        adjusted.byteswap()
+    return adjusted.tobytes()
+
+
+def _normalize_wav_rms(audio_data: bytes) -> bytes:
+    try:
+        with wave.open(BytesIO(audio_data), "rb") as input_wav:
+            if input_wav.getcomptype() != "NONE":
+                return audio_data
+            params = input_wav.getparams()
+            sample_width = input_wav.getsampwidth() or 2
+            frames = input_wav.readframes(input_wav.getnframes())
+    except (wave.Error, EOFError):
+        return audio_data
+
+    if sample_width not in (1, 2, 4) or not frames:
+        return audio_data
+
+    levels = _measure_pcm_levels(frames, sample_width)
+    if levels is None:
+        return audio_data
+    peak, rms = levels
+
+    if peak <= 0 or rms <= 0:
+        return audio_data
+
+    max_possible = float((1 << (sample_width * 8 - 1)) - 1)
+    target_rms = max_possible * 0.19
+    desired_gain = target_rms / float(rms)
+    headroom_gain = (max_possible * 0.92) / float(peak)
+    gain = min(1.85, headroom_gain, max(0.8, desired_gain))
+
+    if 0.97 <= gain <= 1.03:
+        return audio_data
+
+    adjusted = _apply_pcm_gain(frames, sample_width, gain)
+    if adjusted is None:
+        return audio_data
+
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as output_wav:
+        output_wav.setparams(params)
+        output_wav.writeframes(adjusted)
+    return buffer.getvalue()
+
+
+def _stabilize_tts_audio(audio_data: bytes, suffix: str, provider_id: str) -> tuple[bytes, str]:
+    normalized_provider = (provider_id or "").strip().lower()
+    if suffix != "wav" or normalized_provider not in _WAV_VOLUME_GUARD_PROVIDERS:
+        return audio_data, ""
+
+    ffmpeg_normalized = _normalize_wav_with_ffmpeg(audio_data)
+    if ffmpeg_normalized:
+        return ffmpeg_normalized, "wav-ffmpeg-loudnorm"
+
+    fallback_normalized = _normalize_wav_rms(audio_data)
+    if fallback_normalized != audio_data:
+        return fallback_normalized, "wav-rms-guard"
+
+    return audio_data, ""
 
 
 # ── 角色音色映射 ──────────────────────────────────────────────────────────────
@@ -174,8 +379,15 @@ async def text_to_speech(request: TTSRequest) -> Response:
             raise last_error or RuntimeError("unknown tts error")
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
         media_type, suffix = _detect_audio_content_type(audio_data)
+        normalized_audio, normalize_mode = _stabilize_tts_audio(
+            audio_data,
+            suffix,
+            provider_id,
+        )
+        if normalize_mode:
+            media_type, suffix = _detect_audio_content_type(normalized_audio)
         return Response(
-            content=audio_data,
+            content=normalized_audio,
             media_type=media_type,
             headers={
                 "Content-Disposition": f"inline; filename=tts_output.{suffix}",
@@ -184,6 +396,7 @@ async def text_to_speech(request: TTSRequest) -> Response:
                 "X-TTS-Provider": provider_id,
                 "X-TTS-Attempts": str(attempts),
                 "X-TTS-Elapsed-Ms": str(elapsed_ms),
+                "X-Audio-Normalized": normalize_mode,
             },
         )
     except Exception as e:

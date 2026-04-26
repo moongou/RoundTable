@@ -32,7 +32,7 @@ else
 fi
 
 echo "[2/3] 构建 Web..."
-flutter build web --release --pwa-strategy=none "${BUILD_ARGS[@]}"
+flutter build web --release --pwa-strategy=none --no-tree-shake-icons "${BUILD_ARGS[@]}"
 
 echo "[3/3] 部署到后端 static 目录..."
 rm -rf "$BACKEND_STATIC_DIR"

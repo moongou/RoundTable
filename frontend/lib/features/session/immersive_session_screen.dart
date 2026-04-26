@@ -151,6 +151,33 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
         normalizeSpeakerLabel(completedSpeaker);
   }
 
+  static bool shouldMergeConcurrentHumanTurnSignals({
+    required String requestedSpeaker,
+    required String humanName,
+    required bool isMyTurn,
+    required bool pendingHumanTurn,
+    required bool handApprovedToSpeak,
+  }) {
+    final normalizedRequested = normalizeSpeakerLabel(requestedSpeaker);
+    final normalizedHuman = normalizeSpeakerLabel(humanName);
+    if (normalizedRequested.isEmpty || normalizedRequested != normalizedHuman) {
+      return false;
+    }
+    return isMyTurn || pendingHumanTurn || handApprovedToSpeak;
+  }
+
+  static bool shouldSuppressRaiseHandRequest({
+    required bool isMyTurn,
+    required bool pendingHumanTurn,
+    required bool handApprovedToSpeak,
+    required bool hasRaisedHand,
+  }) {
+    return hasRaisedHand ||
+        isMyTurn ||
+        pendingHumanTurn ||
+        handApprovedToSpeak;
+  }
+
   static bool shouldResetCompletedHumanTurnOnIncomingSpeech({
     required String source,
     required String humanName,
@@ -412,6 +439,35 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
         .where((source) => source.isNotEmpty)
         .toSet();
     return speakers.length >= minGoldenQuoteSpeakers;
+  }
+
+  static bool hasHumanReviewMaterial(
+    Iterable<ChatMessage> messages, {
+    required String humanName,
+  }) {
+    final normalizedHuman = normalizeSpeakerLabel(humanName);
+    if (normalizedHuman.isEmpty) {
+      return false;
+    }
+
+    final filtered = messages
+        .where(_isMeaningfulGoldenQuoteSourceMessage)
+        .toList(growable: false);
+    if (filtered.length < minGoldenQuoteMessages) {
+      return false;
+    }
+
+    final speakers = filtered
+        .map((message) => normalizeSpeakerLabel(message.source))
+        .where((source) => source.isNotEmpty)
+        .toSet();
+    if (speakers.length < minGoldenQuoteSpeakers) {
+      return false;
+    }
+
+    return filtered.any(
+      (message) => normalizeSpeakerLabel(message.source) == normalizedHuman,
+    );
   }
 
   static bool _isMeaningfulGoldenQuoteSourceMessage(ChatMessage message) {
@@ -714,8 +770,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _micLocked = false;
   // 讨论结束后由后端 LLM 提炼出的金句。
   final List<String> _goldenQuotes = [];
+  String _humanReview = '';
   bool _discussionEnded = false;
   bool _isGeneratingGoldenQuotes = false;
+  bool _isGeneratingHumanReview = false;
+  bool _humanReviewMuted = false;
   bool _showEndingQuotesScreen = false;
   bool _mountEndingQuotesOverlay = false;
   // TTS 顺序播放队列 (i)
@@ -742,6 +801,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   int _ttsSessionSeq = 0;
   String _activeTtsSessionId = '';
   bool _ttsPumpRunning = false;
+  bool _humanReviewReadAloudActive = false;
   int _ttsSpeakerPauseCounter = 0;
   // 错误追踪：如果先收到错误事件，结束时显示错误原因而非"讨论已结束"
   String? _lastErrorMessage;
@@ -1026,6 +1086,44 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   // 每次会话分配的参与者音色表（用于思想家的哈希分配）
   final Map<String, String> _voiceMap = {};
+
+  String _resolveSpeakerVoice(
+    String speaker, {
+    bool isThinker = false,
+  }) {
+    final localSettings = ref.read(localSettingsProvider).valueOrNull;
+    final configured = resolveConfiguredVoiceForSpeaker(
+      settings: localSettings,
+      providerId: _ttsProviderId,
+      speaker: ImmersiveSessionScreen._canonicalSpeakerName(speaker),
+    );
+    final resolved = configured ??
+        ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
+          speaker,
+          ttsProvider: _ttsProviderId,
+          isThinker: isThinker,
+        );
+    _voiceMap[speaker] = resolved;
+    return resolved;
+  }
+
+  String _observerSeatAvatarUrl(String seed) {
+    final encoded = Uri.encodeComponent(seed);
+    return 'https://api.dicebear.com/7.x/personas/png?seed=$encoded&size=128&backgroundColor=b6e3f4,c0aede,d1d4f9,ffd5dc';
+  }
+
+  String _observerSeatStatusLabel() {
+    if (_isRecording) {
+      return '发言中';
+    }
+    if (_isMyTurn || _handApprovedToSpeak || _pendingHumanTurn) {
+      return '待发言';
+    }
+    if (_hasRaisedHand) {
+      return '已举手';
+    }
+    return '旁听席';
+  }
 
   @override
   void initState() {
@@ -1630,6 +1728,52 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       if (mounted) {
         setState(() {
           _isGeneratingGoldenQuotes = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _generateHumanReview() async {
+    if (_isGeneratingHumanReview) return;
+    final sourceMessages = _goldenQuoteSourceMessages();
+    if (!ImmersiveSessionScreen.hasHumanReviewMaterial(
+      sourceMessages,
+      humanName: widget.humanName,
+    )) {
+      return;
+    }
+
+    setState(() {
+      _isGeneratingHumanReview = true;
+      _humanReview = '';
+      _humanReviewMuted = false;
+    });
+
+    try {
+      final apiClient = ref.read(apiClientProvider);
+      final review = await apiClient.generateHumanReview(
+        topic: widget.topic.title,
+        humanName: widget.humanName,
+        messages: sourceMessages,
+      );
+      final normalized = review.trim();
+      if (!mounted || normalized.isEmpty) return;
+      setState(() {
+        _humanReview = normalized;
+        _humanReviewMuted = false;
+        if (_lastErrorMessage == null) {
+          _statusText = '讨论已结束，左侧可以查看李老师给你的会后点评';
+        }
+      });
+      unawaited(_readAloudHumanReview(normalized));
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('human review generation failed: $error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isGeneratingHumanReview = false;
         });
       }
     }
@@ -2348,9 +2492,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         // AI 角色使用 character-specific DiceBear styles (d)
         final style = charDiceBearStyle[name] ?? 'notionists-neutral';
         avatars[name] = diceBearUrl(name, style: style);
-        _voiceMap[name] = ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
+        _voiceMap[name] = _resolveSpeakerVoice(
           name,
-          ttsProvider: _ttsProviderId,
           isThinker: !templateAvatarMap.containsKey(name),
         );
       }
@@ -2483,11 +2626,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
           // 如果是 AI 角色/主持人消息，排队 TTS 朗读（顺序播放，i）
           if (shouldSpeak) {
-            final voice = _voiceMap[source] ??
-                ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
-                  source,
-                  ttsProvider: _ttsProviderId,
-                );
+            final voice = _resolveSpeakerVoice(source);
             for (final segment in queuedTtsSegments) {
               _enqueueTts(source: source, text: segment, voice: voice);
             }
@@ -2639,11 +2778,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               eventType: 'stream',
             );
             if (queuedTtsSegments.isNotEmpty) {
-              final voice = _voiceMap[source] ??
-                  ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
-                    source,
-                    ttsProvider: _ttsProviderId,
-                  );
+              final voice = _resolveSpeakerVoice(source);
               for (final segment in queuedTtsSegments) {
                 _enqueueTts(source: source, text: segment, voice: voice);
               }
@@ -2807,12 +2942,21 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         if (_isCompletingHumanTurn || _isFinalizingSpeech) {
           break;
         }
+        final requestedHumanSpeaker =
+            requestedSpeaker.isEmpty ? widget.humanName : requestedSpeaker;
+        if (ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
+          requestedSpeaker: requestedHumanSpeaker,
+          humanName: widget.humanName,
+          isMyTurn: _isMyTurn,
+          pendingHumanTurn: _pendingHumanTurn,
+          handApprovedToSpeak: _handApprovedToSpeak,
+        )) {
+          break;
+        }
         // If already in user's turn or actively recording, ignore duplicate requests
         if (_isMyTurn || _isRecording) {
           break;
         }
-        final requestedHumanSpeaker =
-            requestedSpeaker.isEmpty ? widget.humanName : requestedSpeaker;
         var shouldWaitForCurrentSpeech = _hasCurrentSpeakerSpeechToFinish();
         if (shouldWaitForCurrentSpeech &&
             _shouldYieldQueuedSpeechToHumanTurn()) {
@@ -2871,20 +3015,34 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         final endedWithError = _lastErrorMessage != null;
         final shouldGenerateGoldenQuotes = !endedWithError &&
             ImmersiveSessionScreen.hasGoldenQuoteMaterial(_messages);
+        final shouldGenerateHumanReview = !endedWithError &&
+            ImmersiveSessionScreen.hasHumanReviewMaterial(
+              _messages,
+              humanName: widget.humanName,
+            );
         setState(() {
           _statusText = endedWithError
               ? '会话已中断: ${_lastErrorMessage!}'
-              : shouldGenerateGoldenQuotes
+              : (shouldGenerateGoldenQuotes && shouldGenerateHumanReview)
+                  ? '讨论已结束，AI 正在整理金句，李老师也在给你写会后点评'
+                  : shouldGenerateHumanReview
+                      ? '讨论已结束，李老师正在给你写会后点评'
+                      : shouldGenerateGoldenQuotes
                   ? '讨论已结束，AI 正在整理金句，完成后可从右上角手动打开'
                   : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
           _goldenQuotes.clear();
+          _humanReview = '';
+          _humanReviewMuted = false;
           _discussionEnded = true;
           _showEndingQuotesScreen = false;
         });
         if (shouldGenerateGoldenQuotes) {
           unawaited(_generateGoldenQuotes());
+        }
+        if (shouldGenerateHumanReview) {
+          unawaited(_generateHumanReview());
         }
         break;
       case WsEventType.interrupt:
@@ -2908,11 +3066,21 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             );
             shouldWaitForCurrentSpeech = _hasCurrentSpeakerSpeechToFinish();
           }
-          final command = _commander.onInterruptApprovedForHuman(
-            mineApproved: mineApproved,
-            speaker: widget.humanName,
-            hasOngoingSpeechPlayback: shouldWaitForCurrentSpeech,
-          );
+          final shouldMergeApprovedInterrupt = mineApproved &&
+              ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
+                requestedSpeaker: widget.humanName,
+                humanName: widget.humanName,
+                isMyTurn: _isMyTurn,
+                pendingHumanTurn: _pendingHumanTurn,
+                handApprovedToSpeak: _handApprovedToSpeak,
+              );
+          final command = shouldMergeApprovedInterrupt
+              ? HumanTurnCommand.none
+              : _commander.onInterruptApprovedForHuman(
+                  mineApproved: mineApproved,
+                  speaker: widget.humanName,
+                  hasOngoingSpeechPlayback: shouldWaitForCurrentSpeech,
+                );
           setState(() {
             if (mineInterrupt) {
               _hasRaisedHand = false;
@@ -2922,7 +3090,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               content: '$interrupter 同学，请先发言。',
               type: 'system',
             ));
-            if (mineApproved && command == HumanTurnCommand.defer) {
+            if (mineApproved && shouldMergeApprovedInterrupt) {
+              _statusText = _isMyTurn ? '老师已确认由你继续发言' : '老师已经把这一轮发言留给你了';
+            } else if (mineApproved && command == HumanTurnCommand.defer) {
               _statusText = '李老师已同意你先说，现在可以开始了';
             }
           });
@@ -3710,7 +3880,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   // ── 打断 ────────────────────────────────────────────────────────────────────
 
   void _onInterrupt() {
-    if (_hasRaisedHand) return;
+    if (ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+      isMyTurn: _isMyTurn,
+      pendingHumanTurn: _pendingHumanTurn,
+      handApprovedToSpeak: _handApprovedToSpeak,
+      hasRaisedHand: _hasRaisedHand,
+    )) {
+      if (_isMyTurn || _pendingHumanTurn || _handApprovedToSpeak) {
+        _showStatusToast('老师已经把这一轮发言留给你了，不需要重复举手');
+      }
+      return;
+    }
     setState(() => _hasRaisedHand = true);
     _wsClient.sendInterrupt(speaker: widget.humanName);
     _showStatusToast('已举手，等待主持人分配发言');
@@ -4420,9 +4600,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   Future<void> _readAloudQuotes(List<String> quotes) async {
     if (_quotesReadAloudActive) return;
     _quotesReadAloudActive = true;
-    final thinkerVoice = ImmersiveSessionScreen.fixedTtsVoiceForSpeaker(
+    final thinkerVoice = _resolveSpeakerVoice(
       '思想家',
-      ttsProvider: _ttsProviderId,
       isThinker: true,
     );
     try {
@@ -4455,6 +4634,55 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     } catch (_) {}
   }
 
+  Future<void> _readAloudHumanReview(String review) async {
+    if (_humanReviewReadAloudActive || _humanReviewMuted) return;
+    final line = _stripStageDirectionsForSpeech(review).trim();
+    if (line.isEmpty) return;
+
+    _humanReviewReadAloudActive = true;
+    final teacherVoice = _resolveSpeakerVoice(
+      ImmersiveSessionScreen.teacherDisplayName,
+    );
+    final rate = ImmersiveSessionScreen.fixedSpeechRateForSpeaker(
+      ImmersiveSessionScreen.teacherDisplayName,
+      text: line,
+    );
+    try {
+      await _ttsService.speak(line, voice: teacherVoice, rate: rate);
+    } catch (_) {
+      try {
+        await _browserFallbackTts?.speak(line, voice: teacherVoice, rate: rate);
+      } catch (_) {}
+    } finally {
+      _humanReviewReadAloudActive = false;
+    }
+  }
+
+  void _stopReadAloudHumanReview() {
+    _humanReviewReadAloudActive = false;
+    try {
+      _ttsService.stop();
+    } catch (_) {}
+    try {
+      _browserFallbackTts?.stop();
+    } catch (_) {}
+  }
+
+  void _toggleHumanReviewMute() {
+    if (_humanReview.isEmpty) return;
+    final nextMuted = !_humanReviewMuted;
+    setState(() {
+      _humanReviewMuted = nextMuted;
+    });
+    if (nextMuted) {
+      _stopReadAloudHumanReview();
+      _showStatusToast('已静音老师点评朗读');
+      return;
+    }
+    _showStatusToast('已恢复老师点评朗读');
+    unawaited(_readAloudHumanReview(_humanReview));
+  }
+
   void _openEndingQuotesScreen() {
     if (_showEndingQuotesScreen && _mountEndingQuotesOverlay) {
       return;
@@ -4464,17 +4692,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _mountEndingQuotesOverlay = true;
     });
     unawaited(_endingQuotesTransitionController.forward(from: 0.0));
-  }
-
-  void _closeEndingQuotesScreen() {
-    if (!_mountEndingQuotesOverlay && !_showEndingQuotesScreen) {
-      return;
-    }
-    _stopReadAloudQuotes();
-    setState(() {
-      _showEndingQuotesScreen = false;
-    });
-    unawaited(_endingQuotesTransitionController.reverse());
   }
 
   void _exitEndingQuotesToHome() {
@@ -4621,10 +4838,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       count: 20,
     );
 
-    final canInterrupt = !_isMyTurn &&
-        _currentSpeaker.isNotEmpty &&
-        !_hasRaisedHand &&
-        !_handApprovedToSpeak;
+    final canInterrupt = _currentSpeaker.isNotEmpty &&
+        !ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+          isMyTurn: _isMyTurn,
+          pendingHumanTurn: _pendingHumanTurn,
+          handApprovedToSpeak: _handApprovedToSpeak,
+          hasRaisedHand: _hasRaisedHand,
+        );
     final showHumanTurnPromptCue =
         ImmersiveSessionScreen.shouldShowHumanTurnPromptCue(
       isMyTurn: _isMyTurn,
@@ -4689,17 +4909,26 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
               // ── 需求15：左侧金句区（暗色虚线分隔）──
               if (quoteAreaWidth > 80 &&
-                  _goldenQuotes.isNotEmpty &&
-                  !_discussionEnded)
+                  ((!_discussionEnded && _goldenQuotes.isNotEmpty) ||
+                      (_discussionEnded &&
+                          (_humanReview.isNotEmpty ||
+                              _isGeneratingHumanReview))))
                 Positioned(
                   left: 24,
                   top: 80,
                   width: quoteAreaWidth,
                   height: size.height - 160,
-                  child: _QuoteSidebar(
-                    width: quoteAreaWidth,
-                    quotes: _goldenQuotes,
-                  ),
+                  child: _discussionEnded
+                      ? _PostDiscussionReviewCard(
+                          review: _humanReview,
+                          isLoading: _isGeneratingHumanReview,
+                          isMuted: _humanReviewMuted,
+                          onToggleMute: _toggleHumanReviewMute,
+                        )
+                      : _QuoteSidebar(
+                          width: quoteAreaWidth,
+                          quotes: _goldenQuotes,
+                        ),
                 ),
 
               // ── 圆桌（左移至 1/3 处）──
@@ -4998,6 +5227,18 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                       hasRaisedHand: _hasRaisedHand,
                       canInterrupt: canInterrupt,
                       onRaiseHand: _onInterrupt,
+                      observerSeat: widget.observerMode
+                          ? _ObserverSeatBadgeData(
+                              name: widget.humanName,
+                              avatar: _observerSeatAvatarUrl(widget.humanName),
+                              statusLabel: _observerSeatStatusLabel(),
+                              hasRaisedHand: _hasRaisedHand,
+                              isReservedToSpeak: _pendingHumanTurn ||
+                                  _handApprovedToSpeak ||
+                                  _isMyTurn,
+                              isActive: _isRecording || _isMyTurn,
+                            )
+                          : null,
                       totalHeight: tableRadius * 2,
                     ),
                   ),
@@ -5777,6 +6018,7 @@ class _RightActionColumn extends StatelessWidget {
   final bool hasRaisedHand;
   final bool canInterrupt;
   final VoidCallback onRaiseHand;
+  final _ObserverSeatBadgeData? observerSeat;
   final double totalHeight;
 
   const _RightActionColumn({
@@ -5789,20 +6031,21 @@ class _RightActionColumn extends StatelessWidget {
     required this.hasRaisedHand,
     required this.canInterrupt,
     required this.onRaiseHand,
+    this.observerSeat,
     required this.totalHeight,
   });
 
   @override
   Widget build(BuildContext context) {
-    // 3 buttons share totalHeight (= table diameter)
-    final btnCount = 3;
-    final spacing = 12.0;
-    final btnHeight = ((totalHeight - spacing * (btnCount - 1)) / btnCount)
+    final hasObserverSeat = observerSeat != null;
+    final spacing = hasObserverSeat ? 10.0 : 12.0;
+    final observerHeight = hasObserverSeat ? 92.0 : 0.0;
+    final btnHeight = ((totalHeight - observerHeight - spacing * 3) / 3)
         .clamp(48.0, 120.0);
     return SizedBox(
       height: totalHeight,
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        mainAxisAlignment: MainAxisAlignment.start,
         mainAxisSize: MainAxisSize.max,
         children: [
           _SpeakButton(
@@ -5813,11 +6056,145 @@ class _RightActionColumn extends StatelessWidget {
             size: btnHeight,
           ),
           _SkipButton(onTap: showSkip ? onSkip : null, size: btnHeight),
+          SizedBox(height: spacing),
           _FloatingRaiseHandButton(
             hasRaisedHand: hasRaisedHand,
             canInterrupt: canInterrupt,
             onTap: onRaiseHand,
             size: btnHeight,
+          ),
+          if (observerSeat != null) ...[
+            SizedBox(height: spacing),
+            _ObserverSeatBadge(data: observerSeat!),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ObserverSeatBadgeData {
+  final String name;
+  final String avatar;
+  final String statusLabel;
+  final bool hasRaisedHand;
+  final bool isReservedToSpeak;
+  final bool isActive;
+
+  const _ObserverSeatBadgeData({
+    required this.name,
+    required this.avatar,
+    required this.statusLabel,
+    required this.hasRaisedHand,
+    required this.isReservedToSpeak,
+    required this.isActive,
+  });
+}
+
+class _ObserverSeatBadge extends StatelessWidget {
+  final _ObserverSeatBadgeData data;
+
+  const _ObserverSeatBadge({required this.data});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 84,
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            const Color(0xFF11202C).withValues(alpha: 0.94),
+            const Color(0xFF1C2F42).withValues(alpha: 0.84),
+          ],
+        ),
+        border: Border.all(
+          color: data.isReservedToSpeak || data.isActive
+              ? AppColors.amberGold.withValues(alpha: 0.68)
+              : Colors.white.withValues(alpha: 0.16),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.18),
+            blurRadius: 16,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: data.isActive
+                        ? AppColors.amberGold
+                        : Colors.white.withValues(alpha: 0.3),
+                    width: 2,
+                  ),
+                ),
+                child: ClipOval(
+                  child: Image.network(
+                    data.avatar,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const Center(
+                      child: Text('🙂', style: TextStyle(fontSize: 22)),
+                    ),
+                  ),
+                ),
+              ),
+              if (data.hasRaisedHand)
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    width: 18,
+                    height: 18,
+                    decoration: const BoxDecoration(
+                      color: AppColors.accentWarm,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.back_hand,
+                      size: 10,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            data.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            data.statusLabel,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: data.isReservedToSpeak || data.isActive
+                  ? AppColors.amberGold
+                  : Colors.white.withValues(alpha: 0.62),
+              fontSize: 9.5,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ],
       ),
@@ -6376,6 +6753,197 @@ class _QuoteSidebar extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PostDiscussionReviewCard extends StatelessWidget {
+  final String review;
+  final bool isLoading;
+  final bool isMuted;
+  final VoidCallback onToggleMute;
+
+  const _PostDiscussionReviewCard({
+    required this.review,
+    required this.isLoading,
+    required this.isMuted,
+    required this.onToggleMute,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final displayText = isLoading
+        ? '李老师正在回看你刚才的发言，准备留下一段更具体的会后点评……'
+        : review;
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(30),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            const Color(0xFFF5DFC0).withValues(alpha: 0.12),
+            const Color(0xFF1B2D40).withValues(alpha: 0.94),
+            const Color(0xFF13202B).withValues(alpha: 0.98),
+          ],
+        ),
+        border: Border.all(
+          color: const Color(0xFFF4D38B).withValues(alpha: 0.2),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.22),
+            blurRadius: 28,
+            offset: const Offset(0, 18),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(22, 20, 22, 22),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '老师评语',
+                        style: TextStyle(
+                          color: const Color(0xFFFFE8B5).withValues(alpha: 0.9),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 2.4,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '讨论结束后，留给真人参与者的一段会后回声。',
+                        style: GoogleFonts.notoSerifSc(
+                          color: Colors.white.withValues(alpha: 0.56),
+                          fontSize: 10.5,
+                          height: 1.6,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (!isLoading && review.isNotEmpty)
+                  InkWell(
+                    onTap: onToggleMute,
+                    borderRadius: BorderRadius.circular(999),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.06),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: (isMuted
+                                  ? Colors.white
+                                  : const Color(0xFFF4D38B))
+                              .withValues(alpha: 0.28),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            isMuted
+                                ? Icons.volume_up_rounded
+                                : Icons.volume_off_rounded,
+                            size: 14,
+                            color: isMuted
+                                ? Colors.white.withValues(alpha: 0.75)
+                                : const Color(0xFFF4D38B),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            isMuted ? '朗读' : '静音',
+                            style: TextStyle(
+                              color: isMuted
+                                  ? Colors.white.withValues(alpha: 0.75)
+                                  : const Color(0xFFF4D38B),
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 22),
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '“',
+                    style: TextStyle(
+                      color: const Color(0xFFF4D38B),
+                      fontSize: 52,
+                      fontWeight: FontWeight.w700,
+                      height: 0.8,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Text(
+                        displayText,
+                        style: GoogleFonts.notoSerifSc(
+                          color: const Color(0xFFF9F6F0)
+                              .withValues(alpha: isLoading ? 0.72 : 1.0),
+                          fontSize: 23,
+                          height: 1.95,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    height: 1,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          const Color(0xFFF4D38B).withValues(alpha: 0.0),
+                          const Color(0xFFF4D38B).withValues(alpha: 0.5),
+                          const Color(0xFF7FD7C4).withValues(alpha: 0.24),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  isLoading ? '评语生成中' : '由李老师朗读',
+                  style: GoogleFonts.notoSerifSc(
+                    color: Colors.white.withValues(alpha: 0.46),
+                    fontSize: 10.5,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );

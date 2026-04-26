@@ -24,6 +24,7 @@ const _prefsKeyServerUrl = 'server_url';
 const _prefsKeyLlmProvider = 'llm_provider';
 const _prefsKeyAsrProvider = 'asr_provider';
 const _prefsKeyTtsProvider = 'tts_provider';
+const _prefsKeyTtsVoiceAssignments = 'tts_voice_assignments';
 const _prefsKeyPushToTalk = 'push_to_talk';
 const _prefsKeyStreamUserSubtitles = 'stream_user_subtitles';
 const _prefsKeyAsrStreamingEnabled = 'asr_streaming_enabled';
@@ -63,6 +64,7 @@ LocalSettings resolveInitialLocalSettings({
   required String? storedLlmProvider,
   required String? storedAsrProvider,
   required String? storedTtsProvider,
+  String? storedTtsVoiceAssignments,
   required bool hasStoredPushToTalk,
   required bool? storedPushToTalk,
   bool hasStoredStreamUserSubtitles = false,
@@ -97,6 +99,8 @@ LocalSettings resolveInitialLocalSettings({
         : (normalizedTtsProvider.isNotEmpty
             ? normalizedTtsProvider
             : 'edge_tts'),
+    ttsVoiceAssignments:
+        decodeStoredVoiceAssignments(storedTtsVoiceAssignments),
     pushToTalk: hasStoredPushToTalk
         ? (storedPushToTalk ?? true)
         : (remoteConfig?.pushToTalk ?? true),
@@ -147,6 +151,7 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
       storedLlmProvider: prefs.getString(_prefsKeyLlmProvider),
       storedAsrProvider: storedAsrProvider,
       storedTtsProvider: storedTtsProvider,
+      storedTtsVoiceAssignments: prefs.getString(_prefsKeyTtsVoiceAssignments),
       hasStoredPushToTalk: hasStoredPushToTalk,
       storedPushToTalk: prefs.getBool(_prefsKeyPushToTalk),
       hasStoredStreamUserSubtitles: hasStoredStreamUserSubtitles,
@@ -199,6 +204,37 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     );
   }
 
+  Future<void> saveTtsVoiceAssignments(Map<String, String> assignments) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _prefsKeyTtsVoiceAssignments,
+      encodeStoredVoiceAssignments(assignments),
+    );
+    state = AsyncData(
+      state.value!.copyWith(ttsVoiceAssignments: assignments),
+    );
+  }
+
+  Future<void> setTtsVoiceAssignment({
+    required String providerId,
+    required String speaker,
+    required String voice,
+  }) async {
+    final current = state.valueOrNull ?? const LocalSettings();
+    final next = current.withVoiceAssignment(
+      providerId: providerId,
+      speaker: speaker,
+      voice: voice,
+    );
+    await saveTtsVoiceAssignments(next.ttsVoiceAssignments);
+  }
+
+  Future<void> resetTtsVoiceAssignmentsForProvider(String providerId) async {
+    final current = state.valueOrNull ?? const LocalSettings();
+    final next = current.resetVoiceAssignmentsForProvider(providerId);
+    await saveTtsVoiceAssignments(next.ttsVoiceAssignments);
+  }
+
   /// 更新 Push-to-Talk 开关
   Future<void> setPushToTalk(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
@@ -246,6 +282,21 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     final rawTtsProvider = (snapshot['tts_provider'] as String? ?? '').trim();
     final rawMicActivationMode = snapshot['mic_activation_mode'] as String?;
     final rawMicControlMode = snapshot['mic_control_mode'] as String?;
+    final rawVoiceAssignments = snapshot['tts_voice_assignments'];
+
+    Map<String, String> snapshotVoiceAssignments = current.ttsVoiceAssignments;
+    if (rawVoiceAssignments is Map) {
+      final normalized = <String, String>{};
+      rawVoiceAssignments.forEach((key, value) {
+        final normalizedKey = key.toString().trim();
+        final normalizedValue = value?.toString().trim() ?? '';
+        if (normalizedKey.isEmpty || normalizedValue.isEmpty) {
+          return;
+        }
+        normalized[normalizedKey] = normalizedValue;
+      });
+      snapshotVoiceAssignments = normalized;
+    }
 
     final next = current.copyWith(
       serverUrl: rawServerUrl.isNotEmpty ? rawServerUrl : current.serverUrl,
@@ -256,6 +307,7 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
       ttsProvider: rawTtsProvider.isNotEmpty
           ? _normalizeTtsProvider(rawTtsProvider)
           : current.ttsProvider,
+      ttsVoiceAssignments: snapshotVoiceAssignments,
       pushToTalk: snapshot['push_to_talk'] as bool? ?? current.pushToTalk,
       streamUserSubtitles: snapshot['stream_user_subtitles'] as bool? ??
           current.streamUserSubtitles,
@@ -273,6 +325,10 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     await prefs.setString(_prefsKeyLlmProvider, next.llmProvider);
     await prefs.setString(_prefsKeyAsrProvider, next.asrProvider);
     await prefs.setString(_prefsKeyTtsProvider, next.ttsProvider);
+    await prefs.setString(
+      _prefsKeyTtsVoiceAssignments,
+      encodeStoredVoiceAssignments(next.ttsVoiceAssignments),
+    );
     await prefs.setBool(_prefsKeyPushToTalk, next.pushToTalk);
     await prefs.setBool(_prefsKeyStreamUserSubtitles, next.streamUserSubtitles);
     await prefs.setBool(_prefsKeyAsrStreamingEnabled, next.asrStreamingEnabled);

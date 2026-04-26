@@ -58,10 +58,14 @@ class _SafetyFilterStub:
 class _DiscussionFloorManagerStub:
     def __init__(self, events) -> None:
         self._events = events
+        self.submitted_inputs = []
 
     async def run(self, _topic):
         for event in self._events:
             yield event
+
+    async def submit_human_input(self, name: str, text: str) -> None:
+        self.submitted_inputs.append((name, text))
 
 
 @pytest.mark.asyncio
@@ -1109,6 +1113,27 @@ async def test_request_interrupt_notifies_human_hand_raise_callback() -> None:
     assert hand_raises == ['豆苗']
 
 
+@pytest.mark.asyncio
+async def test_request_interrupt_is_ignored_when_human_turn_is_already_waiting() -> None:
+    hand_raises: list[str] = []
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+        designated_speaker_setter=lambda _name: None,
+        human_hand_raise_notifier=lambda name: hand_raises.append(name),
+    )
+    floor_manager.set_display_name_map({'moderator': '李老师', '豆苗': '豆苗'})
+    floor_manager.current_speaker = '豆苗'
+    floor_manager.state = FloorState.HUMAN_TURN_WAITING
+
+    await floor_manager.request_interrupt('豆苗')
+
+    assert hand_raises == []
+    assert floor_manager.state == FloorState.HUMAN_TURN_WAITING
+
+
 def test_turn_scheduler_reasks_closing_question_after_single_new_follow_up() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
@@ -1183,6 +1208,30 @@ async def test_floor_manager_clears_stale_designation_on_human_input_requested()
     assert result is not None
     assert result['event_type'] == 'human_input_requested'
     assert designated_updates[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_marks_interrupt_origin_on_human_input_requested() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map({'moderator': '李老师', '豆苗': '豆苗'})
+    floor_manager.current_speaker = 'moderator'
+
+    await floor_manager.request_interrupt('豆苗')
+    floor_manager.current_speaker = '豆苗'
+
+    result = await floor_manager._process_event(
+        UserInputRequestedEvent(request_id='req-interrupt', source='豆苗')
+    )
+
+    assert result is not None
+    assert result['event_type'] == 'human_input_requested'
+    assert result['data']['speaker'] == '豆苗'
+    assert result['data']['reason'] == 'interrupt'
 
 
 @pytest.mark.asyncio
@@ -1388,3 +1437,87 @@ async def test_run_discussion_maps_stream_source_to_display_name() -> None:
             'content': '我想从习惯形成的角度看看。',
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_run_discussion_observer_mode_auto_skips_normal_human_turn() -> None:
+    recorded = []
+
+    async def _send_event(event_type: str, data: dict) -> bool:
+        recorded.append((event_type, data))
+        return True
+
+    floor_manager = _DiscussionFloorManagerStub(
+        [
+            {
+                'event_type': 'human_input_requested',
+                'data': {
+                    'speaker': '豆苗',
+                    'reason': 'normal',
+                },
+            },
+            {
+                'event_type': 'ended',
+                'data': {'session_id': 'session-test'},
+            },
+        ]
+    )
+
+    result = await _run_discussion(
+        _send_event,
+        floor_manager,
+        '测试话题',
+        observer_mode=True,
+    )
+
+    assert result == 'completed'
+    assert recorded[0] == (
+        'human_input_requested',
+        {
+            'speaker': '豆苗',
+            'reason': 'normal',
+        },
+    )
+    assert floor_manager.submitted_inputs == [('豆苗', '（旁听）')]
+
+
+@pytest.mark.asyncio
+async def test_run_discussion_observer_mode_keeps_interrupt_human_turn() -> None:
+    recorded = []
+
+    async def _send_event(event_type: str, data: dict) -> bool:
+        recorded.append((event_type, data))
+        return True
+
+    floor_manager = _DiscussionFloorManagerStub(
+        [
+            {
+                'event_type': 'human_input_requested',
+                'data': {
+                    'speaker': '豆苗',
+                    'reason': 'interrupt',
+                },
+            },
+            {
+                'event_type': 'ended',
+                'data': {'session_id': 'session-test'},
+            },
+        ]
+    )
+
+    result = await _run_discussion(
+        _send_event,
+        floor_manager,
+        '测试话题',
+        observer_mode=True,
+    )
+
+    assert result == 'completed'
+    assert recorded[0] == (
+        'human_input_requested',
+        {
+            'speaker': '豆苗',
+            'reason': 'interrupt',
+        },
+    )
+    assert floor_manager.submitted_inputs == []

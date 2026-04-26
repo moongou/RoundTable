@@ -154,6 +154,7 @@ class FloorManager:
         self._min_human_turn_window_sec = 8.0
         self._human_turn_started_mono = 0.0
         self._last_human_input_requested_speaker = ""
+        self._pending_human_input_reason = "normal"
         self._human_turn_idle_notice_sent = False
 
         # 暂停状态
@@ -1327,7 +1328,10 @@ class FloorManager:
                 self._touch_progress("human_input_requested_waiting")
             return {
                 "event_type": "human_input_requested",
-                "data": {"speaker": speaker},
+                "data": {
+                    "speaker": speaker,
+                    "reason": self._pending_human_input_reason or "normal",
+                },
             }
 
         # 任务完成结果
@@ -1353,6 +1357,7 @@ class FloorManager:
         normalized_text = (text or "").strip()
         self._touch_progress("submit_human_input")
         self._last_human_input_requested_speaker = ""
+        self._pending_human_input_reason = "normal"
 
         logger.info("[FloorManager] 收到人类输入: name=%s, text_len=%d", normalized_name, len(normalized_text))
 
@@ -1447,8 +1452,16 @@ class FloorManager:
             logger.info("[FloorManager] 非人类参与者 %s 尝试举手打断，忽略", speaker)
             return
 
+        if (
+            self.current_speaker == speaker_agent_name
+            and self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+        ):
+            logger.info("[FloorManager] %s 已经获得发言权，忽略重复举手", display_speaker)
+            return
+
         logger.info(f"打断请求: {display_speaker} 请求发言 (当前发言者: {self.current_speaker})")
         self._interrupt_queue.append(display_speaker)
+        self._pending_human_input_reason = "interrupt"
         if self._human_hand_raise_notifier is not None:
             self._human_hand_raise_notifier(speaker_agent_name)
 

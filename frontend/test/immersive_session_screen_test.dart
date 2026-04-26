@@ -131,6 +131,73 @@ void main() {
     );
   });
 
+  test('concurrent human turn signals merge into one user turn', () {
+    expect(
+      ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
+        requestedSpeaker: '豆苗',
+        humanName: '豆苗',
+        isMyTurn: false,
+        pendingHumanTurn: true,
+        handApprovedToSpeak: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
+        requestedSpeaker: '豆苗',
+        humanName: '豆苗',
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: true,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
+        requestedSpeaker: '李老师',
+        humanName: '豆苗',
+        isMyTurn: false,
+        pendingHumanTurn: true,
+        handApprovedToSpeak: true,
+      ),
+      isFalse,
+    );
+  });
+
+  test('raise hand is suppressed once human turn is already reserved', () {
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: true,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: true,
+        hasRaisedHand: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+      ),
+      isFalse,
+    );
+  });
+
   test('inter-speaker pause only applies between AI speakers', () {
     expect(
       ImmersiveSessionScreen.shouldInsertInterSpeakerPause(
@@ -615,6 +682,31 @@ void main() {
     ];
 
     expect(ImmersiveSessionScreen.hasGoldenQuoteMaterial(messages), isTrue);
+  });
+
+  test('human review requires a real user contribution', () {
+    final messages = <ChatMessage>[
+      const ChatMessage(source: '李老师', content: '同学们好，我们聊聊分数。'),
+      const ChatMessage(source: '小探', content: '我觉得分数像温度计。'),
+      const ChatMessage(source: '豆苗', content: '我想知道会做题是不是就算真懂。'),
+      const ChatMessage(source: '小理', content: '如果能讲清楚原因，才更像真懂。'),
+    ];
+
+    expect(
+      ImmersiveSessionScreen.hasHumanReviewMaterial(
+        messages,
+        humanName: '豆苗',
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.hasHumanReviewMaterial(
+        messages.where((message) => message.source != '豆苗'),
+        humanName: '豆苗',
+      ),
+      isFalse,
+    );
   });
 
   test('fixed role voices stay stable for openvoice and edge providers', () {

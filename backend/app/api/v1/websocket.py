@@ -758,12 +758,13 @@ async def _run_discussion(
             # 请求人类输入 - 直接推送给前端
             data = dict(event.get("data", {}))
             speaker = (data.get("speaker") or "").strip()
+            request_reason = (data.get("reason") or "normal").strip().lower()
             display_speaker = speaker
             if speaker and agent_display_map is not None:
                 display_speaker = agent_display_map.get(speaker, speaker)
                 data["speaker"] = display_speaker
             await send_event("human_input_requested", data)
-            if observer_mode and display_speaker:
+            if observer_mode and display_speaker and request_reason != "interrupt":
                 try:
                     await floor_manager.submit_human_input(display_speaker, "（旁听）")
                 except Exception:

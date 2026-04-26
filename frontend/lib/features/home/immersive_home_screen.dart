@@ -862,7 +862,9 @@ class _TopBar extends StatelessWidget {
           const Spacer(),
           // 需求16：旁听模式切换
           Tooltip(
-            message: observerMode ? '旁听模式：已开启（用户不参与发言）' : '旁听模式：关闭',
+            message: observerMode
+                ? '旁听模式：已开启（用户可举手申请发言）'
+                : '旁听模式：关闭',
             child: InkWell(
               borderRadius: BorderRadius.circular(20),
               onTap: () => onObserverModeChanged(!observerMode),

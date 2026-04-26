@@ -1,33 +1,110 @@
-# RoundTable - 圆桌思辨讨论平台
+# RoundTable
 
-面向中国小学生的 AI 引导思辨讨论平台。1-3名人类参与者 + AI虚拟角色，由AI主持人引导圆桌讨论。
+RoundTable 是一个面向中文儿童讨论场景的沉浸式 AI 圆桌思辨平台。它把主持老师、虚拟学生、思想家角色和真人用户放进同一场讨论里，用语音、实时字幕、金句整理、历史回放和会后点评把一次讨论完整保留下来。
 
-## 架构
+当前发布版本：v1.0.0
 
-- **后端**: Python FastAPI + AutoGen v0.4 (SelectorGroupChat)
-- **前端**: Flutter (跨平台)
-- **语音** (Phase 2): LiveKit + Deepgram STT + Azure TTS
-- **LLM**: 可插拔，支持 OpenAI / 通义千问 / DeepSeek
+## 核心能力
+
+- 沉浸式圆桌讨论：李老师主持，多名 AI 角色与真人用户围绕同一话题展开讨论。
+- 纯语音真人参与：支持按住说话、自动跳过、发言窗口倒计时、语音识别状态反馈。
+- 旁听模式可举手：旁听时不会进入常规轮次，但可以举手申请发言，并在 UI 中显示独立旁听席徽章。
+- 会后老师点评：讨论结束后，左侧空白区会生成一段针对真人用户表现的会后评语，并默认使用老师音色自动朗读，可手动静音或重播。
+- 今日金句：后端基于讨论内容提炼“今日金句”，前端支持独立查看与朗读。
+- 完整历史留存：保存会话历史、完整剧本、真人录音、导出 JSON/Markdown、打包 ZIP。
+- 开发面板联动：通过 devpanel 可查看历史、回放剧本、执行导出与调试运行状态。
+- 多语音提供商：前端设置页支持 Edge TTS、OpenVoice、VibeVoice、ChatTTS 等音色分配与预览。
+- 语音稳定性增强：后端对本地 WAV TTS 输出做响度守卫，尽量把音量控制在稳定范围内。
+
+## 项目结构
+
+- backend：FastAPI 后端、讨论调度、WebSocket、历史存储、TTS/ASR API。
+- frontend：Flutter 客户端，负责沉浸式圆桌 UI、设置页、语音与 WebSocket 接线。
+- backend/static：Flutter Web 构建产物，由根目录脚本同步生成。
+- docs：重建方案、规格说明与补充设计资料。
+- CapsWriter-Offline：离线识别相关独立子项目。
+- devpanel.js：本地开发面板入口。
+
+## 技术栈
+
+- 后端：Python 3.11+、FastAPI、AutoGen AgentChat、httpx、pytest。
+- 前端：Flutter 3、Riverpod、Dio、WebSocket、Google Fonts。
+- 讨论模型：可插拔 LLM 工厂，支持主持老师、虚拟角色、思想家等多类 agent。
+- 语音链路：统一 TTS/ASR API，支持多 provider 选择、配置保存与运行时切换。
 
 ## 快速开始
 
-### 后端
+### 1. 启动后端
 
 ```bash
 cd backend
-cp .env.example .env  # 填入你的 API Key
-pip install -e .
-python -m app.main
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-### 前端
+### 2. 启动前端
 
 ```bash
 cd frontend
 flutter pub get
-flutter run
+flutter run -d chrome
 ```
 
-## 项目状态
+### 3. 构建 Web 并同步到后端
 
-Phase 1 (文字版 MVP) 开发中。
+```bash
+cd /path/to/RoundTable
+./build_web.sh
+```
+
+构建完成后，Flutter Web 产物会覆盖到 backend/static，可直接由后端托管。
+
+## 常用开发命令
+
+后端测试：
+
+```bash
+cd backend
+.venv/bin/pytest
+```
+
+前端测试：
+
+```bash
+cd frontend
+flutter test
+```
+
+只跑会话页相关测试：
+
+```bash
+cd frontend
+flutter test test/immersive_session_screen_test.dart
+```
+
+本地开发面板：
+
+```bash
+cd /path/to/RoundTable
+node devpanel.js
+```
+
+## 当前实现重点
+
+- 历史详情页可查看完整剧本，并联动真人录音回放。
+- 导出支持正式脚本导出和可选 ZIP 打包。
+- 设置页已支持多 TTS 服务的音色工坊配置与预览。
+- 旁听模式下，真人用户可举手申请发言；当老师刚好已安排发言时，系统会把“点名”和“举手”合并成同一轮人类回合，避免重复回合导致卡住。
+- 讨论结束后可自动生成金句与老师评语，两者互不冲突。
+
+## 发布记录
+
+- 当前正式版本见 [CHANGELOG.md](CHANGELOG.md)。
+- 以后所有带 tag、version、v 标识的发布，都应在 CHANGELOG 中同步记录新增功能、稳定性改进和体验提升。
+
+## 说明
+
+- 仓库内部分语音服务依赖本地模型或外部服务，需要按本机环境单独配置。
+- 若修改了 Flutter Web 运行时代码，请记得重新执行 build_web.sh，同步 backend/static。

@@ -29,6 +29,11 @@ from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker, thinker_label
 from app.core.topics import FREE_TOPIC_CATEGORY_ID, FREE_TOPIC_CATEGORY_NAME, get_topic_by_id
 from app.core.turn_scheduler import create_discussion_team
+from app.core.user_review import (
+    build_user_review_prompt,
+    has_enough_user_review_material,
+    parse_user_review_response,
+)
 from app.models.session import (
     CreateSessionRequest,
     DiscussionStatus,
@@ -56,6 +61,12 @@ class GenerateGoldenQuotesRequest(BaseModel):
     topic: str
     messages: list[GoldenQuoteMessage] = Field(default_factory=list)
     max_quotes: int = 4
+
+
+class GenerateHumanReviewRequest(BaseModel):
+    topic: str
+    human_name: str
+    messages: list[GoldenQuoteMessage] = Field(default_factory=list)
 
 
 @router.post("/", response_model=SessionResponse)
@@ -203,6 +214,41 @@ async def generate_golden_quotes(request: GenerateGoldenQuotesRequest):
         return {
             'eligible': True,
             'quotes': [],
+            'message': f'生成失败: {exc}',
+        }
+
+
+@router.post('/human-review')
+async def generate_human_review(request: GenerateHumanReviewRequest):
+    """用当前配置的 LLM 为真人学生生成一段会后点评。"""
+    messages = [message.model_dump() for message in request.messages]
+    if not has_enough_user_review_material(messages, human_name=request.human_name):
+        return {
+            'eligible': False,
+            'review': '',
+            'message': '真人发言材料不足，暂不生成点评',
+        }
+
+    prompt = build_user_review_prompt(
+        request.topic,
+        request.human_name,
+        messages,
+    )
+    try:
+        model_client = create_moderator_client()
+        response = await model_client.create([UserMessage(content=prompt, source='user')])
+        raw_content = response.content if isinstance(response.content, str) else str(response.content)
+        review = parse_user_review_response(raw_content)
+        return {
+            'eligible': True,
+            'review': review,
+            'message': 'ok' if review else '模型未返回可用点评',
+        }
+    except Exception as exc:
+        logger.exception('generate human review failed')
+        return {
+            'eligible': True,
+            'review': '',
             'message': f'生成失败: {exc}',
         }
 
