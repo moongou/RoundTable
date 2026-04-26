@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:roundtable/models/discussion_models.dart';
 import 'package:roundtable/features/session/immersive_session_screen.dart';
@@ -187,6 +188,36 @@ void main() {
       ImmersiveSessionScreen.aiSubtitleLeadIn,
       Duration.zero,
     );
+  });
+
+  testWidgets('ending quotes exit clears stack and returns home',
+      (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        initialRoute: '/session',
+        routes: {
+          ImmersiveSessionScreen.homeRouteName: (_) =>
+              const Scaffold(body: Text('home-screen')),
+          '/session': (context) => Scaffold(
+                body: Center(
+                  child: FilledButton(
+                    onPressed: () =>
+                        ImmersiveSessionScreen.exitEndingQuotesToHome(context),
+                    child: const Text('exit-ending-quotes'),
+                  ),
+                ),
+              ),
+        },
+      ),
+    );
+
+    expect(find.text('exit-ending-quotes'), findsOneWidget);
+
+    await tester.tap(find.text('exit-ending-quotes'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('home-screen'), findsOneWidget);
+    expect(find.text('exit-ending-quotes'), findsNothing);
   });
 
   test('thinker handoff pauses are longer than ordinary AI handoffs', () {
@@ -442,6 +473,35 @@ void main() {
         '这是一个比较长的用户发言，用来确认分成两页字幕时，保留窗口会被拉长，而不是只有短短三秒就切走。',
       ).inMilliseconds,
       greaterThan(3000),
+    );
+  });
+
+  test('human subtitle stays visible until AI playback actually starts', () {
+    expect(
+      ImmersiveSessionScreen.shouldSwapSubtitleBeforeAiPlaybackStarts(
+        currentCenterSpeaker: '豆苗',
+        humanName: '豆苗',
+        playbackStarted: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldSwapSubtitleBeforeAiPlaybackStarts(
+        currentCenterSpeaker: '豆苗',
+        humanName: '豆苗',
+        playbackStarted: true,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldSwapSubtitleBeforeAiPlaybackStarts(
+        currentCenterSpeaker: '李老师',
+        humanName: '豆苗',
+        playbackStarted: false,
+      ),
+      isTrue,
     );
   });
 

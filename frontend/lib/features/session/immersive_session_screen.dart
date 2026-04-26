@@ -27,6 +27,7 @@ enum _OpeningCueState { preparing, ready, done }
 /// 沉浸式讨论界面 - 圆桌围坐体验
 class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   static const String defaultServerUrl = 'http://localhost:8001';
+  static const String homeRouteName = '/home';
   static const String defaultAsrProvider = 'funasr';
   static const String defaultTtsProvider = 'edge_tts';
   static const Duration humanTurnAutoSkipWindow = Duration(seconds: 30);
@@ -227,6 +228,18 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     return '大家都在品味你的发言……';
   }
 
+  static bool shouldSwapSubtitleBeforeAiPlaybackStarts({
+    required String currentCenterSpeaker,
+    required String humanName,
+    required bool playbackStarted,
+  }) {
+    if (playbackStarted) {
+      return true;
+    }
+    return _canonicalSpeakerName(currentCenterSpeaker) !=
+        _canonicalSpeakerName(humanName);
+  }
+
   static Duration humanSubtitleHoldDurationFor(String text) {
     final chars = text.trim().runes.length;
     final holdMs = (chars * 65).clamp(1800, 5200).toInt();
@@ -419,6 +432,11 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool manuallyRequested,
   }) {
     return discussionEnded && hasGoldenQuotes && manuallyRequested;
+  }
+
+  static void exitEndingQuotesToHome(BuildContext context) {
+    Navigator.of(context)
+        .pushNamedAndRemoveUntil(homeRouteName, (route) => false);
   }
 
   static String normalizeSpeakerLabel(String speaker) {
@@ -687,6 +705,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   String _currentSpeaker = '';
   bool _isMyTurn = false;
   String _statusText = '连接中...';
+  String _discussionSessionId = '';
   _OpeningCueState _openingCueState = _OpeningCueState.preparing;
   DateTime? _openingReadyShownAt;
   bool _hasRaisedHand = false;
@@ -2179,7 +2198,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         observerMode: widget.observerMode,
       );
 
-      setState(() => _statusText = '已连接');
+      setState(() {
+        _discussionSessionId = sessionId;
+        _statusText = '已连接';
+      });
 
       // 连接后立即预填参与者，确保主持人(老师)和所有角色从一开始就显示在圆桌上
       _prePopulateParticipants(seededParticipants);
@@ -3120,6 +3142,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       return;
     }
     final submitText = refined.trim().isNotEmpty ? refined.trim() : rawText;
+    final recording = await _persistLastAsrCaptureForHistory(submitText);
     _reportAsrStatus(
       'submitted',
       listening: _asrService.isListening,
@@ -3127,7 +3150,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       isFinal: true,
     );
 
-    _wsClient.sendHumanInput(speaker: widget.humanName, content: submitText);
+    _wsClient.sendHumanInput(
+      speaker: widget.humanName,
+      content: submitText,
+      recording: recording,
+    );
     _awaitingAiResponseAfterHumanSubmit = true;
     _scheduleHumanResponseWatchdog();
     _completedHumanTurnSpeaker = widget.humanName;
@@ -3149,6 +3176,39 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _startSubtitleRetain(submitText);
     _holdAiUntilHumanSubtitleDone(submitText);
     unawaited(_applyPendingVoiceConfigIfIdle());
+  }
+
+  Future<Map<String, dynamic>?> _persistLastAsrCaptureForHistory(
+      String transcript) async {
+    if (_discussionSessionId.isEmpty) {
+      return null;
+    }
+
+    final capture = await _asrService.takeLastCapture();
+    if (capture == null || capture.bytes.isEmpty) {
+      return null;
+    }
+
+    try {
+      final result = await ref.read(apiClientProvider).uploadMeetingRecording(
+            sessionId: _discussionSessionId,
+            speaker: widget.humanName,
+            audioBytes: capture.bytes,
+            fileExtension: capture.fileExtension,
+            contentType: capture.contentType,
+            durationMs: capture.durationMs,
+            transcript: transcript,
+          );
+      final rawRecording = result['recording'];
+      if (rawRecording is Map) {
+        return Map<String, dynamic>.from(rawRecording);
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('[HistoryRecording] upload failed: $error');
+      }
+    }
+    return null;
   }
 
   // ── 跳过本轮发言 ────────────────────────────────────────────────────────────
@@ -3444,8 +3504,20 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
       }
 
-      // 字幕先短暂出现，再启动语音，让观感更接近真实讨论。
-      if (mounted) {
+      var subtitleActivated = false;
+
+      void activateSubtitleAtSpeechStart({required bool playbackStarted}) {
+        if (!mounted || subtitleActivated) return;
+        final shouldSwap =
+            ImmersiveSessionScreen.shouldSwapSubtitleBeforeAiPlaybackStarts(
+          currentCenterSpeaker: _centerSpeaker,
+          humanName: widget.humanName,
+          playbackStarted: playbackStarted,
+        );
+        if (!shouldSwap) {
+          return;
+        }
+        subtitleActivated = true;
         setState(() {
           _currentSpeaker = item.source;
           _centerSpeaker = item.source;
@@ -3456,6 +3528,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         });
         _debugSubtitleLog(triggerRole: item.source, note: 'tts render start');
         _buildParticipants();
+      }
+
+      if (mounted) {
+        activateSubtitleAtSpeechStart(playbackStarted: false);
       }
       await Future<void>.delayed(ImmersiveSessionScreen.aiSubtitleLeadIn);
 
@@ -3473,7 +3549,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         for (var attempt = 0; attempt < 2 && !played; attempt++) {
           try {
             await _ttsService
-                .speak(item.text, voice: item.voice, rate: speed)
+                .speak(
+                  item.text,
+                  voice: item.voice,
+                  rate: speed,
+                  onStart: () => activateSubtitleAtSpeechStart(
+                    playbackStarted: true,
+                  ),
+                )
                 .timeout(timeout);
             played = true;
           } catch (e) {
@@ -4394,12 +4477,19 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     unawaited(_endingQuotesTransitionController.reverse());
   }
 
+  void _exitEndingQuotesToHome() {
+    if (!mounted) {
+      return;
+    }
+    ImmersiveSessionScreen.exitEndingQuotesToHome(context);
+  }
+
   Widget _buildEndingQuotesOverlay(Size size) {
     return AnimatedBuilder(
       animation: _endingQuotesTransitionController,
       child: _EndingQuotesScreen(
         quotes: _goldenQuotes,
-        onExit: _closeEndingQuotesScreen,
+        onExit: _exitEndingQuotesToHome,
         onReadAloud: _readAloudQuotes,
         onStopReadAloud: _stopReadAloudQuotes,
       ),

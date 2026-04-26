@@ -365,6 +365,46 @@ class ConfigValidation {
       );
 }
 
+class SavedConfigProfile {
+  final String profileId;
+  final String name;
+  final String description;
+  final String createdAt;
+  final String updatedAt;
+  final String llmProvider;
+  final String model;
+  final String asrProvider;
+  final String ttsProvider;
+  final bool hasLocalSettings;
+
+  const SavedConfigProfile({
+    required this.profileId,
+    required this.name,
+    this.description = '',
+    this.createdAt = '',
+    this.updatedAt = '',
+    this.llmProvider = '',
+    this.model = '',
+    this.asrProvider = '',
+    this.ttsProvider = '',
+    this.hasLocalSettings = false,
+  });
+
+  factory SavedConfigProfile.fromJson(Map<String, dynamic> json) =>
+      SavedConfigProfile(
+        profileId: json['profile_id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        description: json['description'] as String? ?? '',
+        createdAt: json['created_at'] as String? ?? '',
+        updatedAt: json['updated_at'] as String? ?? '',
+        llmProvider: json['llm_provider'] as String? ?? '',
+        model: json['model'] as String? ?? '',
+        asrProvider: json['asr_provider'] as String? ?? '',
+        ttsProvider: json['tts_provider'] as String? ?? '',
+        hasLocalSettings: json['has_local_settings'] as bool? ?? false,
+      );
+}
+
 /// 本地持久化设置（保存在 SharedPreferences）
 class LocalSettings {
   final String serverUrl;
@@ -411,6 +451,18 @@ class LocalSettings {
         micActivationMode: micActivationMode ?? this.micActivationMode,
         micControlMode: micControlMode ?? this.micControlMode,
       );
+
+  Map<String, dynamic> toJson() => {
+        'server_url': serverUrl,
+        'llm_provider': llmProvider,
+        'asr_provider': asrProvider,
+        'tts_provider': ttsProvider,
+        'push_to_talk': pushToTalk,
+        'stream_user_subtitles': streamUserSubtitles,
+        'asr_streaming_enabled': asrStreamingEnabled,
+        'mic_activation_mode': micActivationMode,
+        'mic_control_mode': micControlMode,
+      };
 }
 
 /// 网络搜索配置

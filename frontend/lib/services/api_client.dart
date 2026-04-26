@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'dart:typed_data';
 
 import '../models/config_models.dart';
 import '../models/discussion_models.dart';
@@ -138,6 +139,39 @@ class ApiClient {
     await _dio.delete('/api/v1/sessions/$sessionId');
   }
 
+  /// 将用户本轮原始录音挂到会话历史，便于后续回放与复盘。
+  Future<Map<String, dynamic>> uploadMeetingRecording({
+    required String sessionId,
+    required String speaker,
+    required Uint8List audioBytes,
+    required String fileExtension,
+    required String contentType,
+    int? durationMs,
+    String transcript = '',
+  }) async {
+    final response = await _dio.post(
+      '/api/v1/history/sessions/$sessionId/recordings',
+      data: FormData.fromMap({
+        'speaker': speaker,
+        'transcript': transcript,
+        if (durationMs != null) 'duration_ms': durationMs,
+        'audio': MultipartFile.fromBytes(
+          audioBytes,
+          filename:
+              'recording.${fileExtension.isEmpty ? 'bin' : fileExtension}',
+        ),
+      }),
+    );
+    return Map<String, dynamic>.from(response.data as Map);
+  }
+
+  /// 获取某场讨论已经持久化的完整剧本。
+  Future<Map<String, dynamic>> getMeetingScript(String sessionId) async {
+    final response =
+        await _dio.get('/api/v1/history/sessions/$sessionId/script');
+    return Map<String, dynamic>.from(response.data as Map);
+  }
+
   /// 让后端使用当前 LLM 配置提炼“今日金句”。
   Future<List<String>> generateGoldenQuotes({
     required String topic,
@@ -206,6 +240,45 @@ class ApiClient {
   Future<Map<String, dynamic>> saveConfig(Map<String, dynamic> updates) async {
     final response = await _dio.post('/api/v1/config/save', data: updates);
     return Map<String, dynamic>.from(response.data);
+  }
+
+  /// 列出所有已保存的配置集
+  Future<List<SavedConfigProfile>> listConfigProfiles() async {
+    final response = await _dio.get('/api/v1/config/profiles');
+    final data = Map<String, dynamic>.from(response.data as Map);
+    return List<Map<String, dynamic>>.from(
+            data['profiles'] ?? const <Map<String, dynamic>>[])
+        .map(SavedConfigProfile.fromJson)
+        .toList();
+  }
+
+  /// 保存当前完整配置为一个配置集
+  Future<Map<String, dynamic>> saveConfigProfile({
+    required String name,
+    String description = '',
+    required LocalSettings localSettings,
+  }) async {
+    final response = await _dio.post(
+      '/api/v1/config/profiles',
+      data: {
+        'name': name,
+        'description': description,
+        'local_settings': localSettings.toJson(),
+      },
+    );
+    return Map<String, dynamic>.from(response.data as Map);
+  }
+
+  /// 载入一个已保存的配置集
+  Future<Map<String, dynamic>> loadConfigProfile(String profileId) async {
+    final response = await _dio.post('/api/v1/config/profiles/$profileId/load');
+    return Map<String, dynamic>.from(response.data as Map);
+  }
+
+  /// 删除一个已保存的配置集
+  Future<Map<String, dynamic>> deleteConfigProfile(String profileId) async {
+    final response = await _dio.delete('/api/v1/config/profiles/$profileId');
+    return Map<String, dynamic>.from(response.data as Map);
   }
 
   /// 测试 LLM 提供商连接，返回可用模型列表

@@ -55,6 +55,9 @@ class FunasrStreamingAsrService implements AsrService {
   Stream<AsrResult> get transcriptionStream => _controller.stream;
 
   @override
+  Future<AsrAudioCapture?> takeLastCapture() async => null;
+
+  @override
   Future<void> warmup() async {
     try {
       final probe = html.WebSocket(wsUrl, 'binary');

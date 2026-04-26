@@ -131,13 +131,18 @@ class DiscussionWebSocket {
   }
 
   /// 发送人类输入
-  void sendHumanInput({required String speaker, required String content}) {
+  void sendHumanInput({
+    required String speaker,
+    required String content,
+    Map<String, dynamic>? recording,
+  }) {
     if (!_connected || _channel == null) return;
 
     _channel!.sink.add(jsonEncode({
       'type': 'human_input',
       'speaker': speaker,
       'content': content,
+      if (recording != null) 'recording': recording,
     }));
   }
 

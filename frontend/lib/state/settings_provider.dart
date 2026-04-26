@@ -235,6 +235,52 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     await prefs.setString(_prefsKeyMicControlMode, normalizedMode);
     state = AsyncData(state.value!.copyWith(micControlMode: normalizedMode));
   }
+
+  Future<void> applySnapshot(Map<String, dynamic> snapshot) async {
+    final prefs = await SharedPreferences.getInstance();
+    final current = state.valueOrNull ?? const LocalSettings();
+
+    final rawServerUrl = (snapshot['server_url'] as String? ?? '').trim();
+    final rawLlmProvider = (snapshot['llm_provider'] as String? ?? '').trim();
+    final rawAsrProvider = (snapshot['asr_provider'] as String? ?? '').trim();
+    final rawTtsProvider = (snapshot['tts_provider'] as String? ?? '').trim();
+    final rawMicActivationMode = snapshot['mic_activation_mode'] as String?;
+    final rawMicControlMode = snapshot['mic_control_mode'] as String?;
+
+    final next = current.copyWith(
+      serverUrl: rawServerUrl.isNotEmpty ? rawServerUrl : current.serverUrl,
+      llmProvider:
+          rawLlmProvider.isNotEmpty ? rawLlmProvider : current.llmProvider,
+      asrProvider:
+          rawAsrProvider.isNotEmpty ? rawAsrProvider : current.asrProvider,
+      ttsProvider: rawTtsProvider.isNotEmpty
+          ? _normalizeTtsProvider(rawTtsProvider)
+          : current.ttsProvider,
+      pushToTalk: snapshot['push_to_talk'] as bool? ?? current.pushToTalk,
+      streamUserSubtitles: snapshot['stream_user_subtitles'] as bool? ??
+          current.streamUserSubtitles,
+      asrStreamingEnabled: snapshot['asr_streaming_enabled'] as bool? ??
+          current.asrStreamingEnabled,
+      micActivationMode: rawMicActivationMode != null
+          ? _normalizeMicActivationMode(rawMicActivationMode)
+          : current.micActivationMode,
+      micControlMode: rawMicControlMode != null
+          ? _normalizeMicControlMode(rawMicControlMode)
+          : current.micControlMode,
+    );
+
+    await prefs.setString(_prefsKeyServerUrl, next.serverUrl);
+    await prefs.setString(_prefsKeyLlmProvider, next.llmProvider);
+    await prefs.setString(_prefsKeyAsrProvider, next.asrProvider);
+    await prefs.setString(_prefsKeyTtsProvider, next.ttsProvider);
+    await prefs.setBool(_prefsKeyPushToTalk, next.pushToTalk);
+    await prefs.setBool(_prefsKeyStreamUserSubtitles, next.streamUserSubtitles);
+    await prefs.setBool(_prefsKeyAsrStreamingEnabled, next.asrStreamingEnabled);
+    await prefs.setString(_prefsKeyMicActivationMode, next.micActivationMode);
+    await prefs.setString(_prefsKeyMicControlMode, next.micControlMode);
+
+    state = AsyncData(next);
+  }
 }
 
 // ── 远端配置 Provider（从后端 API 读取）─────────────────────────────────────
@@ -262,4 +308,10 @@ final healthStatusProvider =
 final currentConfigProvider = FutureProvider<CurrentConfig>((ref) async {
   final apiClient = ref.watch(apiClientProvider);
   return apiClient.getCurrentConfig();
+});
+
+final configProfilesProvider =
+    FutureProvider<List<SavedConfigProfile>>((ref) async {
+  final apiClient = ref.watch(apiClientProvider);
+  return apiClient.listConfigProfiles();
 });

@@ -39,7 +39,10 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 0.1 首轮阶段（老师开场 + 每位同学首次发言）禁止“上一位同学说得对”等互引式表达
 1. **人类学生是讨论的绝对核心**（占讨论重要性30%-50%），所有讨论应以人类学生的观点为中心展开
 2. 人类学生每次发言后，老师应立即点评（总结、补充提问或引导深入）
-3. 确保每位参与者发言次数大致均衡，但人类学生的频率可以稍高
+3. 一场讨论里，老师一般安排人类学生发言3到6次；如果人类学生是通过举手获得发言，也计入这3到6次
+3.1 老师开场后，通常先让2到3位非人类参与者铺垫，再开始第一次点名人类学生发言，帮助其自然融入
+3.2 在达到建议上限前，人类学生的频率可以稍高；达到建议上限后，除非老师明确点名或人类学生主动举手，一般不要继续主动安排
+3.3 如果人类学生已经多次主动举手，说明其参与意愿很强，此时可以放宽发言次数与收尾时机，不必死守原先上限
 4. 不要让同一个人连续发言两次（除老师外）
 5. 优先让还没发言的人先说
 6. 人类学生通常至少间隔2位非人类发言者后可再次安排，但如果讨论需要人类回应则可提前
@@ -194,6 +197,7 @@ def create_discussion_team(
     consume_designated_speaker: Optional[Callable[[], Optional[str]]] = None,
     on_designation_lifecycle: Optional[Callable[[str, Optional[str]], None]] = None,
     display_name_to_agent: Optional[dict[str, str]] = None,
+    get_human_engagement_level: Optional[Callable[[], int]] = None,
 ) -> SelectorGroupChat:
     """创建圆桌讨论团队。"""
     if max_turns is None:
@@ -201,7 +205,25 @@ def create_discussion_team(
 
     nominal_max_turns = max_turns
     closing_turn_buffer = 8
+    engagement_max_turn_extension_by_level = {
+        0: 0,
+        1: 8,
+        2: 16,
+    }
+    engagement_closing_extension_by_level = {
+        0: 0,
+        1: 4,
+        2: 8,
+    }
+    engagement_target_extension_by_level = {
+        0: 0,
+        1: 3,
+        2: 6,
+    }
+    max_engagement_level = max(engagement_max_turn_extension_by_level)
     max_turns = nominal_max_turns + closing_turn_buffer
+    if humans:
+        max_turns += engagement_max_turn_extension_by_level[max_engagement_level]
 
     all_participants = [moderator] + characters + humans
     all_names = [p.name for p in all_participants]
@@ -218,6 +240,18 @@ def create_discussion_team(
     second_closing_trigger_turn = max(first_closing_trigger_turn + 1, nominal_max_turns - 2)
 
     human_name_set = {h.name for h in humans}
+    preferred_human_turn_target = 0
+    human_turn_min_target = 0
+    human_turn_soft_cap = 0
+    first_human_invite_after_turns = 2
+    human_reinvite_gap = 3
+    if humans:
+        human_turn_min_target = 3
+        human_turn_soft_cap = 6
+        preferred_human_turn_target = max(
+            human_turn_min_target,
+            min(human_turn_soft_cap, round(nominal_max_turns / 6)),
+        )
 
     def moderator_led_selector(thread: list) -> Optional[str]:
         """自定义发言者选择函数。
@@ -241,6 +275,15 @@ def create_discussion_team(
         has_human_spoken = any(
             getattr(m, "source", None) in human_name_set for m in participant_msgs
         )
+        human_turn_count = sum(
+            1 for m in participant_msgs if getattr(m, "source", None) in human_name_set
+        )
+        engagement_level = 0
+        if get_human_engagement_level is not None:
+            try:
+                engagement_level = max(0, min(max_engagement_level, int(get_human_engagement_level())))
+            except Exception:
+                engagement_level = 0
         is_opening_round = last_source == moderator.name and not non_moderator_msgs
 
         def turns_since_moderator_marker(marker: str) -> int | None:
@@ -257,6 +300,14 @@ def create_discussion_team(
 
         first_closing_seen = turns_since_moderator_marker(FIRST_CLOSING_PROMPT_MARKER)
         second_closing_seen = turns_since_moderator_marker(SECOND_CLOSING_PROMPT_MARKER)
+        effective_first_closing_trigger_turn = first_closing_trigger_turn
+        effective_second_closing_trigger_turn = second_closing_trigger_turn
+        effective_preferred_human_turn_target = preferred_human_turn_target
+        effective_human_turn_soft_cap = human_turn_soft_cap
+        effective_first_closing_trigger_turn += engagement_closing_extension_by_level[engagement_level]
+        effective_second_closing_trigger_turn += engagement_closing_extension_by_level[engagement_level]
+        effective_preferred_human_turn_target += engagement_target_extension_by_level[engagement_level]
+        effective_human_turn_soft_cap += engagement_target_extension_by_level[engagement_level]
 
         # ── 优先级1：检查全局指定发言者 ──
         designated = (
@@ -283,6 +334,14 @@ def create_discussion_team(
 
         human_cooldown = 2
         since_human = turns_since_last_human()
+        human_within_soft_cap = human_turn_count < effective_human_turn_soft_cap
+        human_reinvite_due = (
+            bool(human_name_set)
+            and has_human_spoken
+            and human_within_soft_cap
+            and human_turn_count < effective_preferred_human_turn_target
+            and since_human >= human_reinvite_gap
+        )
 
         # ── 优先级2：用户刚发言 → 老师点评 ──
         if last_source in human_name_set:
@@ -298,9 +357,18 @@ def create_discussion_team(
             logger.info("[TurnScheduler] 真人学生尚未发言，优先把老师拉回邀请位")
             return moderator.name
 
+        if human_reinvite_due and last_source != moderator.name:
+            logger.info(
+                "[TurnScheduler] 真人学生发言次数仍低于目标，安排老师回到邀请位: %s/%s level=%s",
+                human_turn_count,
+                effective_preferred_human_turn_target,
+                engagement_level,
+            )
+            return moderator.name
+
         # ── 优先级2.5：接近收尾时，优先把老师拉回到征询/总结位 ──
         if (
-            len(participant_msgs) >= first_closing_trigger_turn
+            len(participant_msgs) >= effective_first_closing_trigger_turn
             and first_closing_seen is None
             and last_source != moderator.name
         ):
@@ -308,7 +376,7 @@ def create_discussion_team(
             return moderator.name
 
         if (
-            len(participant_msgs) >= second_closing_trigger_turn
+            len(participant_msgs) >= effective_second_closing_trigger_turn
             and first_closing_seen is not None
             and first_closing_seen >= 1
             and second_closing_seen is None
@@ -357,10 +425,32 @@ def create_discussion_team(
                     return selected
 
             if latest_source == moderator.name and not is_opening_round and not has_human_spoken:
-                first_human = next((n for n in all_names if n in human_name_set), None)
-                if first_human:
-                    logger.info("[TurnScheduler] 老师已铺垫，优先邀请真人学生发言: %s", first_human)
-                    return first_human
+                if len(non_moderator_msgs) >= first_human_invite_after_turns:
+                    first_human = next((n for n in all_names if n in human_name_set), None)
+                    if first_human:
+                        logger.info("[TurnScheduler] 老师已铺垫，优先邀请真人学生发言: %s", first_human)
+                        return first_human
+                warmup_candidates = [
+                    n
+                    for n in _exclude_recent_speakers(thread, all_names, moderator_name=moderator.name)
+                    if n not in human_name_set and n != moderator.name
+                ]
+                if warmup_candidates:
+                    selected = warmup_candidates[0]
+                    logger.info("[TurnScheduler] 真人首邀时机未到，继续由非人类参与者铺垫: %s", selected)
+                    return selected
+
+            if latest_source == moderator.name and human_reinvite_due:
+                next_human = next((n for n in all_names if n in human_name_set), None)
+                if next_human:
+                    logger.info(
+                        "[TurnScheduler] 根据真人学生发言预算，安排再次发言: %s (%s/%s level=%s)",
+                        next_human,
+                        human_turn_count,
+                        effective_preferred_human_turn_target,
+                        engagement_level,
+                    )
+                    return next_human
 
         # ── 优先级4：人类发言冷却期 ──
         if since_human < human_cooldown:

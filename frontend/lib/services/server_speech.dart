@@ -152,11 +152,17 @@ class ServerTtsService implements TtsService {
   }
 
   @override
-  Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
+  Future<void> speak(
+    String text, {
+    String? voice,
+    double rate = 1.0,
+    void Function()? onStart,
+  }) async {
     await stop();
 
     try {
       _isSpeaking = true;
+      var started = false;
       final key = _cacheKey(text, voice: voice);
       _ServerTtsAudioPayload payload;
       if (_prefetchCache.containsKey(key)) {
@@ -183,6 +189,14 @@ class ServerTtsService implements TtsService {
       final completer = Completer<void>();
       _pendingCompleter = completer;
 
+      void markStarted() {
+        if (started) return;
+        started = true;
+        onStart?.call();
+      }
+
+      _audioElement!.onPlaying.listen((_) => markStarted());
+
       _audioElement!.onEnded.listen((_) {
         _isSpeaking = false;
         if (_activeObjectUrl == url) {
@@ -208,6 +222,7 @@ class ServerTtsService implements TtsService {
       });
 
       await _audioElement!.play();
+      markStarted();
       await completer.future;
     } catch (e) {
       _isSpeaking = false;
@@ -251,6 +266,7 @@ class ServerAsrService implements AsrService {
   html.MediaStream? _mediaStream;
   final List<html.Blob> _chunks = [];
   DateTime? _recordingStartTime;
+  AsrAudioCapture? _lastCapture;
 
   ServerAsrService({
     this.serverUrl = 'http://localhost:8001',
@@ -279,6 +295,7 @@ class ServerAsrService implements AsrService {
 
     // 清理上一轮可能残留的资源
     await _forceCleanup();
+    _lastCapture = null;
 
     try {
       final mediaDevices = html.window.navigator.mediaDevices;
@@ -370,6 +387,16 @@ class ServerAsrService implements AsrService {
         return;
       }
 
+      final durationMs = _recordingStartTime != null
+          ? DateTime.now().difference(_recordingStartTime!).inMilliseconds
+          : null;
+      _lastCapture = AsrAudioCapture(
+        bytes: Uint8List.fromList(audioData),
+        contentType: 'audio/webm',
+        fileExtension: 'webm',
+        durationMs: durationMs,
+      );
+
       // 上传到 ASR 端点，带 10 秒超时
       final formData = FormData.fromMap({
         'audio': MultipartFile.fromBytes(audioData, filename: 'audio.webm'),
@@ -414,6 +441,13 @@ class ServerAsrService implements AsrService {
         _controller.addError('语音识别失败: $e');
       }
     }
+  }
+
+  @override
+  Future<AsrAudioCapture?> takeLastCapture() async {
+    final capture = _lastCapture;
+    _lastCapture = null;
+    return capture;
   }
 
   Future<void> _forceCleanup() async {

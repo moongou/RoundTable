@@ -20,7 +20,7 @@ from app.agents.human_proxy import (
 )
 from app.core.floor_manager import FloorManager
 from app.core.floor_manager import FloorState
-from app.core.rolling_summary_memory import RollingSummaryMemory
+from app.core.rolling_summary_memory import HumanResponseGuidanceMemory, RollingSummaryMemory
 from app.core.thinkers import thinker_label
 from app.core.turn_scheduler import create_discussion_team
 from app.core.turn_scheduler import parse_speaker_designation
@@ -114,6 +114,32 @@ async def test_floor_manager_updates_recent_turn_memory_and_skips_jump_marker() 
     assert len(results) == 2
     assert results[0].content['speaker'] == '李老师'
     assert results[1].content['speaker'] == '小探'
+
+
+@pytest.mark.asyncio
+async def test_human_response_guidance_memory_injects_redirect_hint() -> None:
+    memory = HumanResponseGuidanceMemory()
+    await memory.replace_guidance(
+        [
+            {
+                'speaker': '豆苗',
+                'summary': '我昨晚吃了两块披萨，还想养小猫。',
+                'assessment': 'off_topic',
+                'topic_focus': '在家上学',
+                'suggested_peer_name': '小探',
+                'suggested_peer_summary': '我更关心孩子会不会孤单。',
+            }
+        ]
+    )
+    model_context = _ModelContextStub()
+
+    await memory.update_context(model_context)
+
+    assert len(model_context.messages) == 1
+    content = model_context.messages[0].content
+    assert '真人学生回应提醒' in content
+    assert '温和把话题拉回“在家上学”' in content
+    assert '小探刚才提到的“我更关心孩子会不会孤单。”' in content
 
 
 def test_floor_manager_pause_gate_calls_team_pause_and_resume() -> None:
@@ -310,6 +336,71 @@ def test_sanitize_all_references_rewrites_unspoken_named_idea_summary_to_last_sp
     assert '豆苗' not in sanitized
     assert '刚才小想提出的“让树木成为教室的‘插班生’”这个想法太奇妙了' in sanitized
     assert '再到刚才小想提出的这种“森林学校”构想' in sanitized
+
+
+def test_sanitize_all_references_rewrites_named_quote_to_actual_owner() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            'skeptic': '小思',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._recent_reference_quotes = [
+        ('小探', '如果这种互相猜忌变成了一场丢沙包比赛，这场比赛真的只是为了比谁准吗？'),
+        ('小思', '仅仅因为觉得对方有，就能作为动手的证据吗？'),
+    ]
+    floor_manager._speaker_message_count['moderator'] = 1
+    floor_manager._recent_display_speakers = ['李老师', '小思']
+
+    sanitized = floor_manager._sanitize_all_references(
+        'moderator',
+        '豆苗同学，你刚才说“仅仅因为觉得对方有，就能作为动手的证据吗”这个问题，真的是一针见血。',
+    )
+
+    assert '豆苗同学' not in sanitized
+    assert '小思同学，你刚才说“仅仅因为觉得对方有，就能作为动手的证据吗”' in sanitized
+
+
+def test_sanitize_all_references_rewrites_cross_sentence_quote_followups_to_real_speakers() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            'skeptic': '小思',
+            'pragmatist': '小行',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._recent_reference_quotes = [
+        ('豆苗', '国际政治就是谁的拳头大，谁说了算。'),
+        ('小思', '规则到底是靠大家自觉，还是靠某种更厉害的力量在背后盯着才有效呢？'),
+        ('小行', '谁违规就扣小红花或者限制课间活动，大家总得掂量掂量吧。'),
+    ]
+    floor_manager._speaker_message_count['moderator'] = 1
+    floor_manager._recent_display_speakers = ['豆苗', '小思', '小行']
+
+    sanitized = floor_manager._sanitize_all_references(
+        'moderator',
+        '豆苗同学，你刚才说“规则到底是靠大家自觉，还是靠某种更厉害的力量在背后盯着”，这个问题问得太深刻了！你提出的“违规扣分”的想法，确实像给国际关系装上了一个“值日轮换表”和“惩罚机制”。',
+    )
+
+    assert '豆苗同学' not in sanitized
+    assert '小思同学，你刚才说“规则到底是靠大家自觉，还是靠某种更厉害的力量在背后盯着”' in sanitized
+    assert '小行提出的“违规扣分”' in sanitized
 
 
 @pytest.mark.asyncio
@@ -817,6 +908,207 @@ def test_turn_scheduler_invites_human_after_teacher_returns_without_explicit_des
     assert selector(thread) == '豆苗'
 
 
+def test_turn_scheduler_waits_for_two_non_human_turns_before_first_human_invite() -> None:
+    def _agent(name: str) -> SimpleNamespace:
+        return SimpleNamespace(name=name, description=name)
+
+    team = create_discussion_team(
+        moderator=_agent('moderator'),
+        characters=[_agent('explorer'), _agent('pavlov')],
+        humans=[_agent('豆苗')],
+        selector_client=SimpleNamespace(),
+        max_turns=8,
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '巴甫洛夫': 'pavlov',
+            '豆苗': '豆苗',
+        },
+    )
+    selector = team._selector_func
+
+    thread = [
+        SimpleNamespace(source='moderator', content='今天我们先聊聊为什么有人想在家上学。'),
+        SimpleNamespace(source='explorer', content='我先从好奇心和冒险感说起。'),
+        SimpleNamespace(source='moderator', content='这个角度很活，我们再多听一位同学铺垫一下。'),
+    ]
+
+    assert selector(thread) == 'pavlov'
+
+
+def test_turn_scheduler_stops_proactively_inviting_human_after_soft_cap() -> None:
+    def _agent(name: str) -> SimpleNamespace:
+        return SimpleNamespace(name=name, description=name)
+
+    team = create_discussion_team(
+        moderator=_agent('moderator'),
+        characters=[_agent('explorer'), _agent('pavlov')],
+        humans=[_agent('豆苗')],
+        selector_client=SimpleNamespace(),
+        max_turns=30,
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '巴甫洛夫': 'pavlov',
+            '豆苗': '豆苗',
+        },
+    )
+    selector = team._selector_func
+
+    thread = [
+        SimpleNamespace(source='moderator', content='我们先从自由和纪律开始。'),
+        SimpleNamespace(source='explorer', content='我觉得自由像打开地图。'),
+        SimpleNamespace(source='豆苗', content='但地图也需要方向。'),
+        SimpleNamespace(source='moderator', content='你这个提醒很关键。'),
+        SimpleNamespace(source='pavlov', content='习惯会决定人怎么使用自由。'),
+        SimpleNamespace(source='豆苗', content='所以规则不能完全消失。'),
+        SimpleNamespace(source='moderator', content='规则和自由要一起看。'),
+        SimpleNamespace(source='explorer', content='我更关心孩子会不会孤单。'),
+        SimpleNamespace(source='豆苗', content='是啊，社交真的很重要。'),
+        SimpleNamespace(source='moderator', content='你把问题抓到了中心。'),
+        SimpleNamespace(source='pavlov', content='重复互动本身就是训练。'),
+        SimpleNamespace(source='豆苗', content='所以学校像真实训练场。'),
+        SimpleNamespace(source='moderator', content='这个比喻很稳。'),
+        SimpleNamespace(source='explorer', content='但也许可以保留一点家庭弹性。'),
+        SimpleNamespace(source='豆苗', content='我赞成周末保留弹性。'),
+        SimpleNamespace(source='moderator', content='那我们继续往实施层面想。'),
+        SimpleNamespace(source='pavlov', content='关键在于边界和节奏。'),
+        SimpleNamespace(source='豆苗', content='我觉得五天学校两天家庭挺合适。'),
+        SimpleNamespace(source='moderator', content='这个组合方案已经很具体了。'),
+        SimpleNamespace(source='explorer', content='那接下来可以比较不同年龄段。'),
+    ]
+
+    assert selector(thread) is None
+
+
+def test_turn_scheduler_relaxes_human_soft_cap_after_two_hand_raises() -> None:
+    def _agent(name: str) -> SimpleNamespace:
+        return SimpleNamespace(name=name, description=name)
+
+    team = create_discussion_team(
+        moderator=_agent('moderator'),
+        characters=[_agent('explorer'), _agent('skeptic')],
+        humans=[_agent('豆苗')],
+        selector_client=SimpleNamespace(),
+        max_turns=30,
+        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        get_human_engagement_level=lambda: 1,
+    )
+    selector = team._selector_func
+
+    thread = [
+        SimpleNamespace(source='moderator', content='今天我们讨论在家上学。'),
+        SimpleNamespace(source='explorer', content='我担心同伴互动变少。'),
+        SimpleNamespace(source='豆苗', content='我觉得如果有社团，也许还好。'),
+        SimpleNamespace(source='moderator', content='你刚才说社团也许能补上互动，这个角度很好。'),
+        SimpleNamespace(source='skeptic', content='可是在家上学不一定有固定伙伴。'),
+        SimpleNamespace(source='豆苗', content='那就要设计固定的小组。'),
+        SimpleNamespace(source='moderator', content='这个办法已经很像真实方案了。'),
+        SimpleNamespace(source='explorer', content='而且小组最好长期稳定。'),
+        SimpleNamespace(source='豆苗', content='对，还可以轮流当组长。'),
+        SimpleNamespace(source='moderator', content='你把合作细节补得很具体。'),
+        SimpleNamespace(source='skeptic', content='但有人可能还是会偷懒。'),
+        SimpleNamespace(source='豆苗', content='那就让大家互相打分。'),
+        SimpleNamespace(source='moderator', content='这已经进入规则设计了。'),
+        SimpleNamespace(source='explorer', content='还可以让老师定期回看记录。'),
+        SimpleNamespace(source='豆苗', content='我还想加一个家长反馈表。'),
+        SimpleNamespace(source='moderator', content='这让方案更完整了。'),
+        SimpleNamespace(source='skeptic', content='不过家长反馈也可能带偏压力。'),
+        SimpleNamespace(source='豆苗', content='那反馈表就只写观察，不排名。'),
+        SimpleNamespace(source='explorer', content='我赞成，少一点比较会更舒服。'),
+        SimpleNamespace(source='skeptic', content='如果真这样，我觉得在家上学也不是完全不行。'),
+        SimpleNamespace(source='explorer', content='那下一步就看老师愿不愿意定期看这些记录。'),
+    ]
+
+    assert selector(thread) == 'moderator'
+
+
+def test_turn_scheduler_delays_closing_after_two_hand_raises() -> None:
+    def _agent(name: str) -> SimpleNamespace:
+        return SimpleNamespace(name=name, description=name)
+
+    team = create_discussion_team(
+        moderator=_agent('moderator'),
+        characters=[_agent('explorer'), _agent('skeptic')],
+        humans=[_agent('豆苗')],
+        selector_client=SimpleNamespace(),
+        max_turns=10,
+        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        get_human_engagement_level=lambda: 1,
+    )
+    selector = team._selector_func
+
+    thread = [
+        SimpleNamespace(source='moderator', content='今天我们讨论在家上学。'),
+        SimpleNamespace(source='explorer', content='我先想到同伴关系会变化。'),
+        SimpleNamespace(source='豆苗', content='我觉得学习自由会更大。'),
+        SimpleNamespace(source='skeptic', content='但自由也可能变成拖延。'),
+        SimpleNamespace(source='explorer', content='所以要看有没有稳定节奏。'),
+    ]
+
+    assert selector(thread) is None
+
+
+def test_turn_scheduler_delays_closing_even_further_after_three_hand_raises() -> None:
+    def _agent(name: str) -> SimpleNamespace:
+        return SimpleNamespace(name=name, description=name)
+
+    thread = [
+        SimpleNamespace(source='moderator', content='今天我们讨论在家上学。'),
+        SimpleNamespace(source='explorer', content='我先想到同伴关系会变化。'),
+        SimpleNamespace(source='豆苗', content='我觉得学习自由会更大。'),
+        SimpleNamespace(source='skeptic', content='但自由也可能变成拖延。'),
+        SimpleNamespace(source='explorer', content='所以要看有没有稳定节奏。'),
+        SimpleNamespace(source='豆苗', content='所以支持方式也得一起改。'),
+        SimpleNamespace(source='skeptic', content='我担心家长会更累。'),
+        SimpleNamespace(source='豆苗', content='那就要把家长任务拆小一点。'),
+        SimpleNamespace(source='豆苗', content='还可以固定每周做一次回顾。'),
+        SimpleNamespace(source='skeptic', content='也可能逼着大家重新设计作息。'),
+        SimpleNamespace(source='explorer', content='最好连同伴活动也一起设计。'),
+    ]
+
+    level_one_team = create_discussion_team(
+        moderator=_agent('moderator'),
+        characters=[_agent('explorer'), _agent('skeptic')],
+        humans=[_agent('豆苗')],
+        selector_client=SimpleNamespace(),
+        max_turns=10,
+        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        get_human_engagement_level=lambda: 1,
+    )
+    level_two_team = create_discussion_team(
+        moderator=_agent('moderator'),
+        characters=[_agent('explorer'), _agent('skeptic')],
+        humans=[_agent('豆苗')],
+        selector_client=SimpleNamespace(),
+        max_turns=10,
+        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        get_human_engagement_level=lambda: 2,
+    )
+
+    assert level_one_team._selector_func(thread) == 'moderator'
+    assert level_two_team._selector_func(thread) is None
+
+
+@pytest.mark.asyncio
+async def test_request_interrupt_notifies_human_hand_raise_callback() -> None:
+    hand_raises: list[str] = []
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+        designated_speaker_setter=lambda _name: None,
+        human_hand_raise_notifier=lambda name: hand_raises.append(name),
+    )
+    floor_manager.set_display_name_map({'moderator': '李老师', '豆苗': '豆苗'})
+    floor_manager.current_speaker = 'moderator'
+
+    await floor_manager.request_interrupt('豆苗')
+
+    assert hand_raises == ['豆苗']
+
+
 def test_turn_scheduler_reasks_closing_question_after_single_new_follow_up() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
@@ -917,6 +1209,70 @@ async def test_submit_human_input_ignores_self_designation_target() -> None:
     queue = get_human_queue('豆苗')
     assert await asyncio.wait_for(queue.get(), timeout=0.1) == '我也想请豆苗再补充一下。'
     assert designated_updates == [None]
+
+
+@pytest.mark.asyncio
+async def test_submit_human_input_builds_redirect_guidance_for_off_topic_user_turn() -> None:
+    clear_human_queues()
+    guidance_memory = HumanResponseGuidanceMemory()
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+        human_guidance_memory=guidance_memory,
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._current_topic = '在家上学\n\n请大家讨论在家上学和学校教育的差别。'
+    floor_manager._recent_turn_summaries = [
+        ('小探', '我更关心孩子会不会孤单。'),
+    ]
+
+    await floor_manager.submit_human_input('豆苗', '我昨晚吃了两块披萨，还想养小猫。')
+
+    results = (await guidance_memory.query('')).results
+    assert len(results) == 1
+    payload = results[0].content
+    assert payload['assessment'] == 'off_topic'
+    assert payload['speaker'] == '豆苗'
+    assert payload['suggested_peer_name'] == '小探'
+    assert payload['suggested_peer_summary'] == '我更关心孩子会不会孤单。'
+
+
+@pytest.mark.asyncio
+async def test_moderator_message_consumes_pending_human_redirect_guidance() -> None:
+    guidance_memory = HumanResponseGuidanceMemory()
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+        human_guidance_memory=guidance_memory,
+    )
+    await guidance_memory.replace_guidance(
+        [
+            {
+                'speaker': '豆苗',
+                'summary': '我昨晚吃了两块披萨，还想养小猫。',
+                'assessment': 'off_topic',
+            }
+        ]
+    )
+    floor_manager._pending_human_guidance = True
+
+    result = await floor_manager._process_event(
+        TextMessage(source='moderator', content='我们先回到在家上学这个主题，再接着想一想。')
+    )
+
+    assert result is not None
+    assert (await guidance_memory.query('')).results == []
+    assert floor_manager._pending_human_guidance is False
 
 
 @pytest.mark.asyncio

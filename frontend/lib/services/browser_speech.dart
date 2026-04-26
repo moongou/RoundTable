@@ -33,7 +33,12 @@ class BrowserTtsService implements TtsService {
   }) async {}
 
   @override
-  Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
+  Future<void> speak(
+    String text, {
+    String? voice,
+    double rate = 1.0,
+    void Function()? onStart,
+  }) async {
     await stop();
 
     try {
@@ -47,7 +52,14 @@ class BrowserTtsService implements TtsService {
       utterance.volume = 1.0;
 
       _isSpeaking = true;
+      var started = false;
       final completer = Completer<void>();
+
+      utterance.onStart.listen((_) {
+        if (started) return;
+        started = true;
+        onStart?.call();
+      });
 
       utterance.onEnd.listen((_) {
         _isSpeaking = false;
@@ -155,6 +167,9 @@ class BrowserAsrService implements AsrService {
 
   @override
   Stream<AsrResult> get transcriptionStream => _controller.stream;
+
+  @override
+  Future<AsrAudioCapture?> takeLastCapture() async => null;
 
   void _emitTranscript(String transcript, {required bool isFinal}) {
     final value = transcript.trim();

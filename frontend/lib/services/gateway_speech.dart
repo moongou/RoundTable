@@ -175,6 +175,9 @@ class GatewayStreamingAsrService implements AsrService {
   Stream<AsrResult> get transcriptionStream => _controller.stream;
 
   @override
+  Future<AsrAudioCapture?> takeLastCapture() async => null;
+
+  @override
   Future<void> startListening() async {
     if (_isListening || _disposed) return;
 
@@ -593,11 +596,17 @@ class GatewayTtsService implements TtsService {
   }
 
   @override
-  Future<void> speak(String text, {String? voice, double rate = 1.0}) async {
+  Future<void> speak(
+    String text, {
+    String? voice,
+    double rate = 1.0,
+    void Function()? onStart,
+  }) async {
     await stop();
 
     try {
       _isSpeaking = true;
+      var started = false;
 
       // 优先使用预加载缓存
       Uint8List audioBytes;
@@ -622,6 +631,14 @@ class GatewayTtsService implements TtsService {
 
       final completer = Completer<void>();
       _pendingCompleter = completer;
+
+      void markStarted() {
+        if (started) return;
+        started = true;
+        onStart?.call();
+      }
+
+      _audioElement!.onPlaying.listen((_) => markStarted());
 
       _audioElement!.onEnded.listen((_) {
         _isSpeaking = false;
@@ -648,6 +665,7 @@ class GatewayTtsService implements TtsService {
       });
 
       await _audioElement!.play();
+      markStarted();
       await completer.future;
     } catch (e) {
       _isSpeaking = false;

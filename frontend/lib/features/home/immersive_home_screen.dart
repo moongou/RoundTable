@@ -338,6 +338,153 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     openExternalUrl('http://$host:8888');
   }
 
+  void _showHomeSnack(String message, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: error ? Colors.redAccent : null,
+      ),
+    );
+  }
+
+  Future<void> _openLoadConfigDialog() async {
+    final profilesFuture = ref.read(apiClientProvider).listConfigProfiles();
+    final selectedProfile = await showDialog<SavedConfigProfile>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: _kSurface,
+        title: const Text(
+          '加载配置',
+          style: TextStyle(color: _kTextPrimary),
+        ),
+        content: SizedBox(
+          width: 560,
+          child: FutureBuilder<List<SavedConfigProfile>>(
+            future: profilesFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const SizedBox(
+                  height: 120,
+                  child: Center(child: CircularProgressIndicator()),
+                );
+              }
+              if (snapshot.hasError) {
+                return Text(
+                  '配置列表加载失败: ${snapshot.error}',
+                  style: const TextStyle(color: Colors.redAccent),
+                );
+              }
+              final profiles = snapshot.data ?? const <SavedConfigProfile>[];
+              if (profiles.isEmpty) {
+                return const Text(
+                  '还没有可加载的配置。请先到设置页的“保存配置”里保存一套。',
+                  style: TextStyle(color: _kTextSecondary),
+                );
+              }
+              return SizedBox(
+                height: 360,
+                child: ListView.separated(
+                  itemCount: profiles.length,
+                  separatorBuilder: (_, __) => const Divider(color: _kBorder),
+                  itemBuilder: (context, index) {
+                    final profile = profiles[index];
+                    final subtitleParts = <String>[
+                      if (profile.llmProvider.isNotEmpty)
+                        'LLM ${profile.llmProvider}',
+                      if (profile.asrProvider.isNotEmpty)
+                        'ASR ${profile.asrProvider}',
+                      if (profile.ttsProvider.isNotEmpty)
+                        'TTS ${profile.ttsProvider}',
+                    ];
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        profile.name,
+                        style: const TextStyle(
+                          color: _kTextPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (profile.description.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                profile.description,
+                                style: const TextStyle(color: _kTextSecondary),
+                              ),
+                            ),
+                          if (subtitleParts.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                subtitleParts.join(' · '),
+                                style: const TextStyle(
+                                    color: _kNeonGold, fontSize: 12),
+                              ),
+                            ),
+                        ],
+                      ),
+                      trailing: Text(
+                        profile.updatedAt.isEmpty
+                            ? ''
+                            : profile.updatedAt
+                                .replaceFirst('T', ' ')
+                                .split('.')
+                                .first,
+                        style: const TextStyle(
+                            color: _kTextSecondary, fontSize: 11),
+                      ),
+                      onTap: () => Navigator.of(dialogContext).pop(profile),
+                    );
+                  },
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消', style: TextStyle(color: _kNeonGold)),
+          ),
+        ],
+      ),
+    );
+
+    if (selectedProfile == null) {
+      return;
+    }
+    await _loadConfigProfile(selectedProfile);
+  }
+
+  Future<void> _loadConfigProfile(SavedConfigProfile profile) async {
+    try {
+      final result = await ref.read(apiClientProvider).loadConfigProfile(
+            profile.profileId,
+          );
+      if (result['success'] != true) {
+        _showHomeSnack(result['message'] as String? ?? '载入配置失败', error: true);
+        return;
+      }
+      await ref.read(localSettingsProvider.notifier).applySnapshot(
+            Map<String, dynamic>.from(
+              result['local_settings'] as Map? ?? const {},
+            ),
+          );
+      ref.invalidate(currentConfigProvider);
+      ref.invalidate(speechConfigProvider);
+      ref.invalidate(providersProvider);
+      ref.invalidate(configProfilesProvider);
+      _showHomeSnack(result['message'] as String? ?? '配置已载入');
+    } catch (e) {
+      _showHomeSnack('载入配置失败: $e', error: true);
+    }
+  }
+
   bool get _canStart =>
       (_selectedTopic != null ||
           (_isFreeTopicMode &&
@@ -562,6 +709,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           nameController: _nameController,
           onSettings: () => Navigator.pushNamed(context, '/settings'),
           onDevPanel: () => _openDevPanel(context),
+          onLoadConfig: _openLoadConfigDialog,
           observerMode: _isObserverMode,
           onObserverModeChanged: (v) => setState(() => _isObserverMode = v),
         ),
@@ -660,6 +808,7 @@ class _TopBar extends StatelessWidget {
   final TextEditingController nameController;
   final VoidCallback onSettings;
   final VoidCallback onDevPanel;
+  final VoidCallback onLoadConfig;
   final bool observerMode;
   final ValueChanged<bool> onObserverModeChanged;
 
@@ -667,6 +816,7 @@ class _TopBar extends StatelessWidget {
     required this.nameController,
     required this.onSettings,
     required this.onDevPanel,
+    required this.onLoadConfig,
     required this.observerMode,
     required this.onObserverModeChanged,
   });
@@ -750,6 +900,10 @@ class _TopBar extends StatelessWidget {
               icon: Icons.monitor_heart_outlined,
               tooltip: '后台服务',
               onTap: onDevPanel),
+          _IconBtn(
+              icon: Icons.bookmarks_outlined,
+              tooltip: '加载配置',
+              onTap: onLoadConfig),
           _IconBtn(
               icon: Icons.settings_outlined, tooltip: '设置', onTap: onSettings),
         ],

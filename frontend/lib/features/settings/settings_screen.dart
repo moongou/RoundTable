@@ -71,6 +71,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   final _asrScrollCtrl = ScrollController();
   final _ttsScrollCtrl = ScrollController();
   final _generalScrollCtrl = ScrollController();
+  final _profilesScrollCtrl = ScrollController();
+
+  final TextEditingController _profileNameCtrl = TextEditingController();
+  final TextEditingController _profileDescriptionCtrl = TextEditingController();
+  bool _savingConfigProfile = false;
+  String? _profileBusyId;
 
   // Voice service test state
   bool _testingVoiceService = false;
@@ -100,7 +106,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: 6, vsync: this);
   }
 
   @override
@@ -112,6 +118,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     _asrScrollCtrl.dispose();
     _ttsScrollCtrl.dispose();
     _generalScrollCtrl.dispose();
+    _profilesScrollCtrl.dispose();
+    _profileNameCtrl.dispose();
+    _profileDescriptionCtrl.dispose();
     _interactiveAsrSub?.cancel();
     _interactiveAsrService?.dispose();
     _interactiveTtsService?.dispose();
@@ -382,6 +391,113 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     }
   }
 
+  Future<void> _saveCurrentConfigProfile(LocalSettings s) async {
+    final name = _profileNameCtrl.text.trim();
+    if (name.isEmpty) {
+      _snackErr('请先为这套配置输入一个名称。');
+      return;
+    }
+
+    setState(() => _savingConfigProfile = true);
+    try {
+      final result = await ref.read(apiClientProvider).saveConfigProfile(
+            name: name,
+            description: _profileDescriptionCtrl.text.trim(),
+            localSettings: s,
+          );
+      if (result['success'] != true) {
+        _snackErr(result['message'] as String? ?? '保存配置失败');
+        return;
+      }
+      _profileNameCtrl.clear();
+      _profileDescriptionCtrl.clear();
+      ref.invalidate(configProfilesProvider);
+      _snack(result['message'] as String? ?? '配置已保存');
+    } catch (e) {
+      _snackErr('保存配置失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _savingConfigProfile = false);
+      }
+    }
+  }
+
+  Future<void> _loadSavedConfigProfile(SavedConfigProfile profile) async {
+    setState(() => _profileBusyId = profile.profileId);
+    try {
+      final result = await ref.read(apiClientProvider).loadConfigProfile(
+            profile.profileId,
+          );
+      if (result['success'] != true) {
+        _snackErr(result['message'] as String? ?? '载入配置失败');
+        return;
+      }
+
+      final localSettings = Map<String, dynamic>.from(
+        result['local_settings'] as Map? ?? const {},
+      );
+      await ref
+          .read(localSettingsProvider.notifier)
+          .applySnapshot(localSettings);
+      ref.invalidate(providersProvider);
+      ref.invalidate(speechConfigProvider);
+      ref.invalidate(currentConfigProvider);
+      ref.invalidate(healthStatusProvider);
+      ref.invalidate(configProfilesProvider);
+      _snack(result['message'] as String? ?? '配置已载入');
+    } catch (e) {
+      _snackErr('载入配置失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _profileBusyId = null);
+      }
+    }
+  }
+
+  Future<void> _deleteSavedConfigProfile(SavedConfigProfile profile) async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            backgroundColor: AppColors.studyWallLight,
+            title: const Text('删除配置'),
+            content: Text('确认删除“${profile.name}”？'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('删除'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) {
+      return;
+    }
+
+    setState(() => _profileBusyId = profile.profileId);
+    try {
+      final result = await ref.read(apiClientProvider).deleteConfigProfile(
+            profile.profileId,
+          );
+      if (result['success'] != true) {
+        _snackErr(result['message'] as String? ?? '删除配置失败');
+        return;
+      }
+      ref.invalidate(configProfilesProvider);
+      _snack(result['message'] as String? ?? '配置已删除');
+    } catch (e) {
+      _snackErr('删除配置失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _profileBusyId = null);
+      }
+    }
+  }
+
   void _snack(String m) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -464,6 +580,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     final speechAsync = ref.watch(speechConfigProvider);
     final healthAsync = ref.watch(healthStatusProvider);
     final currentAsync = ref.watch(currentConfigProvider);
+    final profilesAsync = ref.watch(configProfilesProvider);
     _syncSpeechSelectionsWithCurrentConfig(s, currentAsync.valueOrNull);
 
     if (localAsync.isLoading) {
@@ -497,6 +614,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             Tab(icon: Icon(Icons.volume_up_outlined, size: 18), text: '语音合成'),
             Tab(icon: Icon(Icons.forum_outlined, size: 18), text: '话题'),
             Tab(icon: Icon(Icons.settings_outlined, size: 18), text: '通用'),
+            Tab(
+                icon: Icon(Icons.bookmark_add_outlined, size: 18),
+                text: '保存配置'),
           ],
         ),
       ),
@@ -508,6 +628,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           _buildTtsTab(s, speechAsync),
           const _TopicsTab(),
           _buildGeneralTab(s, currentAsync, healthAsync),
+          _buildConfigProfilesTab(s, currentAsync, profilesAsync),
         ],
       ),
     );
@@ -590,6 +711,198 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         _buildSummarySection(s, currentAsync),
         const SizedBox(height: 14),
         _buildHealthSection(healthAsync),
+        const SizedBox(height: 32),
+      ],
+    );
+  }
+
+  Widget _buildConfigProfilesTab(
+    LocalSettings s,
+    AsyncValue<CurrentConfig> currentAsync,
+    AsyncValue<List<SavedConfigProfile>> profilesAsync,
+  ) {
+    final current = currentAsync.valueOrNull;
+    final profiles = profilesAsync.valueOrNull ?? const <SavedConfigProfile>[];
+
+    return ListView(
+      controller: _profilesScrollCtrl,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      children: [
+        _Section(
+          title: '保存当前整套配置',
+          icon: Icons.bookmark_add_outlined,
+          children: [
+            const Text(
+              '把当前 AI、语音和本地交互偏好保存成一个配置集，之后可以在首页直接加载。',
+              style: TextStyle(color: AppColors.warmGray, fontSize: 12.5),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                _ConfigBadge(
+                    label: 'LLM',
+                    value: current?.llmProviderName ?? s.llmProvider),
+                _ConfigBadge(label: '模型', value: current?.model ?? '-'),
+                _ConfigBadge(
+                    label: 'ASR', value: current?.asrProvider ?? s.asrProvider),
+                _ConfigBadge(
+                    label: 'TTS', value: current?.ttsProvider ?? s.ttsProvider),
+                _ConfigBadge(label: '服务器', value: s.serverUrl),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const _Label('配置名称'),
+            _Field(
+                ctrl: _profileNameCtrl,
+                hint: '例如：Gemini + CapsWriter + OpenVoice'),
+            const SizedBox(height: 10),
+            const _Label('备注（可选）'),
+            _Field(ctrl: _profileDescriptionCtrl, hint: '可写当前用途、适用场景或账号说明'),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                _GoldBtn(
+                  _savingConfigProfile ? '保存中…' : '保存当前配置',
+                  onTap: _savingConfigProfile
+                      ? null
+                      : () => _saveCurrentConfigProfile(s),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    '保存后不会覆盖 .env，而是单独生成一套可随时载入的配置快照。',
+                    style: TextStyle(color: AppColors.warmGray, fontSize: 11.5),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        _Section(
+          title: '已保存配置',
+          icon: Icons.library_books_outlined,
+          children: [
+            if (profilesAsync.isLoading)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 12),
+                child: LinearProgressIndicator(color: AppColors.amberGold),
+              ),
+            if (profilesAsync.hasError)
+              Text(
+                '配置列表加载失败: ${profilesAsync.error}',
+                style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+              )
+            else if (profiles.isEmpty)
+              const Text(
+                '还没有保存过配置。先在上方输入名称并保存一套。',
+                style: TextStyle(color: AppColors.warmGray, fontSize: 12.5),
+              )
+            else
+              ...profiles.map((profile) {
+                final busy = _profileBusyId == profile.profileId;
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    color: AppColors.studyWallLight.withValues(alpha: 0.36),
+                    border: Border.all(
+                      color: AppColors.amberGold.withValues(alpha: 0.12),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              profile.name,
+                              style: const TextStyle(
+                                color: AppColors.warmWhite,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            profile.updatedAt.isEmpty
+                                ? ''
+                                : profile.updatedAt
+                                    .replaceFirst('T', ' ')
+                                    .split('.')
+                                    .first,
+                            style: const TextStyle(
+                              color: AppColors.warmGray,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (profile.description.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          profile.description,
+                          style: const TextStyle(
+                            color: AppColors.warmGray,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          _ConfigBadge(
+                              label: 'LLM',
+                              value: profile.llmProvider.isEmpty
+                                  ? '-'
+                                  : profile.llmProvider),
+                          _ConfigBadge(
+                              label: '模型',
+                              value:
+                                  profile.model.isEmpty ? '-' : profile.model),
+                          _ConfigBadge(
+                              label: 'ASR',
+                              value: profile.asrProvider.isEmpty
+                                  ? '-'
+                                  : profile.asrProvider),
+                          _ConfigBadge(
+                              label: 'TTS',
+                              value: profile.ttsProvider.isEmpty
+                                  ? '-'
+                                  : profile.ttsProvider),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _OutBtn(
+                            busy ? '处理中…' : '立即载入',
+                            onTap: busy
+                                ? null
+                                : () => _loadSavedConfigProfile(profile),
+                          ),
+                          _OutBtn(
+                            '删除',
+                            onTap: busy
+                                ? null
+                                : () => _deleteSavedConfigProfile(profile),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              }),
+          ],
+        ),
         const SizedBox(height: 32),
       ],
     );

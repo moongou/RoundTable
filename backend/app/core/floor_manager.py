@@ -36,7 +36,7 @@ from autogen_agentchat.messages import (
 from autogen_agentchat.teams import SelectorGroupChat
 
 from app.agents.human_proxy import put_human_input
-from app.core.rolling_summary_memory import RollingSummaryMemory
+from app.core.rolling_summary_memory import HumanResponseGuidanceMemory, RollingSummaryMemory
 from app.core.safety_filter import SafetyFilter
 from app.core.turn_scheduler import create_discussion_team, set_designated_speaker, parse_speaker_designation
 
@@ -93,6 +93,8 @@ class FloorManager:
         human_timeout: int = 120,
         designated_speaker_setter: Optional[Callable[[Optional[str]], None]] = None,
         summary_memory: Optional[RollingSummaryMemory] = None,
+        human_guidance_memory: Optional[HumanResponseGuidanceMemory] = None,
+        human_hand_raise_notifier: Optional[Callable[[str], None]] = None,
         human_queue_scope: str | None = None,
     ):
         self.team = team
@@ -102,6 +104,8 @@ class FloorManager:
         self.human_timeout = human_timeout
         self._set_designated_speaker = designated_speaker_setter or set_designated_speaker
         self.summary_memory = summary_memory
+        self.human_guidance_memory = human_guidance_memory
+        self._human_hand_raise_notifier = human_hand_raise_notifier
         self._human_queue_scope = human_queue_scope
 
         self.ai_names = {agent.name for agent in ai_agents}
@@ -111,6 +115,8 @@ class FloorManager:
         self.state = FloorState.INIT
         self.current_speaker: Optional[str] = None
         self.session_id = str(uuid.uuid4())
+        self._current_topic = ""
+        self._pending_human_guidance = False
 
         # 消息回调：外部注册以接收事件
         self._on_message: Optional[Callable] = None
@@ -134,6 +140,7 @@ class FloorManager:
         self._speaker_message_count: dict[str, int] = {name: 0 for name in self.all_names}
         self._recent_display_speakers: list[str] = []
         self._recent_turn_summaries: list[tuple[str, str]] = []
+        self._recent_reference_quotes: list[tuple[str, str]] = []
 
         # Stalled watchdog: detect no-progress windows and auto-recover human wait stalls.
         self._watchdog_task: Optional[asyncio.Task] = None
@@ -223,6 +230,16 @@ class FloorManager:
             if count > 0:
                 spoken.add(self._agent_to_display_name.get(agent_name, agent_name))
         return spoken
+
+    def _get_all_display_names(self) -> list[str]:
+        seen: set[str] = set()
+        names: list[str] = []
+        for agent_name in [*self.ai_names, *self.human_names]:
+            display_name = self._agent_to_display_name.get(agent_name, agent_name)
+            if display_name and display_name not in seen:
+                seen.add(display_name)
+                names.append(display_name)
+        return names
 
     def _rewrite_unspoken_named_attribution(
         self,
@@ -391,6 +408,7 @@ class FloorManager:
 
     def _sanitize_all_references(self, source: str, content: str) -> str:
         text = self._sanitize_opening_reference(source, content)
+        text = self._sanitize_grounded_quote_attribution(text)
         return self._sanitize_reference_attribution(source, text)
 
     def _is_non_substantive_turn(self, content: str) -> bool:
@@ -419,6 +437,263 @@ class FloorManager:
             summary = summary[:42].rstrip("，,；;、 ") + "…"
         return summary
 
+    def _extract_reference_quote(self, content: str) -> str:
+        text = re.sub(r"（[^）]{0,24}）", "", content or "")
+        text = re.sub(r"\([^)]{0,24}\)", "", text)
+        text = re.sub(r"\s+", " ", text).strip(" ，,。！？!?；;:：")
+        if not text:
+            return ""
+        if len(text) > 96:
+            text = text[:96].rstrip("，,；;、 ") + "…"
+        return text
+
+    def _topic_focus_label(self) -> str:
+        topic = (self._current_topic or "").strip()
+        if not topic:
+            return ""
+        first_line = next((line.strip() for line in topic.splitlines() if line.strip()), "")
+        focus = first_line or topic
+        if len(focus) > 32:
+            focus = focus[:32].rstrip("，,；;、 ") + "…"
+        return focus
+
+    def _pick_recent_peer_focus(self, current_name: str) -> tuple[str, str] | None:
+        current_display = self._agent_to_display_name.get(current_name, current_name)
+        moderator_display = self._agent_to_display_name.get("moderator", "moderator")
+        for speaker, summary in reversed(self._recent_turn_summaries):
+            if not speaker or not summary:
+                continue
+            if speaker in {current_display, moderator_display}:
+                continue
+            return speaker, summary
+        return None
+
+    def _classify_human_input(self, current_name: str, text: str) -> str:
+        normalized = self._normalize_reference_match_text(text)
+        if not normalized:
+            return "weak"
+
+        weak_markers = (
+            "不知道",
+            "没想法",
+            "随便",
+            "都行",
+            "还行",
+            "就这样",
+            "没了",
+            "不知道说什么",
+            "我不知道",
+            "嗯",
+            "啊",
+        )
+        current_display = self._agent_to_display_name.get(current_name, current_name)
+        peer_mentions = any(
+            self._normalize_reference_match_text(display_name)
+            and self._normalize_reference_match_text(display_name) in normalized
+            for display_name in self._display_name_to_agent.keys()
+            if display_name and display_name != current_display
+        )
+
+        topical_candidates: list[str] = []
+        if self._current_topic:
+            topical_candidates.append(self._current_topic)
+        topical_candidates.extend(
+            summary
+            for speaker, summary in self._recent_turn_summaries
+            if speaker != current_display and summary
+        )
+        topical_candidates.extend(
+            quote
+            for speaker, quote in self._recent_reference_quotes
+            if speaker != current_display and quote
+        )
+        topical_score = max(
+            (self._score_reference_fragment(text, candidate) for candidate in topical_candidates if candidate),
+            default=0,
+        )
+
+        if len(normalized) <= 6 and topical_score < 6 and not peer_mentions:
+            return "weak"
+        if any(marker in normalized for marker in weak_markers) and len(normalized) <= 10 and not peer_mentions:
+            return "weak"
+        if len(normalized) >= 8 and topical_candidates and topical_score < 4 and not peer_mentions:
+            return "off_topic"
+        return "on_topic"
+
+    def _build_human_guidance(self, current_name: str, text: str) -> dict[str, Any] | None:
+        summary = self._extract_core_viewpoint(text)
+        if not summary:
+            return None
+
+        assessment = self._classify_human_input(current_name, text)
+        if assessment == "on_topic":
+            return None
+
+        guidance: dict[str, Any] = {
+            "speaker": self._agent_to_display_name.get(current_name, current_name),
+            "summary": summary,
+            "assessment": assessment,
+            "topic_focus": self._topic_focus_label(),
+        }
+        peer_focus = self._pick_recent_peer_focus(current_name)
+        if peer_focus is not None:
+            guidance["suggested_peer_name"] = peer_focus[0]
+            guidance["suggested_peer_summary"] = peer_focus[1]
+        return guidance
+
+    def _normalize_reference_match_text(self, text: str) -> str:
+        value = re.sub(r"（[^）]{0,24}）", "", text or "")
+        value = re.sub(r"\([^)]{0,24}\)", "", value)
+        value = value.lower()
+        value = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+        return value.strip()
+
+    def _build_reference_bigrams(self, text: str) -> set[str]:
+        if len(text) < 2:
+            return set()
+        return {text[index : index + 2] for index in range(len(text) - 1)}
+
+    def _score_reference_fragment(self, fragment: str, candidate: str) -> int:
+        fragment_norm = self._normalize_reference_match_text(fragment)
+        candidate_norm = self._normalize_reference_match_text(candidate)
+        if not fragment_norm or not candidate_norm:
+            return 0
+        if len(fragment_norm) <= 2:
+            return 8 if fragment_norm in candidate_norm else 0
+
+        score = 0
+        if fragment_norm in candidate_norm:
+            score += max(8, min(len(fragment_norm), 16))
+        score += len(set(fragment_norm) & set(candidate_norm))
+        score += len(
+            self._build_reference_bigrams(fragment_norm)
+            & self._build_reference_bigrams(candidate_norm)
+        ) * 2
+        return score
+
+    def _guess_reference_owner(self, fragment: str) -> str | None:
+        best_name = ""
+        best_score = 0
+        tied = False
+        for speaker, quote in reversed(self._recent_reference_quotes):
+            score = self._score_reference_fragment(fragment, quote)
+            if score <= 0:
+                continue
+            if score > best_score:
+                best_name = speaker
+                best_score = score
+                tied = False
+            elif score == best_score and speaker != best_name:
+                tied = True
+
+        if best_score < 3 or tied:
+            return None
+        return best_name
+
+    def _format_reference_name(self, name: str, honorific: str) -> str:
+        if not honorific or name.endswith(honorific):
+            return name
+        return f"{name}{honorific}"
+
+    def _sanitize_grounded_quote_attribution(self, text: str) -> str:
+        value = (text or "").strip()
+        if not value or not self._recent_reference_quotes:
+            return value
+
+        display_names = sorted(set(self._agent_to_display_name.values()), key=len, reverse=True)
+        if not display_names:
+            return value
+        names_pattern = "|".join(re.escape(name) for name in display_names)
+        invalidated_names: set[str] = set()
+
+        def rewrite_named_vocative(match: re.Match[str]) -> str:
+            name = match.group('name')
+            honorific = match.group('honorific') or ''
+            verb = match.group('verb')
+            fragment = match.group('fragment')
+            owner = self._guess_reference_owner(fragment)
+            if owner == name:
+                return match.group(0)
+            if owner:
+                invalidated_names.add(name)
+                return f"{self._format_reference_name(owner, honorific)}，你{verb}“{fragment}”"
+            invalidated_names.add(name)
+            return f"有同学{verb}“{fragment}”"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?[，,:：]?\s*你(?P<verb>刚才说的?|刚才提到的?|说的?|提到的?|讲到的?|提出的?|分享的?|质疑的?|追问的?)[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]",
+            rewrite_named_vocative,
+            value,
+        )
+
+        def rewrite_named_report(match: re.Match[str]) -> str:
+            name = match.group('name')
+            honorific = match.group('honorific') or ''
+            verb = match.group('verb')
+            fragment = match.group('fragment')
+            owner = self._guess_reference_owner(fragment)
+            if owner == name:
+                return match.group(0)
+            if owner:
+                invalidated_names.add(name)
+                return f"{self._format_reference_name(owner, honorific)}{verb}“{fragment}”"
+            invalidated_names.add(name)
+            return f"有同学{verb}“{fragment}”"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:还)?\s*(?P<verb>说的?|提到的?|讲到的?|提出的?|分享的?|质疑的?|追问的?)[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]",
+            rewrite_named_report,
+            value,
+        )
+
+        def rewrite_named_object(match: re.Match[str]) -> str:
+            name = match.group('name')
+            fragment = match.group('fragment')
+            owner = self._guess_reference_owner(fragment)
+            if owner == name:
+                return match.group(0)
+            invalidated_names.add(name)
+            if owner:
+                return f"{owner}提到的“{fragment}”"
+            return f"有同学提到的“{fragment}”"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?这个[“\"「『](?P<fragment>[^”\"」』]{{2,40}})[”\"」』]",
+            rewrite_named_object,
+            value,
+        )
+
+        def rewrite_sentence_pronoun(match: re.Match[str]) -> str:
+            prefix = match.group('prefix') or ''
+            verb = match.group('verb')
+            fragment = match.group('fragment')
+            owner = self._guess_reference_owner(fragment)
+            if owner:
+                return f"{prefix}{owner}{verb}“{fragment}”"
+            return f"{prefix}有同学{verb}“{fragment}”"
+
+        value = re.sub(
+            r"(?P<prefix>^|[。！？!?]\s*)你(?P<verb>刚才说的?|刚才提到的?|说的?|提到的?|讲到的?|提出的?|分享的?|质疑的?|追问的?)[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]",
+            rewrite_sentence_pronoun,
+            value,
+        )
+
+        for name in invalidated_names:
+            value = re.sub(
+                rf"{re.escape(name)}(?:同学|先生)?[，,:：]?\s*你这个[^。！？!?]{{0,36}}[。！？!?]",
+                "",
+                value,
+            )
+            value = re.sub(
+                rf"{re.escape(name)}(?:同学|先生)?这个(比喻|问题|疑惑|想法|说法)",
+                r"这个\1",
+                value,
+            )
+
+        value = re.sub(r"\s{2,}", " ", value).strip()
+        value = re.sub(r"^[，,:：\s]+", "", value)
+        return value
+
     async def _record_turn_summary(self, source: str, content: str) -> None:
         if self.summary_memory is None or source not in self.all_names:
             return
@@ -432,7 +707,20 @@ class FloorManager:
         self._recent_turn_summaries.append((display_source, summary))
         if len(self._recent_turn_summaries) > 3:
             self._recent_turn_summaries = self._recent_turn_summaries[-3:]
-        await self.summary_memory.replace_turn_summaries(self._recent_turn_summaries)
+        quote = self._extract_reference_quote(text)
+        if quote:
+            self._recent_reference_quotes.append((display_source, quote))
+            if len(self._recent_reference_quotes) > 5:
+                self._recent_reference_quotes = self._recent_reference_quotes[-5:]
+        spoken_names = sorted(self._get_spoken_display_names())
+        all_display_names = self._get_all_display_names()
+        unspoken_names = [name for name in all_display_names if name not in set(spoken_names)]
+        await self.summary_memory.replace_turn_summaries(
+            self._recent_turn_summaries,
+            spoken_names=spoken_names,
+            unspoken_names=unspoken_names,
+            recent_quotes=self._recent_reference_quotes,
+        )
 
     def _drain_complete_stream_sentences(self, text: str) -> tuple[list[str], str]:
         """从流式文本中提取已完成句子，保留尚未完结的尾段。"""
@@ -753,9 +1041,13 @@ class FloorManager:
         self._watchdog_stop.clear()
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
         self._resume_gate.set()
+        self._current_topic = (topic or "").strip()
+        self._pending_human_guidance = False
         self._recent_turn_summaries.clear()
         if self.summary_memory is not None:
             await self.summary_memory.clear()
+        if self.human_guidance_memory is not None:
+            await self.human_guidance_memory.clear()
 
         try:
             stream = self.team.run_stream(task=topic)
@@ -990,6 +1282,13 @@ class FloorManager:
                 if len(self._recent_display_speakers) > 16:
                     self._recent_display_speakers = self._recent_display_speakers[-16:]
             await self._record_turn_summary(source, content)
+            if (
+                source == "moderator"
+                and self._pending_human_guidance
+                and self.human_guidance_memory is not None
+            ):
+                await self.human_guidance_memory.clear()
+                self._pending_human_guidance = False
 
             return {
                 "event_type": "message",
@@ -1060,6 +1359,9 @@ class FloorManager:
         # 空输入直接按跳过处理，保证流程继续。
         if not normalized_text:
             logger.info("[FloorManager] 空输入，自动跳过: %s", normalized_name)
+            if self.human_guidance_memory is not None:
+                await self.human_guidance_memory.clear()
+            self._pending_human_guidance = False
             await self._put_human_input(normalized_name, "（跳过）")
             await self._emit_message("系统", f"{normalized_name or '该同学'}未输入有效内容，已自动跳过本轮。", "system")
             return
@@ -1067,6 +1369,9 @@ class FloorManager:
         # 跳过指令不需要安全过滤
         if normalized_text in ("（跳过）", "(跳过)", "跳过"):
             logger.info("[FloorManager] 用户主动跳过: %s", normalized_name)
+            if self.human_guidance_memory is not None:
+                await self.human_guidance_memory.clear()
+            self._pending_human_guidance = False
             await self._put_human_input(normalized_name, "（跳过）")
             return
 
@@ -1074,8 +1379,25 @@ class FloorManager:
         is_safe, reason = await self.safety_filter.check_human_input(normalized_text)
         if not is_safe:
             logger.warning("[FloorManager] 人类输入被安全过滤: %s, reason=%s", normalized_name, reason)
+            if self.human_guidance_memory is not None:
+                await self.human_guidance_memory.clear()
+            self._pending_human_guidance = False
             await self._emit_message("系统", "你的发言包含不适当的内容，请换一种方式表达。", "system")
             return
+
+        guidance = self._build_human_guidance(normalized_name, normalized_text)
+        if self.human_guidance_memory is not None:
+            if guidance is not None:
+                logger.info(
+                    "[FloorManager] 生成真人学生回应指引: speaker=%s assessment=%s",
+                    normalized_name,
+                    guidance.get("assessment", ""),
+                )
+                await self.human_guidance_memory.replace_guidance([guidance])
+                self._pending_human_guidance = True
+            else:
+                await self.human_guidance_memory.clear()
+                self._pending_human_guidance = False
 
         # 进入真实提交前先清空陈旧点名，避免上一轮残留目标在本轮提交后再次触发。
         self._set_designated_speaker(None)
@@ -1114,33 +1436,37 @@ class FloorManager:
             speaker: 请求打断的参与者名字。
         """
         # 检查打断者是否为人类学生
+        speaker_agent_name = self._display_name_to_agent.get(speaker, speaker)
+        display_speaker = self._agent_to_display_name.get(speaker_agent_name, speaker)
         human_display_names = {
             self._agent_to_display_name.get(name, name)
             for name in self.human_names
         }
-        is_human = speaker in self.human_names or speaker in human_display_names
+        is_human = speaker_agent_name in self.human_names or speaker in human_display_names
         if not is_human:
             logger.info("[FloorManager] 非人类参与者 %s 尝试举手打断，忽略", speaker)
             return
 
-        logger.info(f"打断请求: {speaker} 请求发言 (当前发言者: {self.current_speaker})")
-        self._interrupt_queue.append(speaker)
+        logger.info(f"打断请求: {display_speaker} 请求发言 (当前发言者: {self.current_speaker})")
+        self._interrupt_queue.append(display_speaker)
+        if self._human_hand_raise_notifier is not None:
+            self._human_hand_raise_notifier(speaker_agent_name)
 
         await self._set_state(FloorState.INTERRUPTED, reason="interrupt_requested")
 
         moderator_display = self._agent_to_display_name.get("moderator", "李老师")
         # 让举手者成为下一位优先发言，避免被其他角色插队。
-        self._set_designated_speaker(speaker)
+        self._set_designated_speaker(speaker_agent_name)
         # 由老师口吻发布同意插话通知。
         await self._emit_message(
             moderator_display,
-            f"{speaker} 同学，我同意你先发言，其他同学稍后继续。",
+            f"{display_speaker} 同学，我同意你先发言，其他同学稍后继续。",
             "interrupt",
         )
 
         # 通知打断事件
         if self._on_interrupt:
-            await self._on_interrupt(speaker, self.current_speaker or "", moderator_display)
+            await self._on_interrupt(display_speaker, self.current_speaker or "", moderator_display)
 
         # 短暂暂停后恢复到选择发言者状态
         await asyncio.sleep(0.5)

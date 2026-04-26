@@ -20,7 +20,7 @@ from app.config import settings
 from app.core.floor_manager import FloorManager
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.meeting_history import MeetingHistoryStore
-from app.core.rolling_summary_memory import RollingSummaryMemory
+from app.core.rolling_summary_memory import HumanResponseGuidanceMemory, RollingSummaryMemory
 from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker, thinker_label
 from app.core.topics import get_topic_by_id
@@ -66,6 +66,23 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
     send_drop_total = 0
     send_drop_reasons: dict[str, int] = {}
     last_send_drop: dict[str, str] = {}
+    human_hand_raise_counts: dict[str, int] = {}
+
+    def note_human_hand_raise(agent_name: str) -> None:
+        normalized = (agent_name or "").strip()
+        if not normalized:
+            return
+        human_hand_raise_counts[normalized] = human_hand_raise_counts.get(normalized, 0) + 1
+
+    def get_human_engagement_level() -> int:
+        if not human_hand_raise_counts:
+            return 0
+        highest_raise_count = max(human_hand_raise_counts.values())
+        if highest_raise_count >= 3:
+            return 2
+        if highest_raise_count >= 2:
+            return 1
+        return 0
 
     def record_send_drop(reason: str, dropped_event_type: str) -> None:
         nonlocal send_drop_total, last_send_drop
@@ -344,7 +361,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         )
 
         summary_memory = RollingSummaryMemory()
+        moderator_guidance_memory = HumanResponseGuidanceMemory()
         shared_memory = [summary_memory]
+        moderator_memory = [summary_memory, moderator_guidance_memory]
 
         moderator = create_moderator(
             model_client=moderator_client,
@@ -353,7 +372,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             student_names=student_names,
             thinker_names=thinker_display_names,
             human_names=human_names,
-            memory=shared_memory,
+            memory=moderator_memory,
         )
 
         characters = [
@@ -411,6 +430,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             consume_designated_speaker=consume_session_designated_speaker,
             on_designation_lifecycle=on_designation_lifecycle,
             display_name_to_agent=display_name_to_agent,
+            get_human_engagement_level=get_human_engagement_level,
         )
 
         # 创建安全过滤器
@@ -425,6 +445,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             human_timeout=max(60, int(getattr(settings, "human_turn_timeout", 15) or 15)),
             designated_speaker_setter=set_session_designated_speaker,
             summary_memory=summary_memory,
+            human_guidance_memory=moderator_guidance_memory,
+            human_hand_raise_notifier=note_human_hand_raise,
             human_queue_scope=session_id,
         )
 

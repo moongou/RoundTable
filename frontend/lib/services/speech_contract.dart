@@ -1,12 +1,28 @@
 /// Speech service contracts shared by web and non-web implementations.
 library;
 
+import 'dart:typed_data';
+
 /// ASR single transcript segment.
 class AsrResult {
   final String text;
   final bool isFinal;
 
   const AsrResult({required this.text, required this.isFinal});
+}
+
+class AsrAudioCapture {
+  final Uint8List bytes;
+  final String contentType;
+  final String fileExtension;
+  final int? durationMs;
+
+  const AsrAudioCapture({
+    required this.bytes,
+    required this.contentType,
+    required this.fileExtension,
+    this.durationMs,
+  });
 }
 
 /// Runtime TTS metrics snapshot used by UI telemetry panels.
@@ -68,7 +84,12 @@ class TtsPerfSnapshot {
 
 /// TTS service abstraction.
 abstract class TtsService {
-  Future<void> speak(String text, {String? voice, double rate = 1.0});
+  Future<void> speak(
+    String text, {
+    String? voice,
+    double rate = 1.0,
+    void Function()? onStart,
+  });
 
   /// Optional background prefetch for upcoming lines.
   Future<void> prefetch(String text, {String? voice}) async {}
@@ -103,6 +124,8 @@ abstract class AsrService {
   Future<void> stopListening();
 
   Stream<AsrResult> get transcriptionStream;
+
+  Future<AsrAudioCapture?> takeLastCapture() async => null;
 
   Future<String> refineTranscript(String text);
 

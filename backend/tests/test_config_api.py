@@ -34,6 +34,13 @@ def _restore_settings():
             'tts_provider',
         )
     }
+    tracked['openai_api_key'] = getattr(settings, 'openai_api_key')
+    tracked['openai_base_url'] = getattr(settings, 'openai_base_url')
+    tracked['openai_model'] = getattr(settings, 'openai_model')
+    tracked['asr_provider'] = getattr(settings, 'asr_provider')
+    tracked['push_to_talk'] = getattr(settings, 'push_to_talk')
+    tracked['web_search_enabled'] = getattr(settings, 'web_search_enabled')
+    tracked['tavily_api_key'] = getattr(settings, 'tavily_api_key')
     try:
         yield
     finally:
@@ -215,3 +222,70 @@ async def test_test_voice_service_validates_siliconflow_tts(monkeypatch: pytest.
     assert result['model_valid'] is True
     assert result['voice_used'] == 'FunAudioLLM/CosyVoice2-0.5B:alex'
     assert result['voices'] == ['FunAudioLLM/CosyVoice2-0.5B:alex']
+
+
+@pytest.mark.asyncio
+async def test_save_and_load_config_profile_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(config_api, 'CONFIG_PROFILES_DIR', tmp_path)
+
+    _set_setting('llm_provider', 'openai')
+    _set_setting('openai_api_key', 'profile-key')
+    _set_setting('openai_base_url', 'https://api.example.com/v1')
+    _set_setting('openai_model', 'gemini-3.1-flash-lite')
+    _set_setting('asr_provider', 'capswriter')
+    _set_setting('tts_provider', 'openvoice')
+    _set_setting('push_to_talk', False)
+    _set_setting('web_search_enabled', True)
+    _set_setting('tavily_api_key', 'tv-key')
+
+    saved = await config_api.save_config_profile(
+        {
+            'name': '课堂演示',
+            'description': '网关 + capswriter + openvoice',
+            'local_settings': {
+                'server_url': 'http://localhost:8001',
+                'push_to_talk': False,
+                'asr_provider': 'capswriter',
+                'tts_provider': 'openvoice',
+            },
+        }
+    )
+
+    assert saved['success'] is True
+    assert saved['profile']['name'] == '课堂演示'
+    assert saved['profile']['llm_provider'] == 'openai'
+    assert saved['profile']['asr_provider'] == 'capswriter'
+
+    listed = await config_api.list_config_profiles()
+    assert [item['name'] for item in listed['profiles']] == ['课堂演示']
+
+    _set_setting('llm_provider', 'deepseek')
+    _set_setting('openai_base_url', 'https://changed.example.com/v1')
+    _set_setting('openai_model', 'changed-model')
+    _set_setting('asr_provider', 'funasr')
+    _set_setting('tts_provider', 'chattts')
+    _set_setting('push_to_talk', True)
+
+    loaded = await config_api.load_config_profile(saved['profile']['profile_id'])
+
+    assert loaded['success'] is True
+    assert loaded['local_settings']['server_url'] == 'http://localhost:8001'
+    assert settings.llm_provider == 'openai'
+    assert settings.openai_base_url == 'https://api.example.com/v1'
+    assert settings.openai_model == 'gemini-3.1-flash-lite'
+    assert settings.asr_provider == 'capswriter'
+    assert settings.tts_provider == 'openvoice'
+    assert settings.push_to_talk is False
+
+
+@pytest.mark.asyncio
+async def test_delete_config_profile_removes_saved_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(config_api, 'CONFIG_PROFILES_DIR', tmp_path)
+
+    saved = await config_api.save_config_profile({'name': '待删除配置'})
+    profile_id = saved['profile']['profile_id']
+
+    deleted = await config_api.delete_config_profile(profile_id)
+
+    assert deleted['success'] is True
+    assert not (tmp_path / f'{profile_id}.json').exists()

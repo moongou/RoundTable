@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -32,6 +34,7 @@ from app.voice.openvoice_profiles import list_openvoice_profile_ids
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config", tags=["config"])
+CONFIG_PROFILES_DIR = Path(settings.base_dir) / "runtime" / "config_profiles"
 
 _CLOUD_VOICE_SERVICE_IDS = {
     "openai_whisper",
@@ -40,6 +43,112 @@ _CLOUD_VOICE_SERVICE_IDS = {
     "openai_tts",
     "siliconflow_tts",
 }
+
+_CONFIG_PROFILE_FIELD_NAMES = {
+    "llm_provider",
+    "asr_provider",
+    "tts_provider",
+    "push_to_talk",
+    "max_turns",
+    "human_turn_timeout",
+    "hardware_detection_on_startup",
+    "chattts_url",
+    "capswriter_url",
+    "vosk_url",
+    "funasr_url",
+    "edge_tts_url",
+    "cosyvoice_url",
+    "vibevoice_url",
+    "fireredtts_url",
+    "openvoice_url",
+    "openai_whisper_api_key",
+    "openai_whisper_base_url",
+    "openai_whisper_model",
+    "siliconflow_asr_api_key",
+    "siliconflow_asr_base_url",
+    "siliconflow_asr_model",
+    "groq_whisper_api_key",
+    "groq_whisper_base_url",
+    "groq_whisper_model",
+    "openai_tts_api_key",
+    "openai_tts_base_url",
+    "openai_tts_model",
+    "openai_tts_voice",
+    "siliconflow_tts_api_key",
+    "siliconflow_tts_base_url",
+    "siliconflow_tts_model",
+    "siliconflow_tts_voice",
+    "tts_voice",
+    "cosyvoice_voice",
+    "tavily_api_key",
+    "tavily_base_url",
+    "web_search_enabled",
+}
+for _provider_id in PROVIDER_DEFAULTS:
+    _CONFIG_PROFILE_FIELD_NAMES.update(
+        {
+            f"{_provider_id}_api_key",
+            f"{_provider_id}_base_url",
+            f"{_provider_id}_model",
+        }
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sanitize_profile_id(value: str) -> str:
+    normalized = "_".join(
+        part for part in "".join(ch if ch.isalnum() else " " for ch in (value or "").strip()).split()
+    )
+    return normalized[:80] or "profile"
+
+
+def _config_profile_path(profile_id: str) -> Path:
+    return CONFIG_PROFILES_DIR / f"{profile_id}.json"
+
+
+def _capture_runtime_config_snapshot() -> dict[str, object]:
+    snapshot: dict[str, object] = {}
+    for field_name in sorted(_CONFIG_PROFILE_FIELD_NAMES):
+        snapshot[field_name] = getattr(settings, field_name)
+    return snapshot
+
+
+def _build_config_profile_summary(payload: dict) -> dict[str, object]:
+    runtime_config = payload.get("runtime_config", {})
+    return {
+        "profile_id": payload.get("profile_id", ""),
+        "name": payload.get("name", ""),
+        "description": payload.get("description", ""),
+        "created_at": payload.get("created_at", ""),
+        "updated_at": payload.get("updated_at", ""),
+        "llm_provider": runtime_config.get("llm_provider", ""),
+        "model": runtime_config.get(
+            f"{runtime_config.get('llm_provider', '')}_model",
+            runtime_config.get("openai_model", ""),
+        ),
+        "asr_provider": runtime_config.get("asr_provider", ""),
+        "tts_provider": runtime_config.get("tts_provider", ""),
+        "has_local_settings": bool(payload.get("local_settings")),
+    }
+
+
+def _read_config_profile(profile_id: str) -> dict:
+    profile_path = _config_profile_path(profile_id)
+    if not profile_path.exists():
+        raise FileNotFoundError(profile_id)
+    return json.loads(profile_path.read_text(encoding="utf-8"))
+
+
+def _write_config_profile(payload: dict) -> None:
+    CONFIG_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    profile_path = _config_profile_path(str(payload.get("profile_id", "")))
+    profile_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _effective_tts_provider_id() -> str:
@@ -765,6 +874,100 @@ async def save_config_to_env(updates: dict):
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
         return {"success": False, "message": f"保存失败: {e}"}
+
+
+@router.get("/profiles")
+async def list_config_profiles():
+    """列出已保存的配置集。"""
+    if not CONFIG_PROFILES_DIR.exists():
+        return {"profiles": []}
+
+    profiles: list[dict[str, object]] = []
+    for profile_path in CONFIG_PROFILES_DIR.glob("*.json"):
+        try:
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("读取配置集失败 %s: %s", profile_path, exc)
+            continue
+        profiles.append(_build_config_profile_summary(payload))
+
+    profiles.sort(
+        key=lambda item: str(item.get("updated_at", "")),
+        reverse=True,
+    )
+    return {"profiles": profiles}
+
+
+@router.post("/profiles")
+async def save_config_profile(body: dict):
+    """保存当前完整配置为一个可复用的配置集。"""
+    profile_name = str(body.get("name", "")).strip()
+    if not profile_name:
+        return {"success": False, "message": "配置名称不能为空"}
+
+    profile_id = _sanitize_profile_id(str(body.get("profile_id", "")) or profile_name)
+    existing_payload: dict | None = None
+    try:
+        existing_payload = _read_config_profile(profile_id)
+    except FileNotFoundError:
+        existing_payload = None
+
+    now = _utc_now_iso()
+    payload = {
+        "profile_id": profile_id,
+        "name": profile_name,
+        "description": str(body.get("description", "")).strip(),
+        "created_at": (existing_payload or {}).get("created_at", now),
+        "updated_at": now,
+        "runtime_config": _capture_runtime_config_snapshot(),
+        "local_settings": body.get("local_settings", {}) or {},
+    }
+    _write_config_profile(payload)
+
+    return {
+        "success": True,
+        "message": f"已保存配置“{profile_name}”",
+        "profile": _build_config_profile_summary(payload),
+    }
+
+
+@router.post("/profiles/{profile_id}/load")
+async def load_config_profile(profile_id: str):
+    """载入已保存的配置集，并立即应用到当前运行时。"""
+    try:
+        payload = _read_config_profile(profile_id)
+    except FileNotFoundError:
+        return {"success": False, "message": "配置集不存在"}
+    except Exception as exc:
+        logger.error("读取配置集失败 %s: %s", profile_id, exc)
+        return {"success": False, "message": f"读取配置集失败: {exc}"}
+
+    runtime_config = payload.get("runtime_config", {}) or {}
+    try:
+        normalized_updates = _normalize_config_updates(dict(runtime_config))
+        settings.update_runtime(normalized_updates)
+    except Exception as exc:
+        logger.error("应用配置集失败 %s: %s", profile_id, exc)
+        return {"success": False, "message": f"应用配置集失败: {exc}"}
+
+    payload["updated_at"] = _utc_now_iso()
+    _write_config_profile(payload)
+    return {
+        "success": True,
+        "message": f"已载入配置“{payload.get('name', profile_id)}”",
+        "profile": _build_config_profile_summary(payload),
+        "local_settings": payload.get("local_settings", {}),
+    }
+
+
+@router.delete("/profiles/{profile_id}")
+async def delete_config_profile(profile_id: str):
+    """删除一个已保存的配置集。"""
+    profile_path = _config_profile_path(profile_id)
+    if not profile_path.exists():
+        return {"success": False, "message": "配置集不存在"}
+    profile_path.unlink()
+    return {"success": True, "message": "配置集已删除", "profile_id": profile_id}
 
 
 @router.post("/test-provider")
