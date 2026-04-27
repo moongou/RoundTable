@@ -1,7 +1,6 @@
 """本地语音服务提供商。
 
-ASR 仍通过本地 voice-services gateway 访问；
-TTS 改为按各服务各自的直连 URL 调用，不再依赖 6666 聚合链路。
+ASR/TTS 均按各服务各自的直连 URL 调用，不依赖聚合网关。
 """
 
 from __future__ import annotations
@@ -11,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from urllib.parse import urlparse
 from pathlib import Path
 
 import httpx
@@ -21,7 +21,10 @@ from app.voice.openvoice_profiles import get_openvoice_profile
 
 logger = logging.getLogger(__name__)
 
-GATEWAY_URL = "http://localhost:6666"
+DEFAULT_ASR_SERVICE_URLS = {
+    "capswriter": "http://localhost:6701",
+    "vosk": "http://localhost:6702",
+}
 DEFAULT_OPENVOICE_URL = LOCAL_SERVICE_DEFAULTS.get("openvoice", {}).get(
     "url", "http://localhost:6707"
 )
@@ -175,13 +178,22 @@ class GatewayTTSProvider(TTSProvider):
 
 
 class GatewayASRProvider(ASRProvider):
-    """通过 gateway 访问本地 ASR 服务 (CapsWriter/Vosk)。"""
+    """通过各服务独立端口访问本地 ASR 服务 (CapsWriter/Vosk)。"""
 
-    def __init__(self, service: str = "capswriter", gateway_url: str = GATEWAY_URL):
+    def __init__(self, service: str = "capswriter", service_url: str | None = None):
         self.service = service
-        self.gateway_url = gateway_url.rstrip("/")
+        resolved_service_url = (
+            service_url
+            or settings.get_voice_service_url(service)
+            or DEFAULT_ASR_SERVICE_URLS.get(service, "")
+        )
+        parsed = urlparse((resolved_service_url or "").strip())
+        if parsed.scheme in {"ws", "wss"}:
+            # HTTP ASR wrapper 需要 HTTP URL；如果 runtime 配置是 WS，就回退到独立 HTTP 端口。
+            resolved_service_url = DEFAULT_ASR_SERVICE_URLS.get(service, "")
+        self.service_url = (resolved_service_url or "").rstrip("/")
 
-    def _normalize_audio_for_gateway(self, audio_data: bytes, format: str) -> tuple[bytes, str]:
+    def _normalize_audio_for_service(self, audio_data: bytes, format: str) -> tuple[bytes, str]:
         fmt = (format or "wav").lower().strip()
         if fmt in ("wav", "pcm", "raw"):
             return audio_data, "wav" if fmt == "raw" else fmt
@@ -237,17 +249,16 @@ class GatewayASRProvider(ASRProvider):
                         pass
 
     async def transcribe(self, audio_data: bytes, format: str = "wav") -> str:
-        normalized_audio, normalized_format = self._normalize_audio_for_gateway(audio_data, format)
+        normalized_audio, normalized_format = self._normalize_audio_for_service(audio_data, format)
+        if not self.service_url:
+            raise RuntimeError(f"未配置 {self.service} 服务地址")
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Gateway proxies multipart to backend /transcribe
-            data = httpx.Request("POST", "/dummy")
             response = await client.post(
-                f"{self.gateway_url}/asr/{self.service}",
+                f"{self.service_url}/transcribe",
                 content=normalized_audio,
                 headers={"Content-Type": f"audio/{normalized_format}"},
             )
             if response.status_code != 200:
-                # Try multipart form
                 files = {
                     "audio": (
                         f"audio.{normalized_format}",
@@ -256,7 +267,7 @@ class GatewayASRProvider(ASRProvider):
                     )
                 }
                 response = await client.post(
-                    f"{self.gateway_url}/asr/{self.service}",
+                    f"{self.service_url}/transcribe",
                     files=files,
                 )
             response.raise_for_status()
@@ -265,8 +276,10 @@ class GatewayASRProvider(ASRProvider):
 
     async def is_available(self) -> bool:
         try:
+            if not self.service_url:
+                return False
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.gateway_url}/health/{self.service}")
+                resp = await client.get(f"{self.service_url}/health")
                 if resp.status_code == 200:
                     data = resp.json()
                     return data.get("status") == "healthy"

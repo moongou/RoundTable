@@ -476,7 +476,7 @@ async def _probe_websocket_service(url: str, timeout_sec: float = 3.0) -> dict:
         }
 
 
-_FULL_HEALTH_SERVICE_IDS = tuple(sid for sid in LOCAL_SERVICE_DEFAULTS.keys() if sid != "gateway")
+_FULL_HEALTH_SERVICE_IDS = tuple(LOCAL_SERVICE_DEFAULTS.keys())
 
 
 def _health_category_for_service(service_id: str) -> str:
@@ -498,7 +498,7 @@ def _health_candidate_service_ids(*, current_only: bool) -> list[str]:
     service_ids: list[str] = []
     for raw_id in candidate_ids:
         service_id = (raw_id or "").strip().lower()
-        if not service_id or service_id in {"browser", "disabled", "gateway"}:
+        if not service_id or service_id in {"browser", "disabled"}:
             continue
         service_ids.append(service_id)
     return list(dict.fromkeys(service_ids))

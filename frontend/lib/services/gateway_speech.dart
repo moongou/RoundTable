@@ -53,6 +53,10 @@ class GatewayStreamingAsrService implements AsrService {
   bool _disposed = false;
   String? _capsWriterTaskId;
   double _capsWriterStartSeconds = 0;
+  int? _capsWriterMicSessionId;
+  js.JsFunction? _capsWriterMicStartedCallback;
+  js.JsFunction? _capsWriterMicAudioCallback;
+  js.JsFunction? _capsWriterMicErrorCallback;
 
   // 预热的 WebSocket 连接
   html.WebSocket? _warmWs;
@@ -76,12 +80,206 @@ class GatewayStreamingAsrService implements AsrService {
     return html.WebSocket(_buildWsUrl(), wsProtocols);
   }
 
+  Future<void> _connectWebSocketForStreaming() async {
+    if (_warmWs != null && _warmWs!.readyState == html.WebSocket.OPEN) {
+      _ws = _warmWs;
+      _warmWs = null;
+      _warmupTimer?.cancel();
+      return;
+    }
+
+    _warmWs?.close();
+    _warmWs = null;
+    _ws = _createWebSocket();
+    _ws!.binaryType = 'arraybuffer';
+    await _ws!.onOpen.first.timeout(const Duration(seconds: 5));
+  }
+
+  void _ensureCapsWriterMicBridge() {
+    if (js.context.hasProperty('roundTableCapsWriterMic')) return;
+
+    js.context.callMethod('eval', [
+      r'''
+(function () {
+  if (window.roundTableCapsWriterMic) return;
+  window.roundTableCapsWriterMic = {
+    nextId: 1,
+    sessions: {},
+    start: function (onStarted, onAudio, onError, sampleRate) {
+      var id = this.nextId++;
+      var self = this;
+      var report = function (error) {
+        var message = '';
+        try {
+          if (error && error.name) {
+            message = error.name + (error.message ? ': ' + error.message : '');
+          } else if (error && error.message) {
+            message = error.message;
+          } else {
+            message = String(error || 'unknown error');
+          }
+        } catch (_) {
+          message = 'unknown error';
+        }
+        try { onError(message); } catch (_) {}
+      };
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        report('getUserMedia unavailable');
+        return id;
+      }
+
+      var constraints = {
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      };
+      if (sampleRate) constraints.audio.sampleRate = sampleRate;
+
+      navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+        try {
+          var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextClass) throw new Error('AudioContext unavailable');
+
+          var audioContext;
+          try {
+            audioContext = new AudioContextClass(sampleRate ? { sampleRate: sampleRate } : undefined);
+          } catch (_) {
+            audioContext = new AudioContextClass();
+          }
+
+          var source = audioContext.createMediaStreamSource(stream);
+          var processor = audioContext.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = function (event) {
+            try {
+              var channelData = event.inputBuffer.getChannelData(0);
+              if (channelData && channelData.length) onAudio(channelData);
+            } catch (error) {
+              report(error);
+            }
+          };
+
+          source.connect(processor);
+          processor.connect(audioContext.destination);
+          self.sessions[id] = {
+            stream: stream,
+            audioContext: audioContext,
+            source: source,
+            processor: processor
+          };
+
+          if (audioContext.state === 'suspended' && audioContext.resume) {
+            audioContext.resume().catch(function () {});
+          }
+          onStarted(id);
+        } catch (error) {
+          try { stream.getTracks().forEach(function (track) { track.stop(); }); } catch (_) {}
+          report(error);
+        }
+      }).catch(report);
+
+      return id;
+    },
+    stop: function (id) {
+      var session = this.sessions[id];
+      if (!session) return;
+      delete this.sessions[id];
+      try {
+        if (session.processor) {
+          session.processor.onaudioprocess = null;
+          session.processor.disconnect();
+        }
+      } catch (_) {}
+      try { if (session.source) session.source.disconnect(); } catch (_) {}
+      try { if (session.audioContext) session.audioContext.close(); } catch (_) {}
+      try {
+        if (session.stream) {
+          session.stream.getTracks().forEach(function (track) { track.stop(); });
+        }
+      } catch (_) {}
+    }
+  };
+}());
+'''
+    ]);
+  }
+
+  Future<void> _startCapsWriterMicBridge() async {
+    _ensureCapsWriterMicBridge();
+    final bridge = js.context['roundTableCapsWriterMic'] as js.JsObject;
+    final started = Completer<void>();
+
+    _capsWriterMicStartedCallback =
+        js.JsFunction.withThis((thisArg, dynamic sessionId) {
+      if (sessionId is num) {
+        _capsWriterMicSessionId = sessionId.toInt();
+      }
+      if (!started.isCompleted) started.complete();
+    });
+
+    _capsWriterMicAudioCallback =
+        js.JsFunction.withThis((thisArg, dynamic channelData) {
+      try {
+        if (channelData is js.JsObject) {
+          final length = (channelData['length'] as num).toInt();
+          if (length > 0) _sendCapsWriterAudioChunk(channelData, length);
+        } else if (channelData is Float32List) {
+          _sendCapsWriterAudioList(channelData);
+        }
+      } catch (error) {
+        if (!_controller.isClosed) {
+          _controller.addError('CapsWriter 音频块处理失败: $error');
+        }
+      }
+    });
+
+    _capsWriterMicErrorCallback =
+        js.JsFunction.withThis((thisArg, dynamic error) {
+      final message = '麦克风流初始化失败: ${error?.toString() ?? 'unknown error'}';
+      if (!started.isCompleted) {
+        started.completeError(StateError(message));
+      } else if (!_controller.isClosed) {
+        _controller.addError(message);
+      }
+    });
+
+    bridge.callMethod('start', [
+      _capsWriterMicStartedCallback,
+      _capsWriterMicAudioCallback,
+      _capsWriterMicErrorCallback,
+      16000,
+    ]);
+
+    await started.future.timeout(const Duration(seconds: 8));
+  }
+
+  void _stopCapsWriterMicBridge() {
+    final sessionId = _capsWriterMicSessionId;
+    if (sessionId != null &&
+        js.context.hasProperty('roundTableCapsWriterMic')) {
+      try {
+        (js.context['roundTableCapsWriterMic'] as js.JsObject)
+            .callMethod('stop', [sessionId]);
+      } catch (_) {}
+    }
+    _capsWriterMicSessionId = null;
+    _capsWriterMicStartedCallback = null;
+    _capsWriterMicAudioCallback = null;
+    _capsWriterMicErrorCallback = null;
+  }
+
   String _describeStartError(Object error) {
     if (error is TimeoutException) {
       return '${service.toUpperCase()} 连接超时，请确认本地服务地址可达';
     }
 
     final raw = error.toString();
+    if (raw.contains('createMediaStreamSource') &&
+        raw.contains('MediaStream')) {
+      return '麦克风流初始化失败，请刷新页面并重新授权麦克风后重试';
+    }
     if (raw.contains('NotAllowedError')) {
       return '麦克风权限被拒绝，请允许浏览器访问麦克风';
     }
@@ -98,6 +296,7 @@ class GatewayStreamingAsrService implements AsrService {
   }
 
   void _cleanupAfterStartFailure() {
+    _stopCapsWriterMicBridge();
     try {
       _processorNode?.callMethod('disconnect');
     } catch (_) {}
@@ -186,36 +385,32 @@ class GatewayStreamingAsrService implements AsrService {
       _stopCompleter = Completer<void>();
       _finalResultCompleter = Completer<void>();
 
-      // 1. 获取麦克风
-      final mediaDevices = html.window.navigator.mediaDevices;
-      if (mediaDevices == null) {
-        throw StateError('当前浏览器不支持麦克风采集');
-      }
-      _mediaStream = await mediaDevices.getUserMedia({
-        'audio': {
-          'sampleRate': 16000,
-          'channelCount': 1,
-          'echoCancellation': true,
-          'noiseSuppression': true,
-        }
-      });
-
-      // 2. 连接 WebSocket（复用预热连接或新建）
-      if (_warmWs != null && _warmWs!.readyState == html.WebSocket.OPEN) {
-        _ws = _warmWs;
-        _warmWs = null;
-        _warmupTimer?.cancel();
+      if (capsWriterJsonProtocol) {
+        await _connectWebSocketForStreaming();
+        await _startCapsWriterMicBridge();
       } else {
-        _warmWs?.close();
-        _warmWs = null;
-        _ws = _createWebSocket();
-        _ws!.binaryType = 'arraybuffer';
-        // 等待连接打开
-        await _ws!.onOpen.first.timeout(const Duration(seconds: 5));
-      }
+        // 1. 获取麦克风
+        final mediaDevices = html.window.navigator.mediaDevices;
+        if (mediaDevices == null) {
+          throw StateError('当前浏览器不支持麦克风采集');
+        }
+        _mediaStream = await mediaDevices.getUserMedia({
+          'audio': {
+            'sampleRate': 16000,
+            'channelCount': 1,
+            'echoCancellation': true,
+            'noiseSuppression': true,
+          }
+        });
+        if (_mediaStream == null || _mediaStream!.getAudioTracks().isEmpty) {
+          throw StateError('未获取到有效的麦克风音轨');
+        }
 
-      // 3. 设置 AudioContext + ScriptProcessor 来获取 PCM 数据
-      _setupAudioPipeline();
+        await _connectWebSocketForStreaming();
+
+        // 3. 设置 AudioContext + ScriptProcessor 来获取 PCM 数据
+        _setupAudioPipeline();
+      }
 
       // 4. 监听 WebSocket 消息
       _ws!.onMessage.listen((event) {
@@ -300,6 +495,15 @@ class GatewayStreamingAsrService implements AsrService {
     return base64Encode(byteData.buffer.asUint8List());
   }
 
+  String _encodeFloat32ListBase64(Float32List channelData) {
+    final byteData = ByteData(channelData.length * 4);
+    for (var i = 0; i < channelData.length; i++) {
+      final sample = channelData[i].clamp(-1.0, 1.0).toDouble();
+      byteData.setFloat32(i * 4, sample, Endian.little);
+    }
+    return base64Encode(byteData.buffer.asUint8List());
+  }
+
   String _newCapsWriterTaskId() =>
       'roundtable-${DateTime.now().microsecondsSinceEpoch}';
 
@@ -323,23 +527,77 @@ class GatewayStreamingAsrService implements AsrService {
     }));
   }
 
+  void _sendCapsWriterAudioList(Float32List channelData) {
+    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
+    if (channelData.isEmpty) return;
+    _capsWriterTaskId ??= _newCapsWriterTaskId();
+    if (_capsWriterStartSeconds <= 0) {
+      _capsWriterStartSeconds = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    }
+
+    _ws!.sendString(jsonEncode({
+      'task_id': _capsWriterTaskId,
+      'seg_duration': 60,
+      'seg_overlap': 4,
+      'is_final': false,
+      'time_start': _capsWriterStartSeconds,
+      'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
+      'source': 'mic',
+      'data': _encodeFloat32ListBase64(channelData),
+      'context': '',
+    }));
+  }
+
   /// 构建 Web Audio 管道：Mic → AudioContext → ScriptProcessor → WebSocket
   void _setupAudioPipeline() {
+    final mediaStream = _mediaStream;
+    if (mediaStream == null) {
+      throw StateError('麦克风流初始化失败');
+    }
+
     final ctx = js.context;
 
     // 创建 AudioContext (16kHz)
     final audioContextClass = ctx.hasProperty('AudioContext')
         ? ctx['AudioContext']
         : ctx['webkitAudioContext'];
-    _audioContext = js.JsObject(audioContextClass as js.JsFunction, [
-      js.JsObject.jsify({'sampleRate': 16000})
-    ]);
+    try {
+      _audioContext = js.JsObject(audioContextClass as js.JsFunction, [
+        js.JsObject.jsify({'sampleRate': 16000})
+      ]);
+    } catch (_) {
+      _audioContext = js.JsObject(audioContextClass as js.JsFunction);
+    }
 
     // 创建 MediaStreamSource
-    _sourceNode = _audioContext!.callMethod(
-      'createMediaStreamSource',
-      [js.JsObject.fromBrowserObject(_mediaStream!)],
-    );
+    try {
+      _sourceNode = _audioContext!.callMethod(
+        'createMediaStreamSource',
+        [mediaStream],
+      );
+    } catch (firstError) {
+      try {
+        _sourceNode = _audioContext!.callMethod(
+          'createMediaStreamSource',
+          [js.JsObject.fromBrowserObject(mediaStream)],
+        );
+      } catch (secondError) {
+        try {
+          final createMethod = _audioContext!['createMediaStreamSource'];
+          if (createMethod is! js.JsFunction) {
+            throw StateError('createMediaStreamSource is not callable');
+          }
+          _sourceNode = createMethod.apply(
+            [mediaStream],
+            thisArg: _audioContext,
+          ) as js.JsObject;
+        } catch (_) {
+          throw StateError(
+            'createMediaStreamSource failed: $firstError / $secondError',
+          );
+        }
+      }
+    }
 
     // 创建 ScriptProcessor (bufferSize=4096, inputChannels=1, outputChannels=1)
     _processorNode = _audioContext!.callMethod(
@@ -386,6 +644,7 @@ class GatewayStreamingAsrService implements AsrService {
 
     try {
       // 断开音频管道
+      _stopCapsWriterMicBridge();
       _processorNode?.callMethod('disconnect');
       _sourceNode?.callMethod('disconnect');
       _audioContext?.callMethod('close');

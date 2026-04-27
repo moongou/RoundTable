@@ -34,30 +34,37 @@ AsrService createWebAsrService(
   String? providerUrl,
   bool preferServerProxy = false,
 }) {
-  if (preferServerProxy &&
-      providerId != 'browser' &&
-      providerId != 'disabled') {
-    return ServerAsrService(serverUrl: serverUrl, providerId: providerId);
-  }
+  final normalizedProvider = providerId.trim().toLowerCase();
+  const localStreamingProviders = <String>{'capswriter', 'vosk', 'funasr'};
 
-  if (providerId == 'capswriter' || providerId == 'vosk') {
-    final resolvedUrl = providerUrl?.trim().isNotEmpty == true
-        ? providerUrl!.trim()
-        : (providerId == 'capswriter'
-            ? 'ws://localhost:6016'
-            : 'http://localhost:6702');
-    return GatewayStreamingAsrService(
-      service: providerId,
-      gatewayUrl: resolvedUrl,
-      wsPath: providerId == 'capswriter' ? '/ws' : '/stream',
-      wsProtocols: providerId == 'capswriter'
-          ? const <String>['binary']
-          : const <String>[],
-      capsWriterJsonProtocol: providerId == 'capswriter',
+  if (preferServerProxy &&
+      !localStreamingProviders.contains(normalizedProvider) &&
+      normalizedProvider != 'browser' &&
+      normalizedProvider != 'disabled') {
+    return ServerAsrService(
+      serverUrl: serverUrl,
+      providerId: normalizedProvider,
     );
   }
 
-  if (providerId == 'funasr') {
+  if (normalizedProvider == 'capswriter' || normalizedProvider == 'vosk') {
+    final resolvedUrl = providerUrl?.trim().isNotEmpty == true
+        ? providerUrl!.trim()
+        : (normalizedProvider == 'capswriter'
+            ? 'ws://localhost:6016'
+            : 'http://localhost:6702');
+    return GatewayStreamingAsrService(
+      service: normalizedProvider,
+      gatewayUrl: resolvedUrl,
+      wsPath: normalizedProvider == 'capswriter' ? '/ws' : '/stream',
+      wsProtocols: normalizedProvider == 'capswriter'
+          ? const <String>['binary']
+          : const <String>[],
+      capsWriterJsonProtocol: normalizedProvider == 'capswriter',
+    );
+  }
+
+  if (normalizedProvider == 'funasr') {
     return FunasrStreamingAsrService(
       wsUrl: providerUrl?.trim().isNotEmpty == true
           ? providerUrl!.trim()
@@ -65,32 +72,16 @@ AsrService createWebAsrService(
     );
   }
 
-  switch (providerId) {
+  switch (normalizedProvider) {
     case 'browser':
       return BrowserAsrService();
-    case 'vosk':
-      return GatewayStreamingAsrService(
-        service: providerId,
-        gatewayUrl: providerUrl?.trim().isNotEmpty == true
-            ? providerUrl!.trim()
-            : 'http://localhost:6702',
-        wsPath: '/stream',
-        wsProtocols: const <String>[],
-      );
-    case 'capswriter':
-      return GatewayStreamingAsrService(
-        service: providerId,
-        gatewayUrl: providerUrl?.trim().isNotEmpty == true
-            ? providerUrl!.trim()
-            : 'ws://localhost:6016',
-        wsPath: '/ws',
-        wsProtocols: const <String>['binary'],
-        capsWriterJsonProtocol: true,
-      );
     case 'openai_whisper':
     case 'siliconflow_asr':
     case 'groq_whisper':
-      return ServerAsrService(serverUrl: serverUrl, providerId: providerId);
+      return ServerAsrService(
+        serverUrl: serverUrl,
+        providerId: normalizedProvider,
+      );
     default:
       return BrowserAsrService();
   }

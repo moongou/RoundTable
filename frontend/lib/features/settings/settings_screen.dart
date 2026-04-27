@@ -1883,8 +1883,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           final m = r as Map<String, dynamic>;
           final name =
               m['service'] ?? m['provider_name'] ?? m['provider'] ?? '-';
-          final status = m['status'] ?? 'unknown';
+          final status = (m['status'] ?? 'unknown').toString();
           final isOk = status == 'ok';
+          final isSkipped = status == 'skipped';
           String detail = '';
           if (m.containsKey('short_text')) {
             detail =
@@ -1897,18 +1898,33 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           } else if (m.containsKey('error')) {
             detail = m['error'] as String;
           }
+          if (detail.isEmpty && isSkipped) {
+            final reason = (m['reason'] ?? '').toString().trim();
+            detail = reason.isEmpty ? '该项被跳过' : '已跳过: $reason';
+          }
           final note = (m['note'] ?? '').toString().trim();
           if (note.isNotEmpty) {
             detail = detail.isEmpty ? note : '$detail  ｜  $note';
           }
+
+          final iconData = isOk
+              ? Icons.check_circle
+              : (isSkipped ? Icons.remove_circle_outline : Icons.cancel);
+          final iconColor = isOk
+              ? Colors.green
+              : (isSkipped ? AppColors.warmGray : Colors.red);
+          final detailColor = isOk
+              ? AppColors.warmGray
+              : (isSkipped ? Colors.orangeAccent : Colors.redAccent);
+
           return Padding(
             padding: const EdgeInsets.only(bottom: 4),
             child: Row(
               children: [
                 Icon(
-                  isOk ? Icons.check_circle : Icons.cancel,
+                  iconData,
                   size: 14,
-                  color: isOk ? Colors.green : Colors.red,
+                  color: iconColor,
                 ),
                 const SizedBox(width: 6),
                 Text(name,
@@ -1919,9 +1935,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(detail,
-                      style: TextStyle(
-                          color: isOk ? AppColors.warmGray : Colors.redAccent,
-                          fontSize: 11)),
+                      style: TextStyle(color: detailColor, fontSize: 11)),
                 ),
               ],
             ),
@@ -2110,20 +2124,93 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     required bool isAsr,
   }) {
     final manualUrl = _voiceUrlCtrl[providerId]?.text.trim() ?? '';
-    if (manualUrl.isNotEmpty) return manualUrl;
+    if (manualUrl.isNotEmpty) {
+      return _normalizeSpeechProviderUrl(
+        providerId,
+        manualUrl,
+        isAsr: isAsr,
+      );
+    }
     final providers = isAsr
         ? (speechConfig?.asrProviders ?? const <SpeechProviderInfo>[])
         : (speechConfig?.ttsProviders ?? const <SpeechProviderInfo>[]);
     for (final provider in providers) {
       if (provider.id == providerId) {
-        if (provider.url.trim().isNotEmpty) return provider.url.trim();
+        if (provider.url.trim().isNotEmpty) {
+          return _normalizeSpeechProviderUrl(
+            providerId,
+            provider.url.trim(),
+            isAsr: isAsr,
+          );
+        }
         if (provider.defaultUrl.trim().isNotEmpty) {
-          return provider.defaultUrl.trim();
+          return _normalizeSpeechProviderUrl(
+            providerId,
+            provider.defaultUrl.trim(),
+            isAsr: isAsr,
+          );
         }
       }
     }
+    return _fallbackSpeechProviderUrl(providerId, isAsr: isAsr);
+  }
+
+  String _normalizeSpeechProviderUrl(
+    String providerId,
+    String url, {
+    required bool isAsr,
+  }) {
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) {
+      return _fallbackSpeechProviderUrl(providerId, isAsr: isAsr);
+    }
+
+    // 兼容旧配置：若仍指向 6666 聚合网关，自动切到独立端口。
+    if (trimmed.contains(':6666')) {
+      final fallback = _fallbackSpeechProviderUrl(providerId, isAsr: isAsr);
+      if (fallback.isNotEmpty) {
+        return fallback;
+      }
+    }
+
+    return trimmed;
+  }
+
+  String _fallbackSpeechProviderUrl(String providerId, {required bool isAsr}) {
+    if (isAsr) {
+      switch (providerId) {
+        case 'capswriter':
+          return 'ws://localhost:6016';
+        case 'vosk':
+          return 'http://localhost:6702';
+        case 'funasr':
+          return 'ws://localhost:10095';
+      }
+      return '';
+    }
+
+    switch (providerId) {
+      case 'chattts':
+        return 'http://localhost:9998';
+      case 'edge_tts':
+        return 'http://localhost:5051';
+      case 'cosyvoice':
+        return 'http://localhost:50000';
+      case 'vibevoice':
+        return 'http://localhost:6704';
+      case 'fireredtts':
+        return 'http://localhost:6706';
+      case 'openvoice':
+        return 'http://localhost:6707';
+    }
     return '';
   }
+
+  bool _isCloudAsrProvider(String providerId) => const <String>{
+        'openai_whisper',
+        'siliconflow_asr',
+        'groq_whisper',
+      }.contains(providerId);
 
   List<String> _serviceTestProviderIds({
     required String type,
@@ -2385,19 +2472,19 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           (item) => item?.id == providerId,
           orElse: () => null,
         );
-    if (candidate != null && !candidate.available && providerId != 'browser') {
+    if (candidate != null &&
+        !candidate.available &&
+        providerId != 'browser' &&
+        _isCloudAsrProvider(providerId)) {
       _snackErr('$providerId 当前不可用，请先检查服务状态。');
       return;
     }
 
     final providerUrl =
         _resolveSpeechProviderUrl(speechConfig, providerId, isAsr: true);
-    final preferServerProxy = !settings.asrStreamingEnabled ||
-        const <String>{
-          'openai_whisper',
-          'siliconflow_asr',
-          'groq_whisper',
-        }.contains(providerId);
+    // 设置页“实机录音测试”对本地 ASR 强制走直连流式链路，避免回退到
+    // 后端上传转写（依赖 ffmpeg）导致“录音测试启动即失败”。
+    final preferServerProxy = _isCloudAsrProvider(providerId);
     final asr = createAsrService(
       providerId,
       serverUrl: serverUrl,
@@ -2497,8 +2584,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             );
         ref.invalidate(currentConfigProvider);
       } catch (e) {
-        _snackErr('同步 TTS 配置失败: $e');
-        return;
+        _snackErr('同步 TTS 配置失败，改为仅本地试听: $e');
       }
     }
 

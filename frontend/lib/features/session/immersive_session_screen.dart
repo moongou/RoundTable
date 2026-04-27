@@ -172,10 +172,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool handApprovedToSpeak,
     required bool hasRaisedHand,
   }) {
-    return hasRaisedHand ||
-        isMyTurn ||
-        pendingHumanTurn ||
-        handApprovedToSpeak;
+    return hasRaisedHand || isMyTurn || pendingHumanTurn || handApprovedToSpeak;
   }
 
   static bool shouldResetCompletedHumanTurnOnIncomingSpeech({
@@ -3028,8 +3025,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   : shouldGenerateHumanReview
                       ? '讨论已结束，李老师正在给你写会后点评'
                       : shouldGenerateGoldenQuotes
-                  ? '讨论已结束，AI 正在整理金句，完成后可从右上角手动打开'
-                  : '讨论已结束';
+                          ? '讨论已结束，AI 正在整理金句，完成后可从右上角手动打开'
+                          : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
           _goldenQuotes.clear();
@@ -6040,8 +6037,8 @@ class _RightActionColumn extends StatelessWidget {
     final hasObserverSeat = observerSeat != null;
     final spacing = hasObserverSeat ? 10.0 : 12.0;
     final observerHeight = hasObserverSeat ? 92.0 : 0.0;
-    final btnHeight = ((totalHeight - observerHeight - spacing * 3) / 3)
-        .clamp(48.0, 120.0);
+    final btnHeight =
+        ((totalHeight - observerHeight - spacing * 3) / 3).clamp(48.0, 120.0);
     return SizedBox(
       height: totalHeight,
       child: Column(
@@ -6774,9 +6771,7 @@ class _PostDiscussionReviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displayText = isLoading
-        ? '李老师正在回看你刚才的发言，准备留下一段更具体的会后点评……'
-        : review;
+    final displayText = isLoading ? '李老师正在回看你刚才的发言，准备留下一段更具体的会后点评……' : review;
 
     return Container(
       decoration: BoxDecoration(
@@ -6847,10 +6842,9 @@ class _PostDiscussionReviewCard extends StatelessWidget {
                         color: Colors.white.withValues(alpha: 0.06),
                         borderRadius: BorderRadius.circular(999),
                         border: Border.all(
-                          color: (isMuted
-                                  ? Colors.white
-                                  : const Color(0xFFF4D38B))
-                              .withValues(alpha: 0.28),
+                          color:
+                              (isMuted ? Colors.white : const Color(0xFFF4D38B))
+                                  .withValues(alpha: 0.28),
                         ),
                       ),
                       child: Row(

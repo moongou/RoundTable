@@ -559,7 +559,10 @@ async def test_voice_service(service_id: str, service_type: str, text: str = _TE
     if service_type == "tts":
         try:
             from app.voice.factory import create_tts_provider_with_url
-            svc_url = LOCAL_SERVICE_DEFAULTS.get(service_id, {}).get("url", "")
+
+            svc_url = settings.get_voice_service_url(service_id) or LOCAL_SERVICE_DEFAULTS.get(
+                service_id, {}
+            ).get("url", "")
             provider = create_tts_provider_with_url(service_id, base_url=svc_url)
             t0 = time.perf_counter()
             audio = await provider.synthesize(text)
@@ -655,7 +658,9 @@ async def deep_test_voice_service(service_id: str, service_type: str):
         try:
             from app.voice.factory import create_tts_provider_with_url
 
-            svc_url = LOCAL_SERVICE_DEFAULTS.get(service_id, {}).get("url", "")
+            svc_url = settings.get_voice_service_url(service_id) or LOCAL_SERVICE_DEFAULTS.get(
+                service_id, {}
+            ).get("url", "")
             provider = create_tts_provider_with_url(service_id, base_url=svc_url)
             t0 = time.perf_counter()
             audio = await provider.synthesize(sample_text)

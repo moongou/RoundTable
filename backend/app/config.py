@@ -141,7 +141,6 @@ LOCAL_SERVICE_DEFAULTS = {
     "vibevoice": {"url": "http://localhost:6704", "health": "/health"},
     "fireredtts": {"url": "http://localhost:6706", "health": "/health"},
     "openvoice": {"url": "http://localhost:6707", "health": "/health"},
-    "gateway": {"url": "http://localhost:6666", "health": "/health"},
 }
 
 # 语音服务提供商详细元数据
