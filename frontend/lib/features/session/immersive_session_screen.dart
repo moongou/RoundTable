@@ -84,6 +84,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     '小爱': 'zh-CN-XiaoyouNeural',
     '小想': 'zh-CN-XiaoxuanNeural',
     '小行': 'zh-CN-YunfengNeural',
+    '可乐': 'zh-CN-YunxiNeural',
   };
   static const Map<String, String> _openVoiceStudentProfiles = <String, String>{
     '小探': 'ov:student_xiaotan',
@@ -96,6 +97,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     '小爱': 'ov:student_xiaoai',
     '小想': 'ov:student_xiaoxiang',
     '小行': 'ov:student_xiaoxing',
+    '可乐': 'ov:student_xiaotan',
   };
 
   static bool shouldDeferVoiceServiceRebind({
@@ -1177,17 +1179,46 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _startDiscussion();
   }
 
-  // PTT 触发逻辑：会话页统一为按住 Ctrl 开始，松开结束。
+  // PTT 触发逻辑：根据用户设置的麦克风热键开始/结束发言。
+  // 默认：macOS = Right Option (altRight)，其他 = F12。
+  Set<LogicalKeyboardKey> _resolveHotkeyKeys() {
+    final settings = ref.read(localSettingsProvider).valueOrNull;
+    final id = settings?.micHotkey ?? 'right_alt';
+    switch (id) {
+      case 'left_alt':
+        return {LogicalKeyboardKey.altLeft};
+      case 'right_alt':
+        // 浏览器在 mac 上常把 Right Option 上报为 altRight，
+        // 但部分情况下会回退到 altLeft；为兼容性二者都接受。
+        return {LogicalKeyboardKey.altRight, LogicalKeyboardKey.altLeft};
+      case 'any_alt':
+        return {LogicalKeyboardKey.altLeft, LogicalKeyboardKey.altRight};
+      case 'f12':
+        return {LogicalKeyboardKey.f12};
+      case 'left_ctrl':
+        return {LogicalKeyboardKey.controlLeft};
+      case 'right_ctrl':
+        return {LogicalKeyboardKey.controlRight};
+      case 'space':
+        return {LogicalKeyboardKey.space};
+      default:
+        return {LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.controlRight};
+    }
+  }
+
   bool _isAnyCtrlPressed() {
     final pressed = HardwareKeyboard.instance.logicalKeysPressed;
-    return pressed.contains(LogicalKeyboardKey.controlLeft) ||
-        pressed.contains(LogicalKeyboardKey.controlRight);
+    final hotkeys = _resolveHotkeyKeys();
+    for (final k in hotkeys) {
+      if (pressed.contains(k)) return true;
+    }
+    return false;
   }
 
   bool _onHardwareKey(KeyEvent event) {
     if (!_isPushToTalk || _isPaused) return false;
-    final isCtrl = event.logicalKey == LogicalKeyboardKey.controlLeft ||
-        event.logicalKey == LogicalKeyboardKey.controlRight;
+    final hotkeys = _resolveHotkeyKeys();
+    final isCtrl = hotkeys.contains(event.logicalKey);
     if (!isCtrl) return false;
 
     if (event is KeyUpEvent) {
@@ -1207,6 +1238,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _ctrlHeld = true;
 
     if (_micControlMode == 'hold_ctrl') {
+      // Item 3：当录音并非由「按住热键」启动（例如自动开麦），
+      // 单击热键也应能立即结束发言。
+      if (_isRecording && !_recordingControlledByHoldCtrl) {
+        _onPttEnd(reason: 'hotkey_tap_end');
+        return true;
+      }
       if ((_isMyTurn || _handApprovedToSpeak) && !_isRecording) {
         _onPttStart(startedFromHoldCtrl: true);
         return true;
@@ -2392,6 +2429,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     'empath': '小爱',
     'innovator': '小想',
     'pragmatist': '小行',
+    'comedian': '可乐',
   };
 
   /// 连接成功后立即预填参与者，确保老师和所有角色出现在圆桌上
@@ -2476,6 +2514,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       '小想': '💡',
       'pragmatist': '🔧',
       '小行': '🔧',
+      'comedian': '🥤',
+      '可乐': '🥤',
     };
 
     // Character-specific DiceBear styles for more personality (d)
@@ -2489,6 +2529,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       '小爱': 'lorelei',
       '小想': 'bottts',
       '小行': 'adventurer',
+      '可乐': 'fun-emoji',
     };
 
     /// DiceBear avatar URL for a given seed name
@@ -3073,12 +3114,26 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           unawaited(_generateGoldenQuotes());
         }
         if (shouldGenerateHumanReview) {
-          // 等老师播完“讨论结束”这句 TTS 后再弹出点评卡（强制 3s 延迟），
-          // 避免两路 TTS 同时朗读、字幕叠加。
+          // 等老师把"讨论结束语"完整播完后再弹出点评卡。
+          // 通过轮询 TTS 队列与 isSpeaking 来确保不会与老师的最后一句重叠。
           unawaited(() async {
-            await Future.delayed(const Duration(milliseconds: 3000));
+            // 给后端的最后一段 TTS 一点入队时间。
+            await Future.delayed(const Duration(milliseconds: 800));
+            final deadline =
+                DateTime.now().add(const Duration(seconds: 45));
+            while (mounted && DateTime.now().isBefore(deadline)) {
+              final stillTalking = _ttsPlaying ||
+                  _ttsService.isSpeaking ||
+                  _ttsQueue.isNotEmpty;
+              if (!stillTalking) break;
+              await Future.delayed(const Duration(milliseconds: 250));
+            }
             if (!mounted) return;
             if (_lastErrorMessage != null) return;
+            // 老师讲完后再清掉中间字幕，准备弹出全屏点评。
+            setState(() {
+              _centerMessage = '';
+            });
             await _generateHumanReview();
           }());
         }
@@ -4721,6 +4776,81 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     unawaited(_readAloudHumanReview(_humanReview));
   }
 
+  Future<void> _showGoldenQuotesDialog(BuildContext context) async {
+    if (_goldenQuotes.isEmpty) return;
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.72),
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: const Color(0xFF111A24),
+          insetPadding:
+              const EdgeInsets.symmetric(horizontal: 48, vertical: 56),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+            side: BorderSide(
+              color: const Color(0xFFF4D38B).withValues(alpha: 0.32),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(28, 24, 28, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.format_quote_rounded,
+                        color: Color(0xFFF4D38B), size: 22),
+                    const SizedBox(width: 8),
+                    Text(
+                      '今日金句',
+                      style: GoogleFonts.notoSerifSc(
+                        color: const Color(0xFFFFE8B5),
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.close_rounded,
+                          color: Colors.white70, size: 22),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final quote in _goldenQuotes)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 14),
+                            child: Text(
+                              '“$quote”',
+                              style: GoogleFonts.notoSerifSc(
+                                color:
+                                    Colors.white.withValues(alpha: 0.92),
+                                fontSize: 16,
+                                height: 1.7,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _openEndingQuotesScreen() {
     if (_showEndingQuotesScreen && _mountEndingQuotesOverlay) {
       return;
@@ -4868,14 +4998,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final tableCenterY = size.height / 2;
     // 左侧金句区宽度（从屏幕最左到圆桌左边缘减一点间距）
     final quoteAreaRight = tableCenterX - tableRadius - 60;
+    // ignore: unused_local_variable
     final quoteAreaWidth = max(0.0, quoteAreaRight - 24);
     // 需求：老师点评卡比金句侧栏更窄，避免遮挡圆桌/角色图标。
     // 右边缘相对参与者圆环再退 40px，宽度上限 360。
     final reviewCardRightLimit = tableCenterX - (tableRadius + 80) - 40;
     final reviewCardWidth =
         max(0.0, min(360.0, reviewCardRightLimit - 24)).toDouble();
-    // 卡片高度也压缩，整体不超过屏幕的 56%，底部留白避免压到底部按钮。
-    final reviewCardHeight = min(size.height * 0.56, 460.0);
+    // 旧版会后点评卡已替换为全屏 Overlay；保留宽度计算供其他兼容路径使用。
 
     _particles ??= CandleParticle.generate(
       areaWidth: size.width,
@@ -4970,36 +5100,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                     BookshelfPainter(lightIntensity: _isMyTurn ? 1.0 : 0.6),
               ),
 
-              // ── 需求15：左侧金句区（暗色虚线分隔）；讨论结束后切换为更紧凑的老师点评卡 ──
-              if (!_discussionEnded &&
-                  quoteAreaWidth > 80 &&
-                  _goldenQuotes.isNotEmpty)
-                Positioned(
-                  left: 24,
-                  top: 80,
-                  width: quoteAreaWidth,
-                  height: size.height - 160,
-                  child: _QuoteSidebar(
-                    width: quoteAreaWidth,
-                    quotes: _goldenQuotes,
-                  ),
-                ),
+              // ── 需求 8：金句不再常驻显示，改为讨论结束后通过老师点评弹窗的「查看金句」按钮查看。──
+              // 旧的 _QuoteSidebar 已被移除以保持讨论页画面整洁。
               if (_discussionEnded &&
                   reviewCardWidth > 200 &&
                   (_humanReview.isNotEmpty || _isGeneratingHumanReview))
-                Positioned(
-                  left: 24,
-                  // 垂直居中放置，避免顶到顶部话题区或底部按钮区
-                  top: max(80.0, (size.height - reviewCardHeight) / 2),
-                  width: reviewCardWidth,
-                  height: reviewCardHeight,
-                  child: _PostDiscussionReviewCard(
-                    review: _humanReview,
-                    isLoading: _isGeneratingHumanReview,
-                    isMuted: _humanReviewMuted,
-                    onToggleMute: _toggleHumanReviewMute,
-                  ),
-                ),
+                // 旧版左侧紧凑点评卡已被新的全屏点评浮层取代，
+                // 这里保留 sizing 计算以避免布局抖动，但不再渲染旧卡。
+                const SizedBox.shrink(),
 
               // ── 圆桌（左移至 1/3 处）──
               Positioned(
@@ -5564,6 +5672,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             final overlayT = Curves.easeOutCubic
                 .transform(_endingQuotesTransitionController.value);
             final baseContent = child ?? const SizedBox.shrink();
+            final showReviewOverlay = _discussionEnded &&
+                (_humanReview.isNotEmpty || _isGeneratingHumanReview) &&
+                !showEndingQuotesOverlay;
             return Stack(
               children: [
                 Transform.scale(
@@ -5576,6 +5687,19 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 ),
                 if (showEndingQuotesOverlay)
                   Positioned.fill(child: _buildEndingQuotesOverlay(size)),
+                if (showReviewOverlay)
+                  Positioned.fill(
+                    child: _PostDiscussionReviewOverlay(
+                      review: _humanReview,
+                      isLoading: _isGeneratingHumanReview,
+                      isMuted: _humanReviewMuted,
+                      onToggleMute: _toggleHumanReviewMute,
+                      hasGoldenQuotes: _goldenQuotes.isNotEmpty,
+                      onShowGoldenQuotes: _goldenQuotes.isEmpty
+                          ? null
+                          : () => _showGoldenQuotesDialog(context),
+                    ),
+                  ),
               ],
             );
           },
@@ -6567,479 +6691,210 @@ class _SpeakButtonState extends State<_SpeakButton>
   }
 }
 
-// ─── 需求15/需求六：左侧金句侧边栏（暗色虚线分隔）───────────────────────
-/// 金句列表以 1、2、3 的序号形式展示，字体较小，最新一条淡入（打字机感）。
-class _QuoteSidebar extends StatelessWidget {
-  final double width;
-  final List<String> quotes;
-  const _QuoteSidebar({required this.width, required this.quotes});
-
-  @override
-  Widget build(BuildContext context) {
-    final latestQuote = quotes.isEmpty ? '' : quotes.last;
-    final previousQuotes = quotes.length <= 1
-        ? const <String>[]
-        : quotes.reversed.skip(1).take(3).toList(growable: false);
-
-    return CustomPaint(
-      painter: _DashedDividerPainter(),
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              const Color(0xFF0F1822).withValues(alpha: 0.86),
-              const Color(0xFF162435).withValues(alpha: 0.72),
-              const Color(0xFF1A1414).withValues(alpha: 0.38),
-            ],
-          ),
-          borderRadius: BorderRadius.circular(28),
-          border: Border.all(
-            color: const Color(0xFFF1D59B).withValues(alpha: 0.12),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.22),
-              blurRadius: 30,
-              offset: const Offset(0, 14),
-            ),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 18, 132, 22),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(
-                        colors: [
-                          const Color(0xFFF4D38B).withValues(alpha: 0.85),
-                          const Color(0xFFF4D38B).withValues(alpha: 0.08),
-                        ],
-                      ),
-                    ),
-                    child: const Icon(
-                      Icons.auto_stories_outlined,
-                      color: Color(0xFFFFE6B0),
-                      size: 16,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '夜读摘录',
-                          style: AppTheme.calligraphyStyleDark(
-                            fontSize: 18,
-                            color: const Color(0xFFFFE8B5),
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '把会让人停一下的话，先留在页边。',
-                          style: GoogleFonts.notoSerifSc(
-                            color: Colors.white.withValues(alpha: 0.68),
-                            fontSize: 10.5,
-                            height: 1.65,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              Expanded(
-                child: quotes.isEmpty
-                    ? Center(
-                        child: Text(
-                          '讨论里的灵光一闪\n会在这里慢慢成形',
-                          textAlign: TextAlign.center,
-                          style: GoogleFonts.notoSerifSc(
-                            color: Colors.white.withValues(alpha: 0.24),
-                            fontSize: 12,
-                            height: 1.9,
-                          ),
-                        ),
-                      )
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.fromLTRB(16, 16, 18, 18),
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(22),
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  const Color(0xFFF1D59B)
-                                      .withValues(alpha: 0.16),
-                                  const Color(0xFF203245)
-                                      .withValues(alpha: 0.64),
-                                  const Color(0xFF141C25)
-                                      .withValues(alpha: 0.86),
-                                ],
-                              ),
-                              border: Border.all(
-                                color: const Color(0xFFF1D59B)
-                                    .withValues(alpha: 0.18),
-                              ),
-                            ),
-                            child: TweenAnimationBuilder<double>(
-                              key: ValueKey('quote-${quotes.length}'),
-                              duration: const Duration(milliseconds: 500),
-                              curve: Curves.easeOutCubic,
-                              tween: Tween(begin: 0.0, end: 1.0),
-                              builder: (_, t, child) => Opacity(
-                                opacity: t,
-                                child: Transform.translate(
-                                  offset: Offset(0, (1 - t) * 8),
-                                  child: child,
-                                ),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '最新落笔',
-                                    style: TextStyle(
-                                      color: const Color(0xFFFFE8B5)
-                                          .withValues(alpha: 0.9),
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w700,
-                                      letterSpacing: 2.2,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Text(
-                                    '“',
-                                    style: TextStyle(
-                                      color: const Color(0xFFF4D38B)
-                                          .withValues(alpha: 0.8),
-                                      fontSize: 28,
-                                      fontWeight: FontWeight.w700,
-                                      height: 0.85,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    latestQuote,
-                                    style: GoogleFonts.notoSerifSc(
-                                      color: const Color(0xFFF9F5EE),
-                                      fontSize: 15,
-                                      height: 1.8,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          if (previousQuotes.isNotEmpty) ...[
-                            const SizedBox(height: 16),
-                            Text(
-                              '前页批注',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.52),
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 2.0,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            Expanded(
-                              child: ListView.separated(
-                                padding: EdgeInsets.zero,
-                                physics: const BouncingScrollPhysics(),
-                                itemCount: previousQuotes.length,
-                                separatorBuilder: (_, __) =>
-                                    const SizedBox(height: 10),
-                                itemBuilder: (_, i) {
-                                  final quote = previousQuotes[i];
-                                  return Container(
-                                    padding: const EdgeInsets.fromLTRB(
-                                        12, 12, 14, 12),
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(16),
-                                      color:
-                                          Colors.white.withValues(alpha: 0.045),
-                                      border: Border.all(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.06),
-                                      ),
-                                    ),
-                                    child: Row(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Padding(
-                                          padding:
-                                              const EdgeInsets.only(top: 1),
-                                          child: Text(
-                                            '${quotes.length - i - 1}',
-                                            style: TextStyle(
-                                              color: const Color(0xFFF4D38B)
-                                                  .withValues(alpha: 0.54),
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Expanded(
-                                          child: Text(
-                                            quote,
-                                            style: GoogleFonts.notoSerifSc(
-                                              color: Colors.white
-                                                  .withValues(alpha: 0.7),
-                                              fontSize: 11,
-                                              height: 1.75,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _PostDiscussionReviewCard extends StatelessWidget {
+class _PostDiscussionReviewOverlay extends StatelessWidget {
   final String review;
   final bool isLoading;
   final bool isMuted;
   final VoidCallback onToggleMute;
+  final bool hasGoldenQuotes;
+  final VoidCallback? onShowGoldenQuotes;
 
-  const _PostDiscussionReviewCard({
+  const _PostDiscussionReviewOverlay({
     required this.review,
     required this.isLoading,
     required this.isMuted,
     required this.onToggleMute,
+    required this.hasGoldenQuotes,
+    required this.onShowGoldenQuotes,
   });
 
   @override
   Widget build(BuildContext context) {
-    final displayText = isLoading ? '李老师正在回看你刚才的发言，准备留下一段更具体的会后点评……' : review;
+    final size = MediaQuery.of(context).size;
+    final dialogWidth = (size.width * 0.7).clamp(420.0, 980.0);
+    final dialogHeight = (size.height * 0.7).clamp(360.0, 720.0);
+    final displayText = isLoading
+        ? '李老师正在回看你刚才的发言，准备留下一段更具体的会后点评……'
+        : review;
 
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(30),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            const Color(0xFFF5DFC0).withValues(alpha: 0.12),
-            const Color(0xFF1B2D40).withValues(alpha: 0.94),
-            const Color(0xFF13202B).withValues(alpha: 0.98),
-          ],
-        ),
-        border: Border.all(
-          color: const Color(0xFFF4D38B).withValues(alpha: 0.2),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.22),
-            blurRadius: 28,
-            offset: const Offset(0, 18),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned.fill(
+          child: ColoredBox(
+            color: Colors.black.withValues(alpha: 0.78),
           ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+        ),
+        Center(
+          child: Container(
+            width: dialogWidth,
+            height: dialogHeight,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(36),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  const Color(0xFF243349).withValues(alpha: 0.98),
+                  const Color(0xFF13202B).withValues(alpha: 0.98),
+                ],
+              ),
+              border: Border.all(
+                color: const Color(0xFFF4D38B).withValues(alpha: 0.45),
+                width: 1.4,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFFF4D38B).withValues(alpha: 0.18),
+                  blurRadius: 36,
+                  spreadRadius: 2,
+                ),
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  blurRadius: 60,
+                  offset: const Offset(0, 28),
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(40, 32, 40, 28),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     children: [
+                      const Icon(Icons.auto_awesome_rounded,
+                          color: Color(0xFFFFE8B5), size: 24),
+                      const SizedBox(width: 10),
                       Text(
-                        '老师评语',
-                        style: TextStyle(
-                          color: const Color(0xFFFFE8B5).withValues(alpha: 0.9),
-                          fontSize: 10.5,
+                        '老师点评',
+                        style: GoogleFonts.notoSerifSc(
+                          color: const Color(0xFFFFE8B5),
+                          fontSize: 28,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 2.0,
                         ),
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '讨论结束后，留给真人参与者的一段会后回声。',
-                        style: GoogleFonts.notoSerifSc(
-                          color: Colors.white.withValues(alpha: 0.56),
-                          fontSize: 9.5,
-                          height: 1.5,
+                      const Spacer(),
+                      InkWell(
+                        onTap: onToggleMute,
+                        borderRadius: BorderRadius.circular(999),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.06),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: const Color(0xFFF4D38B)
+                                  .withValues(alpha: 0.32),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                isMuted
+                                    ? Icons.volume_up_rounded
+                                    : Icons.volume_off_rounded,
+                                size: 16,
+                                color: const Color(0xFFF4D38B),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                isMuted ? '朗读' : '静音',
+                                style: const TextStyle(
+                                  color: Color(0xFFF4D38B),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ],
                   ),
-                ),
-                if (!isLoading && review.isNotEmpty)
-                  InkWell(
-                    onTap: onToggleMute,
-                    borderRadius: BorderRadius.circular(999),
+                  const SizedBox(height: 20),
+                  Expanded(
                     child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
-                      ),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.06),
-                        borderRadius: BorderRadius.circular(999),
+                        color: Colors.black.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(20),
                         border: Border.all(
-                          color:
-                              (isMuted ? Colors.white : const Color(0xFFF4D38B))
-                                  .withValues(alpha: 0.28),
+                          color: Colors.white.withValues(alpha: 0.08),
                         ),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            isMuted
-                                ? Icons.volume_up_rounded
-                                : Icons.volume_off_rounded,
-                            size: 14,
-                            color: isMuted
-                                ? Colors.white.withValues(alpha: 0.75)
-                                : const Color(0xFFF4D38B),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            isMuted ? '朗读' : '静音',
-                            style: TextStyle(
-                              color: isMuted
-                                  ? Colors.white.withValues(alpha: 0.75)
-                                  : const Color(0xFFF4D38B),
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w700,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 28, vertical: 24),
+                      child: SingleChildScrollView(
+                        child: Align(
+                          alignment: Alignment.topLeft,
+                          child: SizedBox(
+                            width: double.infinity,
+                            child: Text(
+                              displayText,
+                              style: GoogleFonts.notoSerifSc(
+                                color: Colors.white
+                                    .withValues(alpha: isLoading ? 0.7 : 0.94),
+                                fontSize: 20,
+                                height: 1.85,
+                              ),
                             ),
                           ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '“',
-                    style: TextStyle(
-                      color: const Color(0xFFF4D38B),
-                      fontSize: 38,
-                      fontWeight: FontWeight.w700,
-                      height: 0.8,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: SingleChildScrollView(
-                        child: Text(
-                          displayText,
-                          style: GoogleFonts.notoSerifSc(
-                            color: const Color(0xFFF9F6F0)
-                                .withValues(alpha: isLoading ? 0.72 : 1.0),
-                            fontSize: 17,
-                            height: 1.7,
-                            fontWeight: FontWeight.w500,
-                          ),
                         ),
                       ),
                     ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      if (onShowGoldenQuotes != null)
+                        FilledButton.icon(
+                          onPressed: onShowGoldenQuotes,
+                          icon: const Icon(Icons.format_quote_rounded,
+                              size: 18),
+                          label: const Text('查看金句'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFF4D38B),
+                            foregroundColor: const Color(0xFF1B2D40),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 22, vertical: 14),
+                            textStyle: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.0,
+                            ),
+                          ),
+                        )
+                      else
+                        Text(
+                          hasGoldenQuotes ? '' : '本次讨论暂未生成金句',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.5),
+                            fontSize: 13,
+                          ),
+                        ),
+                      const Spacer(),
+                      if (isLoading)
+                        const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Color(0xFFF4D38B),
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(
-                  child: Container(
-                    height: 1,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          const Color(0xFFF4D38B).withValues(alpha: 0.0),
-                          const Color(0xFFF4D38B).withValues(alpha: 0.5),
-                          const Color(0xFF7FD7C4).withValues(alpha: 0.24),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  isLoading ? '评语生成中' : '由李老师朗读',
-                  style: GoogleFonts.notoSerifSc(
-                    color: Colors.white.withValues(alpha: 0.46),
-                    fontSize: 10.5,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ],
-            ),
-          ],
+          ),
         ),
-      ),
+      ],
     );
   }
-}
-
-class _DashedDividerPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.12)
-      ..strokeWidth = 1.0
-      ..style = PaintingStyle.stroke;
-    const dash = 6.0;
-    const gap = 5.0;
-    // 需求六：虚线向左移动 100px。
-    final x = size.width - 100;
-    if (x <= 0) return;
-    double y = 0;
-    while (y < size.height) {
-      canvas.drawLine(Offset(x, y), Offset(x, y + dash), paint);
-      y += dash + gap;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _DashedDividerPainter oldDelegate) => false;
 }
 
 // ─── 需求21/九：讨论结束后仅保留金句画面，支持"思想家朗读"开关 ────────────

@@ -17,6 +17,7 @@ import '../../utils/open_external_url_stub.dart'
 import '../session/immersive_session_screen.dart';
 
 const _kHomeSeatOrder = <String>[
+  'comedian', // 萌趣可乐：紧贴老师下方的小不点位置
   'explorer',
   'skeptic',
   'storyteller',
@@ -1731,10 +1732,30 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
       originalContent: originalContent,
     );
     await _loadSaved();
+    // 用户保存自由话题时立即触发后端思想家推荐预热，
+    // 这样用户在继续选择角色时推荐结果已就绪。
+    unawaited(_warmRecommendThinkers(title: title, detail: originalContent));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('已加入常用话题')),
     );
+  }
+
+  Future<void> _warmRecommendThinkers({
+    required String title,
+    required String detail,
+  }) async {
+    if (title.isEmpty) return;
+    try {
+      await ref.read(apiClientProvider).recommendThinkers(
+            title: title,
+            description: detail,
+            category: 'spark',
+            limit: 3,
+          );
+    } catch (_) {
+      // 静默失败：仅做预热，不阻塞用户。
+    }
   }
 
   @override
@@ -3966,8 +3987,8 @@ class _ThinkerRecommendationsState
                   height: 10,
                   child: CircularProgressIndicator(
                     strokeWidth: 1.4,
-                    valueColor:
-                        AlwaysStoppedAnimation(_kNeonGold.withValues(alpha: 0.7)),
+                    valueColor: AlwaysStoppedAnimation(
+                        _kNeonGold.withValues(alpha: 0.7)),
                   ),
                 ),
               const Spacer(),
@@ -4072,9 +4093,8 @@ class _RecommendedThinkerChipState extends State<_RecommendedThinkerChip> {
                 style: TextStyle(
                   color: widget.selected ? _kNeonGold : _kTextPrimary,
                   fontSize: 11,
-                  fontWeight: widget.selected
-                      ? FontWeight.w700
-                      : FontWeight.w500,
+                  fontWeight:
+                      widget.selected ? FontWeight.w700 : FontWeight.w500,
                 ),
               ),
               if (widget.domainCn.isNotEmpty) ...[

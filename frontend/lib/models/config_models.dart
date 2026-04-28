@@ -16,6 +16,7 @@ const List<String> maleStudentVoiceSpeakers = <String>[
   '小思',
   '小理',
   '小行',
+  '可乐',
 ];
 
 const List<String> femaleStudentVoiceSpeakers = <String>[
@@ -297,6 +298,7 @@ final Map<String, VoiceServicePalette> kVoiceServicePalettes =
       '小爱': 'zh-CN-XiaoyouNeural',
       '小想': 'zh-CN-XiaoxuanNeural',
       '小行': 'zh-CN-YunfengNeural',
+      '可乐': 'zh-CN-YunxiNeural',
       thinkerVoiceSpeaker: 'zh-CN-YunzeNeural',
     },
   ),
@@ -444,6 +446,7 @@ final Map<String, VoiceServicePalette> kVoiceServicePalettes =
       '小爱': 'chattts-pearl-girl',
       '小想': 'chattts-spark-girl',
       '小行': 'chattts-orbit-boy',
+      '可乐': 'chattts-kite-boy',
       thinkerVoiceSpeaker: 'chattts-thinker-ink',
     },
   ),
@@ -591,6 +594,7 @@ final Map<String, VoiceServicePalette> kVoiceServicePalettes =
       '小爱': 'de-spk1_woman',
       '小想': 'fr-spk1_woman',
       '小行': 'jp-spk0_man',
+      '可乐': 'en-carter_man',
       thinkerVoiceSpeaker: 'en-mike_man',
     },
   ),
@@ -674,6 +678,7 @@ final Map<String, VoiceServicePalette> kVoiceServicePalettes =
       '小爱': 'ov:student_xiaoai',
       '小想': 'ov:student_xiaoxiang',
       '小行': 'ov:student_xiaoxing',
+      '可乐': 'ov:student_xiaotan',
       thinkerVoiceSpeaker: 'ov:thinker_elder',
     },
   ),
@@ -1130,6 +1135,10 @@ class LocalSettings {
   final bool asrStreamingEnabled;
   final String micActivationMode;
   final String micControlMode;
+  /// 麦克风热键标识：
+  /// 'right_alt' / 'left_alt' / 'any_alt' / 'f12' / 'right_ctrl' / 'left_ctrl' / 'space'
+  /// 默认 macOS = 'right_alt' (Right Option)，其他平台 = 'f12'。
+  final String micHotkey;
 
   const LocalSettings({
     this.serverUrl = 'http://localhost:8001',
@@ -1142,6 +1151,7 @@ class LocalSettings {
     this.asrStreamingEnabled = true,
     this.micActivationMode = 'manual',
     this.micControlMode = 'hold_ctrl',
+    this.micHotkey = 'right_alt',
   });
 
   LocalSettings copyWith({
@@ -1155,6 +1165,7 @@ class LocalSettings {
     bool? asrStreamingEnabled,
     String? micActivationMode,
     String? micControlMode,
+    String? micHotkey,
   }) =>
       LocalSettings(
         serverUrl: serverUrl ?? this.serverUrl,
@@ -1167,6 +1178,7 @@ class LocalSettings {
         asrStreamingEnabled: asrStreamingEnabled ?? this.asrStreamingEnabled,
         micActivationMode: micActivationMode ?? this.micActivationMode,
         micControlMode: micControlMode ?? this.micControlMode,
+        micHotkey: micHotkey ?? this.micHotkey,
       );
 
   String? resolveVoiceAssignment({
@@ -1233,6 +1245,7 @@ class LocalSettings {
         'asr_streaming_enabled': asrStreamingEnabled,
         'mic_activation_mode': micActivationMode,
         'mic_control_mode': micControlMode,
+        'mic_hotkey': micHotkey,
       };
 }
 

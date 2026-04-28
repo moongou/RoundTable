@@ -3142,6 +3142,63 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
               fontSize: 11,
             ),
           ),
+          const SizedBox(height: 14),
+          const Text('麦克风热键',
+              style: TextStyle(
+                color: AppColors.warmWhite,
+                fontWeight: FontWeight.w600,
+              )),
+          const SizedBox(height: 4),
+          Text(
+            '在会话页用此热键开始/结束发言。macOS 默认 Right Option (右 Option)；浏览器有时分不清左右 Option，可选「任意 Option」获得更高兼容性。',
+            style: TextStyle(
+              color: AppColors.warmGray.withValues(alpha: 0.92),
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: s.micHotkey,
+            dropdownColor: const Color(0xFF1B2D40),
+            decoration: const InputDecoration(
+              isDense: true,
+              border: OutlineInputBorder(),
+            ),
+            items: const [
+              DropdownMenuItem(
+                  value: 'right_alt',
+                  child: Text('Right Option / Right Alt（推荐 mac）',
+                      style: TextStyle(color: AppColors.warmWhite))),
+              DropdownMenuItem(
+                  value: 'left_alt',
+                  child: Text('Left Option / Left Alt',
+                      style: TextStyle(color: AppColors.warmWhite))),
+              DropdownMenuItem(
+                  value: 'any_alt',
+                  child: Text('任意 Option / Alt（兼容模式）',
+                      style: TextStyle(color: AppColors.warmWhite))),
+              DropdownMenuItem(
+                  value: 'f12',
+                  child: Text('F12',
+                      style: TextStyle(color: AppColors.warmWhite))),
+              DropdownMenuItem(
+                  value: 'right_ctrl',
+                  child: Text('Right Control',
+                      style: TextStyle(color: AppColors.warmWhite))),
+              DropdownMenuItem(
+                  value: 'left_ctrl',
+                  child: Text('Left Control',
+                      style: TextStyle(color: AppColors.warmWhite))),
+              DropdownMenuItem(
+                  value: 'space',
+                  child: Text('Space',
+                      style: TextStyle(color: AppColors.warmWhite))),
+            ],
+            onChanged: (v) {
+              if (v == null) return;
+              ref.read(localSettingsProvider.notifier).setMicHotkey(v);
+            },
+          ),
           const SizedBox(height: 6),
           SwitchListTile(
             title: const Text('流式显示用户字幕',

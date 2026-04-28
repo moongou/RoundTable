@@ -30,6 +30,24 @@ const _prefsKeyStreamUserSubtitles = 'stream_user_subtitles';
 const _prefsKeyAsrStreamingEnabled = 'asr_streaming_enabled';
 const _prefsKeyMicActivationMode = 'mic_activation_mode';
 const _prefsKeyMicControlMode = 'mic_control_mode';
+const _prefsKeyMicHotkey = 'mic_hotkey';
+
+const _kAllowedMicHotkeys = <String>{
+  'right_alt',
+  'left_alt',
+  'any_alt',
+  'f12',
+  'right_ctrl',
+  'left_ctrl',
+  'space',
+};
+
+String _normalizeMicHotkey(String? key) {
+  final trimmed = key?.trim();
+  if (trimmed == null || trimmed.isEmpty) return 'right_alt';
+  if (_kAllowedMicHotkeys.contains(trimmed)) return trimmed;
+  return 'right_alt';
+}
 
 String _normalizeMicControlMode(String? mode) {
   return mode?.trim() == 'hold_ctrl' ? 'hold_ctrl' : 'hold_ctrl';
@@ -73,6 +91,7 @@ LocalSettings resolveInitialLocalSettings({
   bool? storedAsrStreamingEnabled,
   required String? storedMicActivationMode,
   required String? storedMicControlMode,
+  String? storedMicHotkey,
   CurrentConfig? remoteConfig,
 }) {
   final normalizedLlmProvider = storedLlmProvider?.trim();
@@ -112,6 +131,7 @@ LocalSettings resolveInitialLocalSettings({
         : true,
     micActivationMode: normalizedMicActivationMode,
     micControlMode: _normalizeMicControlMode(normalizedMicControlMode),
+    micHotkey: _normalizeMicHotkey(storedMicHotkey),
   );
 }
 
@@ -160,6 +180,7 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
       storedAsrStreamingEnabled: prefs.getBool(_prefsKeyAsrStreamingEnabled),
       storedMicActivationMode: prefs.getString(_prefsKeyMicActivationMode),
       storedMicControlMode: prefs.getString(_prefsKeyMicControlMode),
+      storedMicHotkey: prefs.getString(_prefsKeyMicHotkey),
       remoteConfig: remoteConfig,
     );
 
@@ -272,6 +293,14 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     state = AsyncData(state.value!.copyWith(micControlMode: normalizedMode));
   }
 
+  /// 更新麦克风热键
+  Future<void> setMicHotkey(String hotkey) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = _normalizeMicHotkey(hotkey);
+    await prefs.setString(_prefsKeyMicHotkey, normalized);
+    state = AsyncData(state.value!.copyWith(micHotkey: normalized));
+  }
+
   Future<void> applySnapshot(Map<String, dynamic> snapshot) async {
     final prefs = await SharedPreferences.getInstance();
     final current = state.valueOrNull ?? const LocalSettings();
@@ -282,6 +311,7 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     final rawTtsProvider = (snapshot['tts_provider'] as String? ?? '').trim();
     final rawMicActivationMode = snapshot['mic_activation_mode'] as String?;
     final rawMicControlMode = snapshot['mic_control_mode'] as String?;
+    final rawMicHotkey = snapshot['mic_hotkey'] as String?;
     final rawVoiceAssignments = snapshot['tts_voice_assignments'];
 
     Map<String, String> snapshotVoiceAssignments = current.ttsVoiceAssignments;
@@ -319,6 +349,9 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
       micControlMode: rawMicControlMode != null
           ? _normalizeMicControlMode(rawMicControlMode)
           : current.micControlMode,
+      micHotkey: rawMicHotkey != null
+          ? _normalizeMicHotkey(rawMicHotkey)
+          : current.micHotkey,
     );
 
     await prefs.setString(_prefsKeyServerUrl, next.serverUrl);
@@ -334,6 +367,7 @@ class LocalSettingsNotifier extends AsyncNotifier<LocalSettings> {
     await prefs.setBool(_prefsKeyAsrStreamingEnabled, next.asrStreamingEnabled);
     await prefs.setString(_prefsKeyMicActivationMode, next.micActivationMode);
     await prefs.setString(_prefsKeyMicControlMode, next.micControlMode);
+    await prefs.setString(_prefsKeyMicHotkey, next.micHotkey);
 
     state = AsyncData(next);
   }

@@ -73,6 +73,8 @@ class AppColors {
         return peacemakerColor;
       case '小说':
         return storytellerColor;
+      case '可乐':
+        return const Color(0xFFFFB74D); // 萌橘黄
       default:
         return glowBlue;
     }

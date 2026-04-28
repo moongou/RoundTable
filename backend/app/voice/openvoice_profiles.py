@@ -153,6 +153,8 @@ CHARACTER_ID_TO_OPENVOICE_PROFILE = {
     "empath": "ov:student_xiaoai",
     "innovator": "ov:student_xiaoxiang",
     "pragmatist": "ov:student_xiaoxing",
+    # 可乐 是一年级"小不点"，复用萌趣的童声 OpenVoice profile
+    "comedian": "ov:student_xiaotan",
 }
 
 
