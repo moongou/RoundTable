@@ -1221,11 +1221,15 @@ function downloadMeetingScriptPackage() {
   document.body.removeChild(link);
 }
 
-function renderMeetingScriptPackagePanel(recordings) {
+function renderMeetingScriptPackagePanel(recordings, summary) {
   var recordingItems = Array.isArray(recordings) ? recordings : [];
-  var hasRecordings = recordingItems.length > 0;
+  var summaryRecordingCount = (summary && Number(summary.recording_count)) || 0;
+  var hasRecordingItems = recordingItems.length > 0;
+  // 只要后台记录到过录音或 manifest 有条目，都允许勾选。
+  var hasRecordings = hasRecordingItems || summaryRecordingCount > 0;
+  var totalCount = hasRecordingItems ? recordingItems.length : summaryRecordingCount;
   var status = hasRecordings
-    ? '当前可选录音 ' + recordingItems.length + ' 段，可按需附带清单或音频。'
+    ? '当前可选录音 ' + totalCount + ' 段，可按需附带清单或音频。'
     : '当前没有录音附件，可只打包文字剧本。';
   return '' +
     '<div class="history-package-panel">' +
@@ -1441,7 +1445,7 @@ function renderMeetingHistoryDetail(record) {
           '<button type="button" class="history-export-btn" onclick="downloadMeetingScriptExport(&quot;markdown&quot;)">导出 Markdown 复盘稿</button>' +
           '<button type="button" class="history-export-btn alt" onclick="downloadMeetingScriptExport(&quot;json&quot;)">导出 JSON 存档</button>' +
         '</div>' +
-        renderMeetingScriptPackagePanel(recordings) +
+        renderMeetingScriptPackagePanel(recordings, summary) +
       '</div>' +
     '</div>' +
     '<div class="history-summary-grid">' + cards.map(function(card) {

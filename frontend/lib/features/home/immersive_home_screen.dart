@@ -711,6 +711,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           onSettings: () => Navigator.pushNamed(context, '/settings'),
           onDevPanel: () => _openDevPanel(context),
           onLoadConfig: _openLoadConfigDialog,
+          onReplay: () => Navigator.pushNamed(context, '/replay'),
           observerMode: _isObserverMode,
           onObserverModeChanged: (v) => setState(() => _isObserverMode = v),
         ),
@@ -810,6 +811,7 @@ class _TopBar extends StatelessWidget {
   final VoidCallback onSettings;
   final VoidCallback onDevPanel;
   final VoidCallback onLoadConfig;
+  final VoidCallback onReplay;
   final bool observerMode;
   final ValueChanged<bool> onObserverModeChanged;
 
@@ -818,6 +820,7 @@ class _TopBar extends StatelessWidget {
     required this.onSettings,
     required this.onDevPanel,
     required this.onLoadConfig,
+    required this.onReplay,
     required this.observerMode,
     required this.onObserverModeChanged,
   });
@@ -901,6 +904,10 @@ class _TopBar extends StatelessWidget {
               icon: Icons.monitor_heart_outlined,
               tooltip: '后台服务',
               onTap: onDevPanel),
+          _IconBtn(
+              icon: Icons.replay_circle_filled,
+              tooltip: '思辨复盘：载入下载的 ZIP 复盘包重现全过程',
+              onTap: onReplay),
           _IconBtn(
               icon: Icons.bookmarks_outlined,
               tooltip: '加载配置',

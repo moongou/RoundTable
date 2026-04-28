@@ -1135,6 +1135,7 @@ class LocalSettings {
   final bool asrStreamingEnabled;
   final String micActivationMode;
   final String micControlMode;
+
   /// 麦克风热键标识：
   /// 'right_alt' / 'left_alt' / 'any_alt' / 'f12' / 'right_ctrl' / 'left_ctrl' / 'space'
   /// 默认 macOS = 'right_alt' (Right Option)，其他平台 = 'f12'。

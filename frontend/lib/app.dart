@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'features/home/immersive_home_screen.dart';
+import 'features/replay/replay_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'theme/app_theme.dart';
 
@@ -19,6 +20,7 @@ class RoundTableApp extends ConsumerWidget {
       routes: {
         '/home': (context) => const ImmersiveHomeScreen(),
         '/settings': (context) => const SettingsScreen(),
+        '/replay': (context) => const ReplayScreen(),
       },
       debugShowCheckedModeBanner: false,
     );

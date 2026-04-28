@@ -62,6 +62,15 @@ PROVIDER_DEFAULTS = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
         "model": "gemini-2.0-flash",
     },
+    # 自定义提供商：用于其他 OpenAI 兼容 API（如月之暗面、自建 LLM 网关、第三方代理等）
+    "custom1": {
+        "base_url": "",
+        "model": "",
+    },
+    "custom2": {
+        "base_url": "",
+        "model": "",
+    },
 }
 
 # 所有可用的提供商列表
@@ -101,6 +110,8 @@ PROVIDER_NAMES = {
     "zhipu": "智谱AI (ChatGLM)",
     "anthropic": "Anthropic Claude",
     "gemini": "Google Gemini",
+    "custom1": "自定义一（OpenAI 兼容）",
+    "custom2": "自定义二（OpenAI 兼容）",
 }
 
 
@@ -337,8 +348,20 @@ class Settings(BaseSettings):
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_model: str = "gemini-2.0-flash"
 
-    # ── 自定义提供商 ─────────────────────────────────────────────────────
-    custom_providers: str = "[]"  # JSON string of custom provider configs
+    # ── 自定义提供商（OpenAI 兼容服务） ─────────────────────────────────
+    # 用于配置其他 OpenAI 兼容的 LLM 服务（如月之暗面、自建 LLM 网关等）。
+    # 仅需填写 base_url、API Key 和模型名即可。
+    custom1_api_key: str = ""
+    custom1_base_url: str = ""
+    custom1_model: str = ""
+    custom1_display_name: str = "自定义一"
+
+    custom2_api_key: str = ""
+    custom2_base_url: str = ""
+    custom2_model: str = ""
+    custom2_display_name: str = "自定义二"
+
+    custom_providers: str = "[]"  # JSON string of custom provider configs（保留兼容字段）
 
     # ── 语音服务 ────────────────────────────────────────────────────────────
 
@@ -439,9 +462,19 @@ class Settings(BaseSettings):
             config["base_url"] = base_url
 
         # AutoGen 对非 OpenAI 模型名要求显式提供 model_info
-        # （OpenAI 原生模型 gpt-*/o1-*/o3-* 由 autogen 自动识别，无需传入）
+        # 为避免兼容服务（DeepSeek/Qwen/百炼/自定义网关）出现
+        # "model_info is required when model name is not a valid OpenAI model" 错误，
+        # 仅当 provider 为 openai 且 base_url 指向真正的 api.openai.com、
+        # 同时模型名又是 OpenAI 原生前缀时，才省略 model_info；其他情况一律显式注入。
         _openai_prefixes = ("gpt-", "o1-", "o3-", "o4-", "chatgpt-", "text-embedding-", "ft:")
-        if provider != "openai" or not any(model.startswith(p) for p in _openai_prefixes):
+        try:
+            from urllib.parse import urlparse as _urlparse
+            _host = (_urlparse(base_url or "https://api.openai.com").hostname or "").lower()
+        except Exception:
+            _host = ""
+        is_real_openai_endpoint = provider == "openai" and _host.endswith("openai.com")
+        is_native_openai_model = any(model.startswith(p) for p in _openai_prefixes)
+        if not (is_real_openai_endpoint and is_native_openai_model):
             config["model_info"] = {
                 "vision": False,
                 "function_calling": True,
@@ -549,6 +582,9 @@ class Settings(BaseSettings):
             allowed_fields.add(f"{pid}_api_key")
             allowed_fields.add(f"{pid}_base_url")
             allowed_fields.add(f"{pid}_model")
+        # 自定义提供商额外允许设置显示名
+        allowed_fields.add("custom1_display_name")
+        allowed_fields.add("custom2_display_name")
 
         for field, value in updates.items():
             if field == "llm_provider":

@@ -1202,7 +1202,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       case 'space':
         return {LogicalKeyboardKey.space};
       default:
-        return {LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.controlRight};
+        return {
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.controlRight
+        };
     }
   }
 
@@ -3119,12 +3122,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           unawaited(() async {
             // 给后端的最后一段 TTS 一点入队时间。
             await Future.delayed(const Duration(milliseconds: 800));
-            final deadline =
-                DateTime.now().add(const Duration(seconds: 45));
+            final deadline = DateTime.now().add(const Duration(seconds: 45));
             while (mounted && DateTime.now().isBefore(deadline)) {
-              final stillTalking = _ttsPlaying ||
-                  _ttsService.isSpeaking ||
-                  _ttsQueue.isNotEmpty;
+              final stillTalking =
+                  _ttsPlaying || _ttsService.isSpeaking || _ttsQueue.isNotEmpty;
               if (!stillTalking) break;
               await Future.delayed(const Duration(milliseconds: 250));
             }
@@ -4832,8 +4833,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                             child: Text(
                               '“$quote”',
                               style: GoogleFonts.notoSerifSc(
-                                color:
-                                    Colors.white.withValues(alpha: 0.92),
+                                color: Colors.white.withValues(alpha: 0.92),
                                 fontSize: 16,
                                 height: 1.7,
                               ),
@@ -6713,9 +6713,7 @@ class _PostDiscussionReviewOverlay extends StatelessWidget {
     final size = MediaQuery.of(context).size;
     final dialogWidth = (size.width * 0.7).clamp(420.0, 980.0);
     final dialogHeight = (size.height * 0.7).clamp(360.0, 720.0);
-    final displayText = isLoading
-        ? '李老师正在回看你刚才的发言，准备留下一段更具体的会后点评……'
-        : review;
+    final displayText = isLoading ? '李老师正在回看你刚才的发言，准备留下一段更具体的会后点评……' : review;
 
     return Stack(
       fit: StackFit.expand,
@@ -6852,8 +6850,8 @@ class _PostDiscussionReviewOverlay extends StatelessWidget {
                       if (onShowGoldenQuotes != null)
                         FilledButton.icon(
                           onPressed: onShowGoldenQuotes,
-                          icon: const Icon(Icons.format_quote_rounded,
-                              size: 18),
+                          icon:
+                              const Icon(Icons.format_quote_rounded, size: 18),
                           label: const Text('查看金句'),
                           style: FilledButton.styleFrom(
                             backgroundColor: const Color(0xFFF4D38B),

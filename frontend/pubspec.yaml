@@ -25,6 +25,9 @@ dependencies:
   shared_preferences: ^2.3.0
   freezed_annotation: ^2.4.0
   json_annotation: ^4.9.0
+  # 思辨复盘 - ZIP 解析与文件选择
+  archive: ^3.4.10
+  file_picker: ^8.1.2
 
 dev_dependencies:
   flutter_test:

@@ -562,17 +562,30 @@ async def list_providers():
         if pid == "ollama":
             has_key = True  # Ollama 本地不需要 key
 
-        providers.append(
-            {
-                "id": pid,
-                "name": PROVIDER_NAMES.get(pid, pid),
-                "base_url": base_url,
-                "model": model,
-                "has_api_key": has_key,
-                "is_active": pid == active_provider,
-                "needs_api_key": pid not in ("ollama",),
-            }
-        )
+        # 自定义提供商：使用用户指定的显示名（若设置过）
+        display_name = PROVIDER_NAMES.get(pid, pid)
+        if pid in ("custom1", "custom2"):
+            custom_name = (getattr(settings, f"{pid}_display_name", "") or "").strip()
+            if custom_name:
+                display_name = custom_name
+
+        provider_info = {
+            "id": pid,
+            "name": display_name,
+            "base_url": base_url,
+            "model": model,
+            "has_api_key": has_key,
+            "is_active": pid == active_provider,
+            "needs_api_key": pid not in ("ollama",),
+        }
+        if pid in ("custom1", "custom2"):
+            provider_info["is_custom"] = True
+            provider_info["display_name"] = display_name
+            provider_info["hint"] = (
+                "适用于其他 OpenAI 兼容服务（DeepSeek/月之暗面/自建 LLM 网关等），"
+                "仅需填写 base_url、API Key 与模型名"
+            )
+        providers.append(provider_info)
 
     return providers
 
