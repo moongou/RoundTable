@@ -102,7 +102,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
 
   String _interactionModeLabel(LocalSettings s) {
     if (!s.pushToTalk) return '自由对话';
-    return '按住 Ctrl 说话';
+    return '按住 ${micHotkeyLabel(s.micHotkey)} 说话';
   }
 
   @override
@@ -3136,7 +3136,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           ),
           const SizedBox(height: 8),
           Text(
-            '当前仅保存偏好，后续升级会再接入会话录音逻辑。',
+            s.micActivationMode == 'auto'
+                ? '轮到你时会自动开启麦克风；也可以用下方热键手动结束或重试。'
+                : '轮到你时需要用下方热键或“讲话”按钮手动开始发言。',
             style: TextStyle(
               color: AppColors.warmGray.withValues(alpha: 0.92),
               fontSize: 11,

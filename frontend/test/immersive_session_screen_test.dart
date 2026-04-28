@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:roundtable/models/discussion_models.dart';
 import 'package:roundtable/features/session/immersive_session_screen.dart';
@@ -98,6 +99,21 @@ void main() {
         recordingControlledByHoldCtrl: false,
       ),
       isTrue,
+    );
+  });
+
+  test('right option mic hotkey does not include control keys', () {
+    final keys = ImmersiveSessionScreen.micHotkeyLogicalKeys('right_alt');
+
+    expect(keys, contains(LogicalKeyboardKey.altRight));
+    expect(keys, isNot(contains(LogicalKeyboardKey.controlLeft)));
+    expect(keys, isNot(contains(LogicalKeyboardKey.controlRight)));
+  });
+
+  test('invalid mic hotkey falls back to right option', () {
+    expect(
+      ImmersiveSessionScreen.micHotkeyLogicalKeys('legacy_ctrl'),
+      {LogicalKeyboardKey.altRight},
     );
   });
 

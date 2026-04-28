@@ -713,6 +713,108 @@ def test_floor_manager_strips_meta_reasoning_from_text_message_content() -> None
     assert cleaned == '嗯，大家好，我是李老师。'
 
 
+def test_floor_manager_strips_english_meta_reasoning_from_stream_text() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='comedian')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+
+    cleaned = floor_manager._strip_meta_reasoning_text(
+        'I should provide an answer in the style of 可乐 for the first time!\n'
+        '我觉得标准答案像鞋带的第一个结。'
+    )
+
+    assert cleaned == '我觉得标准答案像鞋带的第一个结。'
+
+
+def test_floor_manager_rewrites_moderator_teacher_student_misattribution() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='optimist')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '老师',
+            'optimist': '小明',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._speaker_message_count['moderator'] = 1
+    floor_manager._speaker_message_count['optimist'] = 1
+    floor_manager._recent_display_speakers = ['小明']
+    floor_manager._recent_reference_quotes = [
+        ('小明', '创新不是故意离开答案很远，而是在站稳以后，勇敢多迈半步'),
+    ]
+
+    cleaned = floor_manager._sanitize_all_references(
+        'moderator',
+        '老师同学，你刚才说的“创新不是故意离开答案很远，而是在站稳以后，勇敢多迈半步”我特别喜欢。',
+    )
+
+    assert '老师同学' not in cleaned
+    assert cleaned.startswith('小明同学，你刚才说的')
+
+
+def test_floor_manager_neutralizes_repeated_self_invitation() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='optimist')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '老师',
+            'optimist': '小明',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._speaker_message_count['moderator'] = 1
+    floor_manager._speaker_message_count['optimist'] = 1
+    floor_manager._recent_display_speakers = ['小明']
+
+    cleaned = floor_manager._sanitize_all_references(
+        'moderator',
+        '小明同学，你刚才说“小鸭船”很有趣；小明同学，你怎么看小明同学说的“小鸭船”和“只描线”？',
+    )
+
+    assert '小明同学，你怎么看小明同学' not in cleaned
+    assert '请其他同学说说' in cleaned
+    assert parse_speaker_designation(cleaned, ['老师', '小明', '豆苗']) is None
+
+
+def test_floor_manager_removes_unspoken_name_from_object_reference() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='optimist')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '老师',
+            'optimist': '小明',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._speaker_message_count['moderator'] = 1
+    floor_manager._speaker_message_count['optimist'] = 1
+    floor_manager._recent_display_speakers = ['小明']
+
+    cleaned = floor_manager._sanitize_all_references(
+        'moderator',
+        '请小明同学说说，你怎么看豆苗同学这只“风筝”呢？',
+    )
+
+    assert '豆苗同学这只' not in cleaned
+    assert '请小明同学说说' not in cleaned
+    assert '这只“风筝”' in cleaned
+
+
 @pytest.mark.asyncio
 async def test_floor_manager_strips_system_trigger_prefix_from_stream_segments() -> None:
     floor_manager = FloorManager(

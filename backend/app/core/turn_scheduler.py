@@ -255,7 +255,7 @@ def create_discussion_team(
     first_human_invite_after_turns = 2
     human_reinvite_gap = 3
     if humans:
-        human_turn_min_target = 5
+        human_turn_min_target = min(5, max(1, round(nominal_max_turns / 4)))
         human_turn_soft_cap = 9
         preferred_human_turn_target = max(
             human_turn_min_target,

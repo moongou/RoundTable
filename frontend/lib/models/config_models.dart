@@ -33,6 +33,21 @@ const List<String> configurableVoiceSpeakers = <String>[
   thinkerVoiceSpeaker,
 ];
 
+const Map<String, String> micHotkeyLabels = <String, String>{
+  'right_alt': 'Right Option',
+  'left_alt': 'Left Option',
+  'any_alt': '任意 Option',
+  'f12': 'F12',
+  'right_ctrl': 'Right Control',
+  'left_ctrl': 'Left Control',
+  'space': 'Space',
+};
+
+String micHotkeyLabel(String? hotkey) {
+  final normalized = hotkey?.trim() ?? '';
+  return micHotkeyLabels[normalized] ?? micHotkeyLabels['right_alt']!;
+}
+
 String voiceAssignmentStorageKey({
   required String providerId,
   required String speaker,
@@ -1138,7 +1153,7 @@ class LocalSettings {
 
   /// 麦克风热键标识：
   /// 'right_alt' / 'left_alt' / 'any_alt' / 'f12' / 'right_ctrl' / 'left_ctrl' / 'space'
-  /// 默认 macOS = 'right_alt' (Right Option)，其他平台 = 'f12'。
+  /// 默认 = 'right_alt' (Right Option)。
   final String micHotkey;
 
   const LocalSettings({

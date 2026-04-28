@@ -449,6 +449,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             human_guidance_memory=moderator_guidance_memory,
             human_hand_raise_notifier=note_human_hand_raise,
             human_queue_scope=session_id,
+            thinker_agent_names=[a.name for a in thinker_agents],
         )
 
         # 设置 display name 映射（需求4：用于指定发言者解析）

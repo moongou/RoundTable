@@ -81,6 +81,15 @@ class RollingSummaryMemory(ListMemory):
             ledger_lines.append('已实际发言：' + '、'.join(self._spoken_names))
         if self._unspoken_names:
             ledger_lines.append('尚未实际发言：' + '、'.join(self._unspoken_names))
+        latest_speaker = ''
+        for memory in reversed(self.content):
+            payload = memory.content
+            if isinstance(payload, dict):
+                latest_speaker = str(payload.get('speaker', '')).strip()
+                if latest_speaker:
+                    break
+        if latest_speaker:
+            ledger_lines.append('上一位实际发言（不含当前输出者）：' + latest_speaker)
 
         quote_lines = [
             f'{index}. {speaker}：{quote}'
@@ -101,6 +110,7 @@ class RollingSummaryMemory(ListMemory):
                         else ''
                     )
                     + '\n引用规则：只有当某人的摘录或真实历史中确有对应观点时，才能说“X刚才说”。'
+                    + '点评或复述时优先核对“上一位实际发言”，不要把主持人、真人学生或尚未发言者误当成发言来源。'
                     + '不要因为某人是真人学生，就把别人的观点挂到他/她名下。'
                     + '如果一句话综合了多位发言者，必须分别说明，或改说“有同学提到”。'
                     + '如果归属拿不准，宁可使用中性表述，也不要张冠李戴。\n'

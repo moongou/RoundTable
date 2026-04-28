@@ -50,7 +50,7 @@ class SessionScreen extends ConsumerStatefulWidget {
 }
 
 class _SessionScreenState extends ConsumerState<SessionScreen> {
-  // Ctrl 键计数与定时器
+  // 麦克风热键计数与定时器
   int _ctrlKeyCount = 0;
   DateTime? _lastCtrlKeyTime;
   Timer? _ctrlKeyTimer;
@@ -532,14 +532,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 
   void _onKeyEvent(KeyEvent event) {
-    // 仅 Push-to-Talk 模式下Ctrl键触发
+    // 仅 Push-to-Talk 模式下由设置页配置的热键触发
     if (!_isPushToTalk) return;
 
-    // 监听Ctrl键
-    final isCtrl = event.logicalKey == LogicalKeyboardKey.controlLeft ||
-        event.logicalKey == LogicalKeyboardKey.controlRight;
-
-    if (event is KeyDownEvent && isCtrl) {
+    final settings = ref.read(localSettingsProvider).valueOrNull;
+    final hotkeys = _legacyMicHotkeyLogicalKeys(settings?.micHotkey);
+    if (event is KeyDownEvent && hotkeys.contains(event.logicalKey)) {
       final now = DateTime.now();
       if (_lastCtrlKeyTime == null ||
           now.difference(_lastCtrlKeyTime!) >
@@ -555,16 +553,37 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         _ctrlKeyCount = 0;
       });
 
-      // 三击Ctrl启动语音识别
+      // 三击热键启动语音识别
       if (_ctrlKeyCount == 3 && _isMyTurn && !_isRecording) {
         _onPttStart();
         _ctrlKeyCount = 0;
       }
-      // 双击Ctrl结束语音识别
+      // 双击热键结束语音识别
       else if (_ctrlKeyCount == 2 && _isRecording) {
         _onPttEnd();
         _ctrlKeyCount = 0;
       }
+    }
+  }
+
+  Set<LogicalKeyboardKey> _legacyMicHotkeyLogicalKeys(String? hotkeyId) {
+    switch (hotkeyId?.trim()) {
+      case 'left_alt':
+        return {LogicalKeyboardKey.altLeft};
+      case 'right_alt':
+        return {LogicalKeyboardKey.altRight};
+      case 'any_alt':
+        return {LogicalKeyboardKey.altLeft, LogicalKeyboardKey.altRight};
+      case 'f12':
+        return {LogicalKeyboardKey.f12};
+      case 'left_ctrl':
+        return {LogicalKeyboardKey.controlLeft};
+      case 'right_ctrl':
+        return {LogicalKeyboardKey.controlRight};
+      case 'space':
+        return {LogicalKeyboardKey.space};
+      default:
+        return {LogicalKeyboardKey.altRight};
     }
   }
 }

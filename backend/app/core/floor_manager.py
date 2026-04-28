@@ -75,6 +75,10 @@ class FloorManager:
         re.compile(
             r"(用户现在|用户的输入|用户的消息|name\s*=\s*user|系统提示|之前的设定|真人学生发言处理规范|符合要求|复述了用户的关键表述|点评到位|引导其他角色发言|现在需要我扮演|要符合小学生的语气|带趣味性故事|温和质疑|边栏流程指引|系统触发|等待系统触发|按规范|严格基于|自身身份|严格引用|语气感|引导对继续|引导下一位发声|无编造|符合长项要求|首轮已发言|不自我引用|绝不提前|未发生发言|提前引用|/me|静候)"
         ),
+        re.compile(
+            r"\b(I\s*(?:should|need|want|will|must|have\s*to)|Since\s*it['’]?s|Keeping\s*it|The\s*user|Now\s*I\s*need)",
+            re.IGNORECASE,
+        ),
         re.compile(r"^(不对|哦，不对|不，看|不，|那我需要|重新理一下|仔细看)"),
         re.compile(r"(然后点评|然后引导|还要注意语言|这样就可以了)"),
     )
@@ -96,6 +100,7 @@ class FloorManager:
         human_guidance_memory: Optional[HumanResponseGuidanceMemory] = None,
         human_hand_raise_notifier: Optional[Callable[[str], None]] = None,
         human_queue_scope: str | None = None,
+        thinker_agent_names: Optional[list[str]] = None,
     ):
         self.team = team
         self.ai_agents = ai_agents
@@ -107,6 +112,7 @@ class FloorManager:
         self.human_guidance_memory = human_guidance_memory
         self._human_hand_raise_notifier = human_hand_raise_notifier
         self._human_queue_scope = human_queue_scope
+        self.thinker_names = set(thinker_agent_names or [])
 
         self.ai_names = {agent.name for agent in ai_agents}
         self.human_names = {agent.name for agent in human_agents}
@@ -137,6 +143,7 @@ class FloorManager:
         # display name → agent name 映射（需求4：用于指定发言者解析）
         self._display_name_to_agent: dict[str, str] = {}
         self._agent_to_display_name: dict[str, str] = {}
+        self._thinker_display_names: set[str] = set()
         self._speaker_message_count: dict[str, int] = {name: 0 for name in self.all_names}
         self._recent_display_speakers: list[str] = []
         self._recent_turn_summaries: list[tuple[str, str]] = []
@@ -241,6 +248,48 @@ class FloorManager:
                 seen.add(display_name)
                 names.append(display_name)
         return names
+
+    def _display_role_suffix(self, display_name: str, fallback: str = "同学") -> str:
+        agent_name = self._display_name_to_agent.get(display_name, display_name)
+        if agent_name in self.thinker_names or display_name in self._thinker_display_names:
+            return "先生"
+        if agent_name == "moderator":
+            return ""
+        return fallback or "同学"
+
+    def _format_display_vocative(self, display_name: str, fallback: str = "同学") -> str:
+        suffix = self._display_role_suffix(display_name, fallback=fallback)
+        if not suffix or display_name.endswith(suffix):
+            return display_name
+        return f"{display_name}{suffix}"
+
+    def _sanitize_repeated_self_invitation(self, text: str, *, last_display: str) -> str:
+        """避免主持人刚点评完上一位，又点上一位评价自己的发言。"""
+        if not last_display:
+            return text
+
+        escaped_last = re.escape(last_display)
+        last_suffix = self._display_role_suffix(last_display)
+        honorific_pattern = r"(?:同学|先生)?"
+        target_label = self._format_display_vocative(last_display, fallback=last_suffix or "同学")
+
+        replacements = [
+            (
+                rf"请\s*{escaped_last}{honorific_pattern}\s*(?:来说|来谈|谈谈|说说|讲讲|分享|回应|补充)[一下吧吗呢]*[，,:：]?\s*你怎么看\s*{escaped_last}{honorific_pattern}",
+                f"请其他同学说说，大家怎么看{target_label}",
+            ),
+            (
+                rf"{escaped_last}{honorific_pattern}[，,:：]\s*你怎么看\s*{escaped_last}{honorific_pattern}",
+                f"请其他同学说说，大家怎么看{target_label}",
+            ),
+            (
+                rf"请\s*{escaped_last}{honorific_pattern}\s*(?:来说|来谈|谈谈|说说|讲讲|分享|回应|补充)[一下吧吗呢]*",
+                "请其他同学说说",
+            ),
+        ]
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text)
+        return text
 
     def _rewrite_unspoken_named_attribution(
         self,
@@ -389,6 +438,11 @@ class FloorManager:
                     text,
                 )
                 text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?这(只|个|件|条|艘|座|种|份)",
+                    r"这\1",
+                    text,
+                )
+                text = re.sub(
                     rf"{re.escape(name)}(?:同学|先生)?的这个",
                     "这个",
                     text,
@@ -437,17 +491,37 @@ class FloorManager:
             r"|你点(?:出|到)"
         )
         for name in display_names:
-            if name == current_display or name == last_display:
+            if name == last_display:
                 continue
+            if name == current_display and source != "moderator":
+                continue
+
+            def rewrite_compliment_vocative(
+                match: re.Match[str],
+                *,
+                original_name: str = name,
+                target_display: str = last_display,
+            ) -> str:
+                following = text[match.end() : match.end() + 90]
+                quoted = re.match(r"[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]", following)
+                if quoted and self._guess_reference_owner(quoted.group('fragment')) == original_name:
+                    return match.group(0)
+                verb = match.group('verb')
+                pronoun = "" if verb.startswith("你") else "你"
+                return (
+                    f"{self._format_display_vocative(target_display, fallback=match.group(1) or '同学')}，"
+                    f"{pronoun}{verb}"
+                )
+
             text = re.sub(
                 rf"{re.escape(name)}(同学|先生)?[，,:：]?\s*(你?)(?P<verb>{compliment_verbs})",
-                lambda m, _ld=last_display: f"{_ld}{m.group(1) or '同学'}，你{m.group('verb')}",
+                rewrite_compliment_vocative,
                 text,
             )
             # "X你这段话/这话/这次..." 单独再保险一次
             text = re.sub(
                 rf"{re.escape(name)}(?:同学|先生)?\s*你这(段话|次|句|个)",
-                rf"{last_display}，你这\1",
+                rf"{self._format_display_vocative(last_display)}，你这\1",
                 text,
             )
 
@@ -455,14 +529,19 @@ class FloorManager:
         # 模式："{X}{同学/先生}?[，,]?\s*(?:你这|你的|你刚才的)?(?:这|那)?(问题|说法|比喻|想法|观点|例子|疑问)"
         # 当 X != last_display 且 X != current_display 时，强制改写为 last_display。
         for name in display_names:
-            if name == current_display or name == last_display:
+            if name == last_display:
+                continue
+            if name == current_display and source != "moderator":
                 continue
             text = re.sub(
                 rf"^{re.escape(name)}(同学|先生)?[，,]?\s*(?:你)?(这|那)?(?:个|段|次|句)?\s*(问题|说法|比喻|想法|观点|例子|疑问|答案|思路|表述)",
-                rf"{last_display}\1，你这个\3",
+                lambda m, _ld=last_display: f"{self._format_display_vocative(_ld, fallback=m.group(1) or '同学')}，你这个{m.group(3)}",
                 text,
                 flags=re.MULTILINE,
             )
+
+        if source == "moderator":
+            text = self._sanitize_repeated_self_invitation(text, last_display=last_display)
 
         text = re.sub(r"\s{2,}", " ", text).strip()
         text = re.sub(r"^[，,:：\s]+", "", text)
@@ -978,6 +1057,11 @@ class FloorManager:
         """设置 agent name → display name 映射，用于指定发言者解析。"""
         self._agent_to_display_name = dict(agent_to_display)
         self._display_name_to_agent = {v: k for k, v in agent_to_display.items()}
+        self._thinker_display_names = {
+            display_name
+            for agent_name, display_name in agent_to_display.items()
+            if agent_name in self.thinker_names
+        }
 
     async def _put_human_input(self, speaker: str, text: str) -> None:
         await put_human_input(speaker, text, session_scope=self._human_queue_scope)
@@ -1429,7 +1513,11 @@ class FloorManager:
                 await self.human_guidance_memory.clear()
             self._pending_human_guidance = False
             await self._put_human_input(normalized_name, "（跳过）")
-            await self._emit_message("系统", f"{normalized_name or '该同学'}未输入有效内容，已自动跳过本轮。", "system")
+            await self._emit_message(
+                "系统",
+                f"{normalized_name or '该同学'}未输入有效内容，已自动跳过本轮。",
+                "system",
+            )
             return
 
         # 跳过指令不需要安全过滤
@@ -1444,11 +1532,19 @@ class FloorManager:
         # 安全过滤人类输入
         is_safe, reason = await self.safety_filter.check_human_input(normalized_text)
         if not is_safe:
-            logger.warning("[FloorManager] 人类输入被安全过滤: %s, reason=%s", normalized_name, reason)
+            logger.warning(
+                "[FloorManager] 人类输入被安全过滤: %s, reason=%s",
+                normalized_name,
+                reason,
+            )
             if self.human_guidance_memory is not None:
                 await self.human_guidance_memory.clear()
             self._pending_human_guidance = False
-            await self._emit_message("系统", "你的发言包含不适当的内容，请换一种方式表达。", "system")
+            await self._emit_message(
+                "系统",
+                "你的发言包含不适当的内容，请换一种方式表达。",
+                "system",
+            )
             return
 
         guidance = self._build_human_guidance(normalized_name, normalized_text)
@@ -1471,14 +1567,27 @@ class FloorManager:
         # 检查用户是否指定了下一位发言者（需求4）
         all_participant_names = list(self.all_names)
         # 使用 display name map if available
-        designated = parse_speaker_designation(normalized_text, list(self._display_name_to_agent.keys()) if hasattr(self, '_display_name_to_agent') else all_participant_names)
+        participant_labels = (
+            list(self._display_name_to_agent.keys())
+            if hasattr(self, '_display_name_to_agent')
+            else all_participant_names
+        )
+        designated = parse_speaker_designation(normalized_text, participant_labels)
         if designated:
             logger.info("[FloorManager] 用户 %s 指定下一位发言者: %s", normalized_name, designated)
             # 转换为 agent name
-            agent_name = self._display_name_to_agent.get(designated, designated) if hasattr(self, '_display_name_to_agent') else designated
+            agent_name = (
+                self._display_name_to_agent.get(designated, designated)
+                if hasattr(self, '_display_name_to_agent')
+                else designated
+            )
             current_agent_name = self._display_name_to_agent.get(normalized_name, normalized_name)
             if agent_name == current_agent_name:
-                logger.info("[FloorManager] 忽略用户 %s 的自指点名: %s", normalized_name, designated)
+                logger.info(
+                    "[FloorManager] 忽略用户 %s 的自指点名: %s",
+                    normalized_name,
+                    designated,
+                )
             else:
                 self._set_designated_speaker(agent_name)
 
@@ -1486,9 +1595,17 @@ class FloorManager:
             await self._put_human_input(normalized_name, normalized_text)
             logger.info("[FloorManager] 人类输入已提交到队列: %s", normalized_name)
         except Exception as e:
-            logger.warning("[FloorManager] 提交人类输入失败，自动跳过。name=%s, err=%s", normalized_name, e)
+            logger.warning(
+                "[FloorManager] 提交人类输入失败，自动跳过。name=%s, err=%s",
+                normalized_name,
+                e,
+            )
             await self._put_human_input(normalized_name, "（跳过）")
-            await self._emit_message("系统", f"{normalized_name or '该同学'}输入处理异常，系统已自动跳过并继续讨论。", "system")
+            await self._emit_message(
+                "系统",
+                f"{normalized_name or '该同学'}输入处理异常，系统已自动跳过并继续讨论。",
+                "system",
+            )
 
     async def request_interrupt(self, speaker: str) -> None:
         """处理打断请求。

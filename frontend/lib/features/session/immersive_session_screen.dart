@@ -126,6 +126,48 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     return true;
   }
 
+  static Set<LogicalKeyboardKey> micHotkeyLogicalKeys(String? hotkeyId) {
+    switch (hotkeyId?.trim()) {
+      case 'left_alt':
+        return {LogicalKeyboardKey.altLeft};
+      case 'right_alt':
+        return {LogicalKeyboardKey.altRight};
+      case 'any_alt':
+        return {LogicalKeyboardKey.altLeft, LogicalKeyboardKey.altRight};
+      case 'f12':
+        return {LogicalKeyboardKey.f12};
+      case 'left_ctrl':
+        return {LogicalKeyboardKey.controlLeft};
+      case 'right_ctrl':
+        return {LogicalKeyboardKey.controlRight};
+      case 'space':
+        return {LogicalKeyboardKey.space};
+      default:
+        return {LogicalKeyboardKey.altRight};
+    }
+  }
+
+  static Set<PhysicalKeyboardKey> micHotkeyPhysicalKeys(String? hotkeyId) {
+    switch (hotkeyId?.trim()) {
+      case 'left_alt':
+        return {PhysicalKeyboardKey.altLeft};
+      case 'right_alt':
+        return {PhysicalKeyboardKey.altRight};
+      case 'any_alt':
+        return {PhysicalKeyboardKey.altLeft, PhysicalKeyboardKey.altRight};
+      case 'f12':
+        return {PhysicalKeyboardKey.f12};
+      case 'left_ctrl':
+        return {PhysicalKeyboardKey.controlLeft};
+      case 'right_ctrl':
+        return {PhysicalKeyboardKey.controlRight};
+      case 'space':
+        return {PhysicalKeyboardKey.space};
+      default:
+        return {PhysicalKeyboardKey.altRight};
+    }
+  }
+
   static bool shouldBlockPendingHumanTurn({
     required bool ttsPlaying,
     required bool ttsServiceSpeaking,
@@ -815,7 +857,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _ctrlHeld = false;
   bool _recordingControlledByHoldCtrl = false;
   Timer? _speechFinalizeTimer;
-  bool _isFinalizingSpeech = false; // 防止多次快速按 Ctrl 导致并发 finalize
+  bool _isFinalizingSpeech = false; // 防止多次快速按热键导致并发 finalize
   bool _speechFinalizeRunning = false;
   bool _isCompletingHumanTurn = false;
   bool _hasStartedSpeechThisTurn = false;
@@ -837,6 +879,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   Timer? _ttsPumpGuardTimer;
   Timer? _humanResponseWatchdogTimer;
   Timer? _deferredAutoSkipTimer;
+  Timer? _autoMicStartTimer;
 
   // 参与者
   List<SeatedParticipant> _participants = [];
@@ -1155,7 +1198,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           });
         }
       });
-    // Global hardware keyboard listener for Ctrl gesture PTT.
+    // Global hardware keyboard listener for the configured mic hotkey.
     HardwareKeyboard.instance.addHandler(_onHardwareKey);
     final initialSettings =
         ref.read(localSettingsProvider).valueOrNull ?? const LocalSettings();
@@ -1180,78 +1223,63 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }
 
   // PTT 触发逻辑：根据用户设置的麦克风热键开始/结束发言。
-  // 默认：macOS = Right Option (altRight)，其他 = F12。
   Set<LogicalKeyboardKey> _resolveHotkeyKeys() {
     final settings = ref.read(localSettingsProvider).valueOrNull;
-    final id = settings?.micHotkey ?? 'right_alt';
-    switch (id) {
-      case 'left_alt':
-        return {LogicalKeyboardKey.altLeft};
-      case 'right_alt':
-        // 浏览器在 mac 上常把 Right Option 上报为 altRight，
-        // 但部分情况下会回退到 altLeft；为兼容性二者都接受。
-        return {LogicalKeyboardKey.altRight, LogicalKeyboardKey.altLeft};
-      case 'any_alt':
-        return {LogicalKeyboardKey.altLeft, LogicalKeyboardKey.altRight};
-      case 'f12':
-        return {LogicalKeyboardKey.f12};
-      case 'left_ctrl':
-        return {LogicalKeyboardKey.controlLeft};
-      case 'right_ctrl':
-        return {LogicalKeyboardKey.controlRight};
-      case 'space':
-        return {LogicalKeyboardKey.space};
-      default:
-        return {
-          LogicalKeyboardKey.controlLeft,
-          LogicalKeyboardKey.controlRight
-        };
-    }
+    return ImmersiveSessionScreen.micHotkeyLogicalKeys(settings?.micHotkey);
   }
 
-  bool _isAnyCtrlPressed() {
-    final pressed = HardwareKeyboard.instance.logicalKeysPressed;
-    final hotkeys = _resolveHotkeyKeys();
-    for (final k in hotkeys) {
-      if (pressed.contains(k)) return true;
+  Set<PhysicalKeyboardKey> _resolvePhysicalHotkeyKeys() {
+    final settings = ref.read(localSettingsProvider).valueOrNull;
+    return ImmersiveSessionScreen.micHotkeyPhysicalKeys(settings?.micHotkey);
+  }
+
+  bool _isConfiguredHotkeyEvent(KeyEvent event) {
+    return _resolveHotkeyKeys().contains(event.logicalKey) ||
+        _resolvePhysicalHotkeyKeys().contains(event.physicalKey);
+  }
+
+  bool _isConfiguredHotkeyPressed() {
+    final logicalPressed = HardwareKeyboard.instance.logicalKeysPressed;
+    for (final key in _resolveHotkeyKeys()) {
+      if (logicalPressed.contains(key)) return true;
+    }
+    final physicalPressed = HardwareKeyboard.instance.physicalKeysPressed;
+    for (final key in _resolvePhysicalHotkeyKeys()) {
+      if (physicalPressed.contains(key)) return true;
     }
     return false;
   }
 
   bool _onHardwareKey(KeyEvent event) {
-    if (!_isPushToTalk || _isPaused) return false;
-    final hotkeys = _resolveHotkeyKeys();
-    final isCtrl = hotkeys.contains(event.logicalKey);
-    if (!isCtrl) return false;
+    if (_isPaused) return false;
+    if (!_isConfiguredHotkeyEvent(event)) return false;
 
     if (event is KeyUpEvent) {
-      _ctrlHeld = _isAnyCtrlPressed();
+      _ctrlHeld = _isConfiguredHotkeyPressed();
       if (_micControlMode == 'hold_ctrl' &&
           _recordingControlledByHoldCtrl &&
           _isRecording &&
           !_ctrlHeld) {
-        _onPttEnd(reason: 'hold_ctrl_release');
+        _onPttEnd(reason: 'hotkey_release');
         return true;
       }
-      return false;
+      return true;
     }
 
     if (event is! KeyDownEvent) return false;
-    if (_ctrlHeld) return false;
+    if (_ctrlHeld) return true;
     _ctrlHeld = true;
 
     if (_micControlMode == 'hold_ctrl') {
-      // Item 3：当录音并非由「按住热键」启动（例如自动开麦），
-      // 单击热键也应能立即结束发言。
       if (_isRecording && !_recordingControlledByHoldCtrl) {
         _onPttEnd(reason: 'hotkey_tap_end');
         return true;
       }
       if ((_isMyTurn || _handApprovedToSpeak) && !_isRecording) {
-        _onPttStart(startedFromHoldCtrl: true);
+        _onPttStart(startedFromHoldCtrl: _usesHoldToSpeak);
         return true;
       }
-      return false;
+      return true;
     }
 
     // 兼容历史状态，正常会话页不会再走到这里。
@@ -1548,7 +1576,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         if (_isMyTurn ||
             (normalizedCurrent.isNotEmpty &&
                 normalizedCurrent == normalizedHuman)) {
-          return '轮到你了：按住 Ctrl 或点击“讲话”开始';
+          return _readyToSpeakStatusText();
         }
         return _humanTurnWaitingPrompt();
       case 'human_speaking':
@@ -1691,8 +1719,62 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool get _debugSubtitleLogEnabled => kDebugMode;
 
   String get _micControlMode {
-    // 会话页运行时仅保留按住 Ctrl 说话，避免旧配置残留造成冲突。
-    return 'hold_ctrl';
+    final settings = ref.read(localSettingsProvider).valueOrNull;
+    return settings?.micControlMode ?? 'hold_ctrl';
+  }
+
+  String get _micActivationMode {
+    final settings = ref.read(localSettingsProvider).valueOrNull;
+    return settings?.micActivationMode ?? 'manual';
+  }
+
+  String get _micHotkeyLabel {
+    final settings = ref.read(localSettingsProvider).valueOrNull;
+    return micHotkeyLabel(settings?.micHotkey);
+  }
+
+  bool get _autoOpenMic => _micActivationMode == 'auto';
+
+  bool get _usesHoldToSpeak => _isPushToTalk && !_autoOpenMic;
+
+  String _readyToSpeakStatusText() {
+    final hotkey = _micHotkeyLabel;
+    if (_autoOpenMic) {
+      return '轮到你了：麦克风会自动开启，也可按 $hotkey 控制';
+    }
+    if (_isPushToTalk) {
+      return '轮到你了：按住 $hotkey 或点击“讲话”开始';
+    }
+    return '轮到你了：按 $hotkey 或点击“讲话”开始/结束';
+  }
+
+  void _cancelAutoMicStart() {
+    _autoMicStartTimer?.cancel();
+    _autoMicStartTimer = null;
+  }
+
+  void _scheduleAutoMicStart(
+      {Duration delay = const Duration(milliseconds: 260)}) {
+    _cancelAutoMicStart();
+    if (!_autoOpenMic || _isPaused || _isRecording || _micLocked) {
+      return;
+    }
+    if (!(_isMyTurn || _handApprovedToSpeak) || _hasStartedSpeechThisTurn) {
+      return;
+    }
+    _autoMicStartTimer = Timer(delay, () {
+      if (!mounted ||
+          !_autoOpenMic ||
+          _isPaused ||
+          _isRecording ||
+          _micLocked) {
+        return;
+      }
+      if (!(_isMyTurn || _handApprovedToSpeak) || _hasStartedSpeechThisTurn) {
+        return;
+      }
+      _onPttStart(startedFromHoldCtrl: false);
+    });
   }
 
   void _debugSubtitleLog({required String triggerRole, required String note}) {
@@ -2178,7 +2260,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _clearSubtitleBeforeSpeakerSwitch(
           speaker.isEmpty ? widget.humanName : speaker);
       // 需求20：暂停时不提示"请按住麦克风讲话"
-      _statusText = _isPaused ? '暂停中...' : '轮到你了：按住 Ctrl 或点击“讲话”开始';
+      _statusText = _isPaused ? '暂停中...' : _readyToSpeakStatusText();
       if (!_isPaused) {
         _glowController.repeat(reverse: true);
       }
@@ -2190,6 +2272,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     }
     _prepareUpcomingPipeline(
         reason: 'activate-human-turn', includeAsrWarmup: true);
+    _scheduleAutoMicStart();
   }
 
   void _handleAutoSkipReminder({String? reason}) {
@@ -2775,6 +2858,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             );
           }
 
+          if (isHuman && speaker == humanName && (_isMyTurn || _isRecording)) {
+            setState(() {
+              _currentSpeaker = speaker;
+            });
+            _buildParticipants();
+            return;
+          }
+
           _cancelTurnCountdown();
           _cancelMaxSpeechTimer();
           setState(() {
@@ -2788,7 +2879,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               _isThinking = false;
               _thinkingController.stop();
               // 需求20：暂停时不提示"请按住麦克风讲话"
-              _statusText = _isPaused ? '暂停中...' : '轮到你了：按住 Ctrl 或点击“讲话”开始';
+              _statusText = _isPaused ? '暂停中...' : _readyToSpeakStatusText();
               if (!_isPaused) {
                 _glowController.repeat(reverse: true);
                 _keyboardFocusNode.requestFocus();
@@ -2810,6 +2901,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             reason: 'turn-change:$speaker',
             includeAsrWarmup: !isHuman,
           );
+          if (isHuman && speaker == humanName) {
+            _scheduleAutoMicStart();
+          }
           _buildParticipants();
           // 确保 TTS 队列在角色切换后继续播放（修复跳过后无声音 bug）
           if (!_ttsPlaying && _ttsQueue.isNotEmpty) {
@@ -3209,6 +3303,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   // ── Push-to-Talk ────────────────────────────────────────────────────────────
 
   void _onPttStart({bool startedFromHoldCtrl = false}) {
+    _cancelAutoMicStart();
     if (!(_isMyTurn || _handApprovedToSpeak)) {
       if (_pendingHumanTurn) {
         _showStatusToast('老师正在给你留出发言窗口，等麦克风亮起后再开始');
@@ -3250,7 +3345,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _centerMessage = '';
       _sttPartialText = '';
       _lastNonEmptySttText = '';
-      // 需求四：用户按下 Ctrl/点击麦克风启动后，立即撤掉
+      // 需求四：用户按下热键/点击麦克风启动后，立即撤掉
       // "轮到你了，按住麦克风讲话"的残留提示，改成"正在聆听..."。
       _statusText = '正在听你说……';
     });
@@ -3299,6 +3394,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   void _onPttEnd({String reason = 'manual'}) {
     if (!_isRecording) return;
+    _cancelAutoMicStart();
     if (_isFinalizingSpeech) return; // 防止并发 finalize
     _isFinalizingSpeech = true;
     _isCompletingHumanTurn = true;
@@ -3926,7 +4022,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     if (_isPaused) {
       setState(() {
         _isPaused = false;
-        _statusText = _isMyTurn ? '轮到你了：按住 Ctrl 或点击“讲话”开始' : '讨论继续中……';
+        _statusText = _isMyTurn ? _readyToSpeakStatusText() : '讨论继续中……';
       });
       if (_isMyTurn) {
         _glowController.repeat(reverse: true);
@@ -3948,6 +4044,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _cancelMaxSpeechTimer();
       _speechFinalizeTimer?.cancel();
       _speechFinalizeTimer = null;
+      _cancelAutoMicStart();
       _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
       _glowController.stop();
       _thinkingController.stop();
@@ -3996,7 +4093,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }
 
   void _onKeyEvent(KeyEvent event) {
-    // 使用 HardwareKeyboard 全局处理 Ctrl 连击，避免重复触发。
+    // 使用 HardwareKeyboard 全局处理配置热键，避免重复触发。
   }
 
   @override
@@ -4013,6 +4110,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _ttsPumpGuardTimer?.cancel();
     _humanResponseWatchdogTimer?.cancel();
     _deferredAutoSkipTimer?.cancel();
+    _autoMicStartTimer?.cancel();
     _statusToastTimer?.cancel();
     _statusToastEntry?.remove();
     _ctrlHeld = false;
@@ -5657,6 +5755,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 child: GlassControlBar(
                   isMyTurn: _isMyTurn,
                   isPushToTalk: _isPushToTalk,
+                  autoOpenMic: _autoOpenMic,
+                  hotkeyLabel: _micHotkeyLabel,
                   isRecording: _isRecording,
                   onPttStart: _onPttStart,
                   onPttEnd: _onPttEnd,

@@ -8,6 +8,8 @@ import '../../theme/app_colors.dart';
 class GlassControlBar extends StatefulWidget {
   final bool isMyTurn;
   final bool isPushToTalk;
+  final bool autoOpenMic;
+  final String hotkeyLabel;
   final bool isRecording;
   final VoidCallback onPttStart;
   final VoidCallback onPttEnd;
@@ -20,6 +22,8 @@ class GlassControlBar extends StatefulWidget {
     super.key,
     required this.isMyTurn,
     required this.isPushToTalk,
+    required this.autoOpenMic,
+    required this.hotkeyLabel,
     required this.isRecording,
     required this.onPttStart,
     required this.onPttEnd,
@@ -83,8 +87,10 @@ class _GlassControlBarState extends State<GlassControlBar> {
         Flexible(
           child: Text(
             widget.isRecording
-                ? '正在录音... 松开 Ctrl 或点击结束按钮'
-                : '轮到你时按住 Ctrl 或点击“讲话”',
+                ? '正在录音... ${widget.isPushToTalk && !widget.autoOpenMic ? '松开' : '按'} ${widget.hotkeyLabel} 或点击结束按钮'
+                : widget.autoOpenMic
+                    ? '轮到你时会自动开启麦克风，也可按 ${widget.hotkeyLabel}'
+                    : '轮到你时按住 ${widget.hotkeyLabel} 或点击“讲话”',
             style: TextStyle(
               color: widget.isRecording
                   ? const Color(0xFF00FFCC)

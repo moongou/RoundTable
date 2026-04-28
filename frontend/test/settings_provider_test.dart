@@ -34,6 +34,7 @@ void main() {
     expect(settings.asrStreamingEnabled, isTrue);
     expect(settings.micActivationMode, 'manual');
     expect(settings.micControlMode, 'hold_ctrl');
+    expect(settings.micHotkey, 'right_alt');
   });
 
   test(
@@ -149,5 +150,24 @@ void main() {
     );
 
     expect(settings.ttsProvider, 'edge_tts');
+  });
+
+  test('resolveInitialLocalSettings normalizes invalid mic hotkey to right alt',
+      () {
+    final settings = resolveInitialLocalSettings(
+      serverUrl: 'http://localhost:8001',
+      storedLlmProvider: null,
+      storedAsrProvider: null,
+      storedTtsProvider: null,
+      hasStoredPushToTalk: true,
+      storedPushToTalk: true,
+      storedMicActivationMode: null,
+      storedMicControlMode: null,
+      storedMicHotkey: 'ctrl',
+      remoteConfig: null,
+    );
+
+    expect(settings.micHotkey, 'right_alt');
+    expect(micHotkeyLabel(settings.micHotkey), 'Right Option');
   });
 }
