@@ -368,6 +368,35 @@ class ApiClient {
     return List<Map<String, dynamic>>.from(data);
   }
 
+  /// 根据话题获取推荐思想家（1-3 名）
+  Future<List<Map<String, dynamic>>> recommendThinkers({
+    String? title,
+    String? description,
+    String? category,
+    List<String>? tags,
+    List<String>? guideQuestions,
+    List<String>? excludeIds,
+    int limit = 3,
+  }) async {
+    final response = await _dio.post(
+      '/api/v1/thinkers/recommend',
+      data: {
+        if (title != null) 'title': title,
+        if (description != null) 'description': description,
+        if (category != null) 'category': category,
+        if (tags != null) 'tags': tags,
+        if (guideQuestions != null) 'guide_questions': guideQuestions,
+        if (excludeIds != null) 'exclude_ids': excludeIds,
+        'limit': limit,
+      },
+    );
+    final data = response.data;
+    if (data is Map && data.containsKey('items')) {
+      return List<Map<String, dynamic>>.from(data['items']);
+    }
+    return [];
+  }
+
   /// 获取话题分类列表
   Future<List<Map<String, dynamic>>> getTopicCategories() async {
     final response = await _dio.get('/api/v1/topics/categories/');

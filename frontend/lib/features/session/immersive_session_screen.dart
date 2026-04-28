@@ -1576,6 +1576,21 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
   }
 
+  /// 在批量入队后强制触发一次预取（绕过 _prepareUpcomingPipeline 的 120ms
+  /// 去抖），保证开场多句一次性并行合成。
+  void _kickBatchPrefetch({
+    required List<({String text, String? voice})> items,
+  }) {
+    if (items.isEmpty) return;
+    _lastPrefetchAt = DateTime.now();
+    _scheduleBackgroundTask(() async {
+      await _ttsService.prefetchBatch(items, maxConcurrent: 3);
+    });
+    if (kDebugMode) {
+      debugPrint('[RuntimePipeline] kickBatchPrefetch items=${items.length}');
+    }
+  }
+
   void _prepareUpcomingPipeline({
     required String reason,
     bool includeAsrWarmup = false,
@@ -1587,7 +1602,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         now.difference(_lastPrefetchAt).inMilliseconds >= 120) {
       _lastPrefetchAt = now;
       _scheduleBackgroundTask(() async {
-        await _ttsService.prefetchBatch(upcoming, maxConcurrent: 2);
+        // 开场阶段最常出现"第二句字幕已显示但音频还在合成"导致的停顿。
+        // 提高并发度（2 → 3）后，老师的 1-3 句开场可以并行合成，显著缩短句间空白。
+        await _ttsService.prefetchBatch(upcoming, maxConcurrent: 3);
       });
     }
 
@@ -2627,6 +2644,16 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             for (final segment in queuedTtsSegments) {
               _enqueueTts(source: source, text: segment, voice: voice);
             }
+            // 批量入队后立即触发一次"全段并行预取"，规避逐句入队时
+            // 120ms debounce 导致只有第 1 句被预取的问题——这是开场
+            // "第二句字幕出来后停顿较长"的主要原因。
+            if (queuedTtsSegments.length > 1) {
+              _kickBatchPrefetch(
+                items: queuedTtsSegments
+                    .map((s) => (text: s, voice: voice))
+                    .toList(),
+              );
+            }
           }
 
           _buildParticipants();
@@ -2778,6 +2805,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               final voice = _resolveSpeakerVoice(source);
               for (final segment in queuedTtsSegments) {
                 _enqueueTts(source: source, text: segment, voice: voice);
+              }
+              if (queuedTtsSegments.length > 1) {
+                _kickBatchPrefetch(
+                  items: queuedTtsSegments
+                      .map((s) => (text: s, voice: voice))
+                      .toList(),
+                );
               }
             }
             _debugSubtitleLog(

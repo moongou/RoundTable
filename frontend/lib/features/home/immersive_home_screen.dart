@@ -1217,6 +1217,12 @@ class _WideLayoutState extends State<_WideLayout> {
             onThinkerToggled: widget.onThinkerToggled,
             selectedDomain: _selectedThinkerDomain,
             onDomainChanged: (d) => setState(() => _selectedThinkerDomain = d),
+            selectedTopic: widget.topics
+                .where((t) => t.id == widget.selectedTopicId)
+                .cast<Topic?>()
+                .firstWhere((_) => true, orElse: () => null),
+            isFreeTopic: widget.isFreeTopicMode,
+            freeTopicText: widget.freeTopicController.text,
           ),
         ),
       ],
@@ -1375,6 +1381,16 @@ class _NarrowLayout extends StatelessWidget {
               selectedIds: selectedThinkerIds,
               onToggled: onThinkerToggled,
             ),
+          ),
+          _ThinkerRecommendations(
+            selectedTopic: topics
+                .where((t) => t.id == selectedTopicId)
+                .cast<Topic?>()
+                .firstWhere((_) => true, orElse: () => null),
+            isFreeTopic: isFreeTopicMode,
+            freeTopicText: freeTopicController.text,
+            selectedThinkerIds: selectedThinkerIds,
+            onThinkerToggled: onThinkerToggled,
           ),
         ],
       ),
@@ -2448,6 +2464,9 @@ class _RightPanel extends StatelessWidget {
   final ValueChanged<String> onThinkerToggled;
   final String? selectedDomain;
   final ValueChanged<String?> onDomainChanged;
+  final Topic? selectedTopic;
+  final bool isFreeTopic;
+  final String freeTopicText;
 
   const _RightPanel({
     required this.thinkers,
@@ -2455,6 +2474,9 @@ class _RightPanel extends StatelessWidget {
     required this.onThinkerToggled,
     required this.selectedDomain,
     required this.onDomainChanged,
+    required this.selectedTopic,
+    required this.isFreeTopic,
+    required this.freeTopicText,
   });
 
   /// Collect unique domains from thinker data
@@ -2570,6 +2592,13 @@ class _RightPanel extends StatelessWidget {
                 onToggled: onThinkerToggled,
               ),
             ),
+          ),
+          _ThinkerRecommendations(
+            selectedTopic: selectedTopic,
+            isFreeTopic: isFreeTopic,
+            freeTopicText: freeTopicText,
+            selectedThinkerIds: selectedThinkerIds,
+            onThinkerToggled: onThinkerToggled,
           ),
         ],
       ),
@@ -3773,4 +3802,295 @@ class _AmbientOrbPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_AmbientOrbPainter old) => old.t != t;
+}
+
+// ─── Thinker Recommendations ─────────────────────────────────────────────────
+/// 当用户选定话题（或填写自由话题）后，调用后端推荐 API，
+/// 在思想家栏下方展示 1-3 名最契合的思想家。点击即等同于在主列表中选择。
+class _ThinkerRecommendations extends ConsumerStatefulWidget {
+  final Topic? selectedTopic;
+  final bool isFreeTopic;
+  final String freeTopicText;
+  final Set<String> selectedThinkerIds;
+  final ValueChanged<String> onThinkerToggled;
+
+  const _ThinkerRecommendations({
+    required this.selectedTopic,
+    required this.isFreeTopic,
+    required this.freeTopicText,
+    required this.selectedThinkerIds,
+    required this.onThinkerToggled,
+  });
+
+  @override
+  ConsumerState<_ThinkerRecommendations> createState() =>
+      _ThinkerRecommendationsState();
+}
+
+class _ThinkerRecommendationsState
+    extends ConsumerState<_ThinkerRecommendations> {
+  List<Map<String, dynamic>> _items = [];
+  bool _loading = false;
+  Timer? _debounce;
+  int _requestSeq = 0;
+  String _lastSignature = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _maybeFetch();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ThinkerRecommendations oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _maybeFetch();
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    super.dispose();
+  }
+
+  String _signature() {
+    if (widget.isFreeTopic) {
+      return 'free|${widget.freeTopicText.trim()}';
+    }
+    final t = widget.selectedTopic;
+    if (t == null) return '';
+    return 'topic|${t.id}|${t.title}|${t.category}';
+  }
+
+  void _maybeFetch() {
+    final sig = _signature();
+    if (sig == _lastSignature) return;
+    _lastSignature = sig;
+    _debounce?.cancel();
+    if (sig.isEmpty) {
+      if (_items.isNotEmpty || _loading) {
+        setState(() {
+          _items = [];
+          _loading = false;
+        });
+      }
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 280), _fetch);
+  }
+
+  Future<void> _fetch() async {
+    final mySeq = ++_requestSeq;
+    final api = ref.read(apiClientProvider);
+    final topic = widget.selectedTopic;
+    final isFree = widget.isFreeTopic;
+    final freeText = widget.freeTopicText.trim();
+
+    final String title;
+    final String description;
+    final String category;
+    final List<String> tags;
+    final List<String> guideQuestions;
+
+    if (isFree) {
+      title = freeText;
+      description = freeText;
+      category = 'spark';
+      tags = const [];
+      guideQuestions = const [];
+    } else if (topic != null) {
+      title = topic.title;
+      description = topic.description;
+      category = topic.category;
+      tags = topic.tags;
+      guideQuestions = topic.guideQuestions;
+    } else {
+      return;
+    }
+
+    if (title.isEmpty && description.isEmpty && category.isEmpty) return;
+
+    if (mounted) setState(() => _loading = true);
+    try {
+      final items = await api.recommendThinkers(
+        title: title,
+        description: description,
+        category: category,
+        tags: tags,
+        guideQuestions: guideQuestions,
+        limit: 3,
+      );
+      if (!mounted || mySeq != _requestSeq) return;
+      setState(() {
+        _items = items;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted || mySeq != _requestSeq) return;
+      setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_signature().isEmpty) return const SizedBox.shrink();
+    if (_items.isEmpty && !_loading) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      decoration: BoxDecoration(
+        color: _kNeonGold.withValues(alpha: 0.04),
+        border: Border(top: BorderSide(color: _kBorder)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.auto_awesome,
+                  size: 12, color: _kNeonGold.withValues(alpha: 0.85)),
+              const SizedBox(width: 4),
+              Text(
+                '推荐思想家',
+                style: TextStyle(
+                  color: _kNeonGold.withValues(alpha: 0.9),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1,
+                ),
+              ),
+              const SizedBox(width: 6),
+              if (_loading)
+                SizedBox(
+                  width: 10,
+                  height: 10,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.4,
+                    valueColor:
+                        AlwaysStoppedAnimation(_kNeonGold.withValues(alpha: 0.7)),
+                  ),
+                ),
+              const Spacer(),
+              Text(
+                '基于话题契合度',
+                style: TextStyle(
+                  color: _kTextSecondary.withValues(alpha: 0.55),
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: _items.map((it) {
+              final id = it['id'] as String? ?? '';
+              final selected = widget.selectedThinkerIds.contains(id);
+              final name = it['name'] as String? ?? id;
+              final avatar = it['avatar'] as String? ?? '🧠';
+              final domainCn = it['domain_cn'] as String? ?? '';
+              return _RecommendedThinkerChip(
+                avatar: avatar,
+                name: name,
+                domainCn: domainCn,
+                selected: selected,
+                onTap: () => widget.onThinkerToggled(id),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RecommendedThinkerChip extends StatefulWidget {
+  final String avatar;
+  final String name;
+  final String domainCn;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _RecommendedThinkerChip({
+    required this.avatar,
+    required this.name,
+    required this.domainCn,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  State<_RecommendedThinkerChip> createState() =>
+      _RecommendedThinkerChipState();
+}
+
+class _RecommendedThinkerChipState extends State<_RecommendedThinkerChip> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+          decoration: BoxDecoration(
+            color: widget.selected
+                ? _kNeonGold.withValues(alpha: 0.22)
+                : _hovered
+                    ? _kNeonGold.withValues(alpha: 0.10)
+                    : _kCard.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: widget.selected
+                  ? _kNeonGold
+                  : _kNeonGold.withValues(alpha: 0.55),
+              width: widget.selected ? 1.4 : 1,
+            ),
+            boxShadow: widget.selected
+                ? [
+                    BoxShadow(
+                        color: _kNeonGold.withValues(alpha: 0.30),
+                        blurRadius: 6),
+                  ]
+                : null,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.star_rounded,
+                  size: 12, color: _kNeonGold.withValues(alpha: 0.85)),
+              const SizedBox(width: 3),
+              Text(widget.avatar, style: const TextStyle(fontSize: 12)),
+              const SizedBox(width: 4),
+              Text(
+                widget.name,
+                style: TextStyle(
+                  color: widget.selected ? _kNeonGold : _kTextPrimary,
+                  fontSize: 11,
+                  fontWeight: widget.selected
+                      ? FontWeight.w700
+                      : FontWeight.w500,
+                ),
+              ),
+              if (widget.domainCn.isNotEmpty) ...[
+                const SizedBox(width: 4),
+                Text(
+                  '· ${widget.domainCn}',
+                  style: TextStyle(
+                    color: _kTextSecondary.withValues(alpha: 0.7),
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
