@@ -165,7 +165,7 @@ VOICE_SERVICE_META = {
         "type": "asr",
         "needs_api_key": False,
         "health_path": "/",
-        # HTTP 模式：将 url 改为 http://localhost:8000（需先启动 FunASR HTTP server）
+        # HTTP 模式：将 url 改为 http://localhost:10096（需先启动 FunASR HTTP server）
         # WS  模式：ws://localhost:10095（当前运行中）
     },
     "openai_whisper": {
@@ -347,9 +347,7 @@ class Settings(BaseSettings):
     asr_url: str = "ws://localhost:10095"  # deprecated, use funasr_url
     capswriter_url: str = "ws://localhost:6016"
     vosk_url: str = "http://localhost:6702"
-    funasr_url: str = (
-        "ws://localhost:10095"  # WS 模式（当前运行）；HTTP 模式改为 http://localhost:8000
-    )
+    funasr_url: str = "ws://localhost:10095"  # WS 模式；HTTP 模式改为 http://localhost:10096
     openai_whisper_api_key: str = ""  # uses openai_api_key if blank
     openai_whisper_base_url: str = "https://api.openai.com/v1"
     openai_whisper_model: str = "whisper-1"

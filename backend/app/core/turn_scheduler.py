@@ -39,10 +39,10 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 0.1 首轮阶段（老师开场 + 每位同学首次发言）禁止“上一位同学说得对”等互引式表达
 1. **人类学生是讨论的绝对核心**（占讨论重要性30%-50%），所有讨论应以人类学生的观点为中心展开
 2. 人类学生每次发言后，老师应立即点评（总结、补充提问或引导深入）
-3. 一场讨论里，老师一般安排人类学生发言3到6次；如果人类学生是通过举手获得发言，也计入这3到6次
+3. 一场讨论里，老师一般安排人类学生发言4到8次；如果人类学生是通过举手获得发言，也计入这4到8次
 3.1 老师开场后，通常先让2到3位非人类参与者铺垫，再开始第一次点名人类学生发言，帮助其自然融入
 3.2 在达到建议上限前，人类学生的频率可以稍高；达到建议上限后，除非老师明确点名或人类学生主动举手，一般不要继续主动安排
-3.3 如果人类学生已经多次主动举手，说明其参与意愿很强，此时可以放宽发言次数与收尾时机，不必死守原先上限
+3.3 如果人类学生已经多次主动举手，说明其参与意愿很强，此时可以放宽到5到10次甚至更多发言，并相应推迟收尾时机
 4. 不要让同一个人连续发言两次（除老师外）
 5. 优先让还没发言的人先说
 6. 人类学生通常至少间隔2位非人类发言者后可再次安排，但如果讨论需要人类回应则可提前
@@ -147,22 +147,29 @@ def parse_speaker_designation(text: str, participant_names: list[str]) -> Option
     sorted_aliases = sorted(alias_map.items(), key=lambda item: len(item[0]), reverse=True)
     for alias, canonical_name in sorted_aliases:
         escaped_alias = re.escape(alias)
+        # 允许"请/想问问/邀请"等动词与名字之间出现最多 12 个非句末标点的修饰字符，
+        # 例如"想问问一直没说话的豆苗同学"。注意 [^。！？\n] 排除句末标点防止跨句。
+        invite_filler = r"[^。！？\n]{0,12}"
         patterns = [
             rf'请\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(发言|先说|来谈|谈谈|先来|先讲|先分享)?',
-            rf'接下来\s*请\s*{escaped_alias}(?:同学|老师|先生|女士)?',
-            rf'下一位\s*(请)?\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'请\s*(?:一下)?\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?\s*(发言|先说|来谈|谈谈|先来|先讲|先分享)',
+            rf'接下来\s*请\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'下一位\s*(请)?\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?',
             rf'轮到\s*{escaped_alias}(?:同学|老师|先生|女士)?',
-            rf'(想请|也请|不如请|要不请|正式邀请|邀请|想问问|问问)\s*(?:一下)?\s*(?:我们的)?(?:思想家)?\s*{escaped_alias}(?:同学|老师|先生|女士)?',
-            rf'{escaped_alias}(?:同学|老师|先生|女士)?[，,:：]\s*(您|你)(怎么看|觉得|认为|来说|来谈|先说|先来|有没有|会不会|能不能|要不要|想不想|愿不愿意|是否|能否)',
+            rf'(想请|也请|不如请|要不请|正式邀请|邀请|想问问|问问|想听听|听听)\s*(?:一下)?\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?',
+            # 名字 + 标点 + 至多 30 个非句末字符 + 第二人称问句（容许"豆苗同学，作为...，你听了..."）
+            rf'{escaped_alias}(?:同学|老师|先生|女士)?[，,:：]\s*[^。！？\n]{{0,30}}(您|你)(怎么看|觉得|认为|来说|来谈|先说|先来|听了|听到|看了|想了想|有没有|会不会|能不能|要不要|想不想|愿不愿意|是否|能否|有什么|说说|讲讲)',
+            rf'{escaped_alias}(?:同学|老师|先生|女士)?[，,:：]?\s*(您|你)(怎么看|觉得|认为|来说|来谈|先说|先来|听了|有没有|会不会|能不能|要不要|想不想|愿不愿意|是否|能否)',
             rf'{escaped_alias}\S{{0,3}}[，,]?\s*你(怎么看|觉得|认为|来说|来谈|先说)',
             rf'{escaped_alias}\S{{0,3}}[，,]?\s*你(先来(?:开个头|说说|讲讲|聊聊|谈谈)?|先开个头|先说说|先讲讲|先聊聊|先谈谈)',
             rf'{escaped_alias}\S{{0,3}}[，,]?\s*(你)?(有没有|会不会|能不能|要不要|想不想|愿不愿意|是否|能否)',
             rf'(想请|也请|不如请|要不请)?\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(也)?(说说|讲讲|谈谈|分享|回应|补充)',
             rf'{escaped_alias}(?:同学|老师|先生|女士)?[，,]?\s*(也)?(说说|讲讲|谈谈|分享|回应|补充)\s*(吧|一下)?',
-            rf'(我)?(也)?想请\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(再)?(说说|讲讲|谈谈|分享|回应|补充)\s*(一下)?',
-            rf'(我们)?来?听听\s*{escaped_alias}(?:同学|老师|先生|女士)?',
-            rf'想听听?\s*{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'(我)?(也)?想请\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?\s*(再)?(说说|讲讲|谈谈|分享|回应|补充)\s*(一下)?',
+            rf'(我们)?来?听听\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?',
+            rf'想听听?\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?',
             rf'由\s*{escaped_alias}(?:同学|老师|先生|女士)?\s*(先)?发言',
+            rf'那(?:咱们|我们)?\s*(?:就|先)?\s*(?:有请|请)\s*{invite_filler}{escaped_alias}(?:同学|老师|先生|女士)?',
         ]
         for pattern in patterns:
             if re.search(pattern, normalized_text):
@@ -183,7 +190,9 @@ def _exclude_recent_speakers(
             recent_speakers.add(source)
 
     candidates = [
-        name for name in all_participant_names if name not in recent_speakers or name == moderator_name
+        name
+        for name in all_participant_names
+        if name not in recent_speakers or name == moderator_name
     ]
     return candidates if candidates else list(all_participant_names)
 
@@ -198,6 +207,7 @@ def create_discussion_team(
     on_designation_lifecycle: Optional[Callable[[str, Optional[str]], None]] = None,
     display_name_to_agent: Optional[dict[str, str]] = None,
     get_human_engagement_level: Optional[Callable[[], int]] = None,
+    thinker_agent_names: Optional[list[str]] = None,
 ) -> SelectorGroupChat:
     """创建圆桌讨论团队。"""
     if max_turns is None:
@@ -217,8 +227,8 @@ def create_discussion_team(
     }
     engagement_target_extension_by_level = {
         0: 0,
-        1: 3,
-        2: 6,
+        1: 2,
+        2: 4,
     }
     max_engagement_level = max(engagement_max_turn_extension_by_level)
     max_turns = nominal_max_turns + closing_turn_buffer
@@ -232,25 +242,24 @@ def create_discussion_team(
     _display_name_to_agent = display_name_to_agent or {}
     _display_names = list(_display_name_to_agent.keys())
 
-    termination = MaxMessageTermination(max_turns) | TextMentionTermination(
-        "讨论结束"
-    )
+    termination = MaxMessageTermination(max_turns) | TextMentionTermination("讨论结束")
 
     first_closing_trigger_turn = max(5, nominal_max_turns - 5)
     second_closing_trigger_turn = max(first_closing_trigger_turn + 1, nominal_max_turns - 2)
 
     human_name_set = {h.name for h in humans}
+    thinker_name_set = set(thinker_agent_names or [])
     preferred_human_turn_target = 0
     human_turn_min_target = 0
     human_turn_soft_cap = 0
     first_human_invite_after_turns = 2
     human_reinvite_gap = 3
     if humans:
-        human_turn_min_target = 3
-        human_turn_soft_cap = 6
+        human_turn_min_target = 5
+        human_turn_soft_cap = 9
         preferred_human_turn_target = max(
             human_turn_min_target,
-            min(human_turn_soft_cap, round(nominal_max_turns / 6)),
+            min(human_turn_soft_cap, round(nominal_max_turns / 4)),
         )
 
     def moderator_led_selector(thread: list) -> Optional[str]:
@@ -281,10 +290,28 @@ def create_discussion_team(
         engagement_level = 0
         if get_human_engagement_level is not None:
             try:
-                engagement_level = max(0, min(max_engagement_level, int(get_human_engagement_level())))
+                engagement_level = max(
+                    0, min(max_engagement_level, int(get_human_engagement_level()))
+                )
             except Exception:
                 engagement_level = 0
         is_opening_round = last_source == moderator.name and not non_moderator_msgs
+
+        # 思想家发言计数（嘉宾必须被点名至少一次，否则视为未完成讨论）
+        thinker_turn_count = sum(
+            1 for m in participant_msgs if getattr(m, "source", None) in thinker_name_set
+        )
+        unspoken_thinkers = [
+            n for n in thinker_name_set
+            if not any(getattr(m, "source", None) == n for m in participant_msgs)
+        ]
+        spoken_sources = {getattr(m, "source", None) for m in participant_msgs}
+        unspoken_non_human = [
+            n for n in all_names
+            if n not in spoken_sources
+            and n != moderator.name
+            and n not in human_name_set
+        ]
 
         def turns_since_moderator_marker(marker: str) -> int | None:
             turns = 0
@@ -304,9 +331,15 @@ def create_discussion_team(
         effective_second_closing_trigger_turn = second_closing_trigger_turn
         effective_preferred_human_turn_target = preferred_human_turn_target
         effective_human_turn_soft_cap = human_turn_soft_cap
-        effective_first_closing_trigger_turn += engagement_closing_extension_by_level[engagement_level]
-        effective_second_closing_trigger_turn += engagement_closing_extension_by_level[engagement_level]
-        effective_preferred_human_turn_target += engagement_target_extension_by_level[engagement_level]
+        effective_first_closing_trigger_turn += engagement_closing_extension_by_level[
+            engagement_level
+        ]
+        effective_second_closing_trigger_turn += engagement_closing_extension_by_level[
+            engagement_level
+        ]
+        effective_preferred_human_turn_target += engagement_target_extension_by_level[
+            engagement_level
+        ]
         effective_human_turn_soft_cap += engagement_target_extension_by_level[engagement_level]
 
         # ── 优先级1：检查全局指定发言者 ──
@@ -366,31 +399,79 @@ def create_discussion_team(
             )
             return moderator.name
 
+        # ── 优先级2.3：思想家嘉宾必须被点名至少一次 ──
+        # 在已经热身（非首轮且至少有 4 条非主持人发言）后，如果思想家还没说话，
+        # 把老师拉回到邀请位，由老师显式邀请思想家发言。
+        if (
+            unspoken_thinkers
+            and len(non_moderator_msgs) >= 4
+            and last_source != moderator.name
+            and last_source not in thinker_name_set
+        ):
+            logger.info(
+                "[TurnScheduler] 思想家尚未发言，安排老师邀请: %s", unspoken_thinkers
+            )
+            return moderator.name
+
+        # 收尾门槛：在以下条件全部满足之前，绝不允许调度器主动触发收尾
+        #   1) 真人学生发言已达到最低预算 (human_turn_min_target)
+        #   2) 思想家嘉宾至少发言过 1 次
+        #   3) 每位虚拟同学/思想家至少发言过 1 次
+        closing_preconditions_ok = (
+            (not human_name_set or human_turn_count >= human_turn_min_target)
+            and not unspoken_thinkers
+            and not unspoken_non_human
+        )
+
         # ── 优先级2.5：接近收尾时，优先把老师拉回到征询/总结位 ──
         if (
-            len(participant_msgs) >= effective_first_closing_trigger_turn
+            closing_preconditions_ok
+            and len(participant_msgs) >= effective_first_closing_trigger_turn
             and first_closing_seen is None
             and last_source != moderator.name
         ):
             logger.info("[TurnScheduler] 接近收尾，安排老师进行第一次收尾征询")
             return moderator.name
 
+        # 第二次收尾必须距第一次收尾至少有 2 条非主持人实质发言，避免「秒收尾」。
         if (
-            len(participant_msgs) >= effective_second_closing_trigger_turn
+            closing_preconditions_ok
+            and len(participant_msgs) >= effective_second_closing_trigger_turn
             and first_closing_seen is not None
-            and first_closing_seen >= 1
+            and first_closing_seen >= 2
             and second_closing_seen is None
             and last_source != moderator.name
         ):
             logger.info("[TurnScheduler] 接近收尾，安排老师进行第二次收尾征询")
             return moderator.name
 
+        # 若主持人在收尾门槛未达成时仍发出了收尾标记，需要拉回非主持人继续讨论
+        if (
+            not closing_preconditions_ok
+            and first_closing_seen == 0  # 老师上一条就是第一次收尾
+            and last_source == moderator.name
+        ):
+            # 优先邀请尚未发言的思想家或虚拟同学，其次再回到真人
+            for cand in unspoken_thinkers + unspoken_non_human:
+                logger.info("[TurnScheduler] 收尾门槛未达成，转向未发言者: %s", cand)
+                return cand
+            if human_name_set and human_turn_count < human_turn_min_target:
+                hn = next((n for n in all_names if n in human_name_set), None)
+                if hn:
+                    logger.info(
+                        "[TurnScheduler] 收尾门槛未达成，回邀真人学生: %s (%s/%s)",
+                        hn, human_turn_count, human_turn_min_target,
+                    )
+                    return hn
+
         # ── 优先级3：只解析“最新一条”老师/用户发言中的点名，避免旧消息误触发 ──
         latest_msg = participant_msgs[-1] if participant_msgs else None
         latest_source = getattr(latest_msg, "source", None) if latest_msg else None
-        latest_content = str(
-            getattr(latest_msg, "content", "") or getattr(latest_msg, "messages", "")
-        ) if latest_msg else ""
+        latest_content = (
+            str(getattr(latest_msg, "content", "") or getattr(latest_msg, "messages", ""))
+            if latest_msg
+            else ""
+        )
         if latest_content and (latest_source == moderator.name or latest_source in human_name_set):
             # 优先使用 display names 解析点名（moderator 发言中使用的是 display names）
             next_display = None
@@ -428,16 +509,22 @@ def create_discussion_team(
                 if len(non_moderator_msgs) >= first_human_invite_after_turns:
                     first_human = next((n for n in all_names if n in human_name_set), None)
                     if first_human:
-                        logger.info("[TurnScheduler] 老师已铺垫，优先邀请真人学生发言: %s", first_human)
+                        logger.info(
+                            "[TurnScheduler] 老师已铺垫，优先邀请真人学生发言: %s", first_human
+                        )
                         return first_human
                 warmup_candidates = [
                     n
-                    for n in _exclude_recent_speakers(thread, all_names, moderator_name=moderator.name)
+                    for n in _exclude_recent_speakers(
+                        thread, all_names, moderator_name=moderator.name
+                    )
                     if n not in human_name_set and n != moderator.name
                 ]
                 if warmup_candidates:
                     selected = warmup_candidates[0]
-                    logger.info("[TurnScheduler] 真人首邀时机未到，继续由非人类参与者铺垫: %s", selected)
+                    logger.info(
+                        "[TurnScheduler] 真人首邀时机未到，继续由非人类参与者铺垫: %s", selected
+                    )
                     return selected
 
             if latest_source == moderator.name and human_reinvite_due:

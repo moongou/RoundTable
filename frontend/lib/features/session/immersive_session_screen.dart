@@ -3039,7 +3039,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           unawaited(_generateGoldenQuotes());
         }
         if (shouldGenerateHumanReview) {
-          unawaited(_generateHumanReview());
+          // 等老师播完“讨论结束”这句 TTS 后再弹出点评卡（强制 3s 延迟），
+          // 避免两路 TTS 同时朗读、字幕叠加。
+          unawaited(() async {
+            await Future.delayed(const Duration(milliseconds: 3000));
+            if (!mounted) return;
+            if (_lastErrorMessage != null) return;
+            await _generateHumanReview();
+          }());
         }
         break;
       case WsEventType.interrupt:
@@ -4819,8 +4826,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final size = MediaQuery.of(context).size;
     final showEndingQuotesOverlay = _mountEndingQuotesOverlay;
     final tableRadius = min(size.width, size.height) * 0.18;
-    // 需求五：字幕区宽度 +12%（0.70 -> 0.784）。
-    final subtitleWidth = size.width * 0.784;
+    // 需求五：字幕区宽度允许达到 85%，居中显示。
+    final subtitleWidth = size.width * 0.85;
 
     // 需求15：圆桌整体向右移动 100px，左侧留出金句展示区
     final tableCenterX = size.width / 2 + 100;
@@ -4828,6 +4835,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     // 左侧金句区宽度（从屏幕最左到圆桌左边缘减一点间距）
     final quoteAreaRight = tableCenterX - tableRadius - 60;
     final quoteAreaWidth = max(0.0, quoteAreaRight - 24);
+    // 需求：老师点评卡比金句侧栏更窄，避免遮挡圆桌/角色图标。
+    // 右边缘相对参与者圆环再退 40px，宽度上限 360。
+    final reviewCardRightLimit = tableCenterX - (tableRadius + 80) - 40;
+    final reviewCardWidth =
+        max(0.0, min(360.0, reviewCardRightLimit - 24)).toDouble();
+    // 卡片高度也压缩，整体不超过屏幕的 56%，底部留白避免压到底部按钮。
+    final reviewCardHeight = min(size.height * 0.56, 460.0);
 
     _particles ??= CandleParticle.generate(
       areaWidth: size.width,
@@ -4871,17 +4885,35 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     // 非用户回合但有发言者：举手可用
     // 讨论已结束则置灰不可交互
     final showActionButtons = !_discussionEnded;
+    // 需求：根据窗口下沿可用空间，自适应字幕字号 / 行距 / 距底距离。
+    // 圆桌底沿到屏幕底沿之间的可用区域 = h/2 - tableRadius
+    final subtitleAvailable = size.height / 2 - tableRadius;
+    // 极端窄窗时下调字号
+    final double subtitleFontSize = subtitleAvailable < 170
+        ? 16.0
+        : subtitleAvailable < 220
+            ? 18.0
+            : 22.0;
     final subtitleLineCount = _estimateSubtitleLineCount(
       context,
       '$_centerSpeaker：$_centerMessage',
       maxWidth: subtitleWidth - 80,
-      style: const TextStyle(fontSize: 20, height: 1.9),
+      style: TextStyle(fontSize: subtitleFontSize, height: 1.9),
       maxLines: 3,
     );
-    // 根据最新需求，字幕整体再向下移动约 20px。
-    final subtitleBottom = subtitleLineCount <= 1 ? 36.0 : 40.0;
-    // 需求10：两行行距 +10px（通过 TextStyle.height 增加）
-    final subtitleLineHeight = subtitleLineCount <= 1 ? 1.7 : 1.9;
+    // 需求：当字幕达到 3 行时，把首行向下移动约 30px，避免遮挡圆桌人物图案。
+    // 实现：减少 subtitleBottom（即整体下移），由文字 bottomCenter 对齐自然把首行下移。
+    final double subtitleBottom = subtitleLineCount >= 3
+        ? 10.0
+        : subtitleLineCount == 2
+            ? 40.0
+            : 36.0;
+    // 行距：3 行时压紧，避免向上溢出
+    final subtitleLineHeight = subtitleLineCount >= 3
+        ? 1.55
+        : subtitleLineCount == 2
+            ? 1.8
+            : 1.7;
     // 需求19：若字幕超过 2 行，按 page 自动翻页显示
     _maybeAdvanceSubtitlePage(
       fullText: '$_centerSpeaker：$_centerMessage',
@@ -4904,28 +4936,35 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                     BookshelfPainter(lightIntensity: _isMyTurn ? 1.0 : 0.6),
               ),
 
-              // ── 需求15：左侧金句区（暗色虚线分隔）──
-              if (quoteAreaWidth > 80 &&
-                  ((!_discussionEnded && _goldenQuotes.isNotEmpty) ||
-                      (_discussionEnded &&
-                          (_humanReview.isNotEmpty ||
-                              _isGeneratingHumanReview))))
+              // ── 需求15：左侧金句区（暗色虚线分隔）；讨论结束后切换为更紧凑的老师点评卡 ──
+              if (!_discussionEnded &&
+                  quoteAreaWidth > 80 &&
+                  _goldenQuotes.isNotEmpty)
                 Positioned(
                   left: 24,
                   top: 80,
                   width: quoteAreaWidth,
                   height: size.height - 160,
-                  child: _discussionEnded
-                      ? _PostDiscussionReviewCard(
-                          review: _humanReview,
-                          isLoading: _isGeneratingHumanReview,
-                          isMuted: _humanReviewMuted,
-                          onToggleMute: _toggleHumanReviewMute,
-                        )
-                      : _QuoteSidebar(
-                          width: quoteAreaWidth,
-                          quotes: _goldenQuotes,
-                        ),
+                  child: _QuoteSidebar(
+                    width: quoteAreaWidth,
+                    quotes: _goldenQuotes,
+                  ),
+                ),
+              if (_discussionEnded &&
+                  reviewCardWidth > 200 &&
+                  (_humanReview.isNotEmpty || _isGeneratingHumanReview))
+                Positioned(
+                  left: 24,
+                  // 垂直居中放置，避免顶到顶部话题区或底部按钮区
+                  top: max(80.0, (size.height - reviewCardHeight) / 2),
+                  width: reviewCardWidth,
+                  height: reviewCardHeight,
+                  child: _PostDiscussionReviewCard(
+                    review: _humanReview,
+                    isLoading: _isGeneratingHumanReview,
+                    isMuted: _humanReviewMuted,
+                    onToggleMute: _toggleHumanReviewMute,
+                  ),
                 ),
 
               // ── 圆桌（左移至 1/3 处）──
@@ -5263,7 +5302,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                                 text: '$_centerSpeaker：',
                                 style: TextStyle(
                                   color: const Color(0xFF4FC3F7),
-                                  fontSize: 22,
+                                  fontSize: subtitleFontSize,
                                   fontWeight: FontWeight.bold,
                                   height: subtitleLineHeight,
                                   // 需求5：去掉黑色背景与大范围黑影，仅保留极细描边保持可读
@@ -5280,7 +5319,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                                 text: _displayedSubtitleMessage,
                                 style: TextStyle(
                                   color: Colors.white,
-                                  fontSize: 22,
+                                  fontSize: subtitleFontSize,
                                   height: subtitleLineHeight,
                                   shadows: [
                                     Shadow(
@@ -6797,7 +6836,7 @@ class _PostDiscussionReviewCard extends StatelessWidget {
         ],
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(22, 20, 22, 22),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -6812,18 +6851,18 @@ class _PostDiscussionReviewCard extends StatelessWidget {
                         '老师评语',
                         style: TextStyle(
                           color: const Color(0xFFFFE8B5).withValues(alpha: 0.9),
-                          fontSize: 11.5,
+                          fontSize: 10.5,
                           fontWeight: FontWeight.w700,
-                          letterSpacing: 2.4,
+                          letterSpacing: 2.0,
                         ),
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 4),
                       Text(
                         '讨论结束后，留给真人参与者的一段会后回声。',
                         style: GoogleFonts.notoSerifSc(
                           color: Colors.white.withValues(alpha: 0.56),
-                          fontSize: 10.5,
-                          height: 1.6,
+                          fontSize: 9.5,
+                          height: 1.5,
                         ),
                       ),
                     ],
@@ -6876,7 +6915,7 @@ class _PostDiscussionReviewCard extends StatelessWidget {
                   ),
               ],
             ),
-            const SizedBox(height: 22),
+            const SizedBox(height: 14),
             Expanded(
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -6885,23 +6924,25 @@ class _PostDiscussionReviewCard extends StatelessWidget {
                     '“',
                     style: TextStyle(
                       color: const Color(0xFFF4D38B),
-                      fontSize: 52,
+                      fontSize: 38,
                       fontWeight: FontWeight.w700,
                       height: 0.8,
                     ),
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: Text(
-                        displayText,
-                        style: GoogleFonts.notoSerifSc(
-                          color: const Color(0xFFF9F6F0)
-                              .withValues(alpha: isLoading ? 0.72 : 1.0),
-                          fontSize: 23,
-                          height: 1.95,
-                          fontWeight: FontWeight.w600,
+                      padding: const EdgeInsets.only(top: 6),
+                      child: SingleChildScrollView(
+                        child: Text(
+                          displayText,
+                          style: GoogleFonts.notoSerifSc(
+                            color: const Color(0xFFF9F6F0)
+                                .withValues(alpha: isLoading ? 0.72 : 1.0),
+                            fontSize: 17,
+                            height: 1.7,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
                       ),
                     ),

@@ -403,6 +403,67 @@ class FloorManager:
                     r"有同学\1",
                     text,
                 )
+
+        # ── 规则 C：呼语式错认（critical） ─────────────────────────────────
+        # 老师/同学常见错把上一位发言者的内容夸到另一位身上，例如：
+        #   "豆苗同学你讲得太形象了"（实际上一位是小爱）
+        #   "豆苗同学问得太好了！'一会儿'到底有多长？"（实际是小疑问的）
+        #   "小爱你这段话说得太精彩了！你刚才用'妈妈买牛奶顺便买零食'..."
+        # （实际上一位是小和）
+        # 这里不依赖名字是否完全没说过，而是只看“最近真正的发言者”。
+        # 如果文本里以 X 作为称呼对象做了直接表扬/复述，但 X != last_display
+        # 也 != 当前发言者自己，则把 X 改写成 last_display。
+        compliment_verbs = (
+            r"讲得?(?:太|真|特别|非常|挺|很)"
+            r"|说得?(?:太|真|特别|非常|挺|很)"
+            r"|问得?(?:太|真|特别|非常|挺|很|好)"
+            r"|答得?(?:太|真|特别|非常|挺|很|好)"
+            r"|想得?(?:太|真|特别|非常|挺|很|好)"
+            r"|提得?(?:太|真|特别|非常|挺|很|好)"
+            r"|分析得?(?:太|真|特别|非常|挺|很|好)"
+            r"|说得?(?:对|好|妙|棒|精彩)"
+            r"|讲得?(?:好|妙|棒|精彩)"
+            r"|问得?(?:好|妙|棒|精彩|到点子上)"
+            r"|这段话(?:说|讲|问)得"
+            r"|这话(?:说|讲|问)得"
+            r"|这个问题问得?"
+            r"|这个(?:比喻|说法|想法|观点|例子|问题|疑问)(?:真|太|特别)"
+            r"|你刚才(?:用|说|讲|提|问)"
+            r"|你提出的"
+            r"|你这话"
+            r"|你这个"
+            r"|你帮大家"
+            r"|你不仅"
+            r"|你点(?:出|到)"
+        )
+        for name in display_names:
+            if name == current_display or name == last_display:
+                continue
+            text = re.sub(
+                rf"{re.escape(name)}(同学|先生)?[，,:：]?\s*(你?)(?P<verb>{compliment_verbs})",
+                lambda m, _ld=last_display: f"{_ld}{m.group(1) or '同学'}，你{m.group('verb')}",
+                text,
+            )
+            # "X你这段话/这话/这次..." 单独再保险一次
+            text = re.sub(
+                rf"{re.escape(name)}(?:同学|先生)?\s*你这(段话|次|句|个)",
+                rf"{last_display}，你这\1",
+                text,
+            )
+
+        # ── 规则 D：句首呼语+赞叹/感叹兜底 ────────────────────────────────
+        # 模式："{X}{同学/先生}?[，,]?\s*(?:你这|你的|你刚才的)?(?:这|那)?(问题|说法|比喻|想法|观点|例子|疑问)"
+        # 当 X != last_display 且 X != current_display 时，强制改写为 last_display。
+        for name in display_names:
+            if name == current_display or name == last_display:
+                continue
+            text = re.sub(
+                rf"^{re.escape(name)}(同学|先生)?[，,]?\s*(?:你)?(这|那)?(?:个|段|次|句)?\s*(问题|说法|比喻|想法|观点|例子|疑问|答案|思路|表述)",
+                rf"{last_display}\1，你这个\3",
+                text,
+                flags=re.MULTILINE,
+            )
+
         text = re.sub(r"\s{2,}", " ", text).strip()
         text = re.sub(r"^[，,:：\s]+", "", text)
         return text

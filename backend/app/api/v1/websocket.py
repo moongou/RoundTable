@@ -431,6 +431,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             on_designation_lifecycle=on_designation_lifecycle,
             display_name_to_agent=display_name_to_agent,
             get_human_engagement_level=get_human_engagement_level,
+            thinker_agent_names=[a.name for a in thinker_agents],
         )
 
         # 创建安全过滤器

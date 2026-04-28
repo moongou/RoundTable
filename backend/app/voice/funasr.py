@@ -1,8 +1,8 @@
 """FunASR ASR 提供商
 
 通过本地的 FunASR 服务提供语音识别：
-  - HTTP API:    http://localhost:8000/recognition  (默认)
-  - WebSocket:   ws://localhost:10095              (将 base_url 设为 ws:// 前缀启用)
+    - WebSocket:   ws://localhost:10095              (默认)
+    - HTTP API:    http://localhost:10096/recognition (将 base_url 设为 http:// 前缀启用)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class FunASRProvider(ASRProvider):
     """FunASR ASR 提供商，通过本地 FunASR 服务进行语音识别。"""
 
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "ws://localhost:10095"):
         self.base_url = base_url.rstrip("/")
 
     async def transcribe(self, audio_data: bytes, format: str = "wav") -> str:
@@ -81,8 +81,7 @@ class FunASRProvider(ASRProvider):
         except httpx.HTTPStatusError as e:
             logger.error(f"FunASR HTTP 错误: {e.response.status_code} - {e.response.text[:200]}")
             raise RuntimeError(
-                f"FunASR 服务返回错误 {e.response.status_code}。"
-                f"请检查 FunASR 日志确认服务状态。"
+                f"FunASR 服务返回错误 {e.response.status_code}。请检查 FunASR 日志确认服务状态。"
             ) from e
         except Exception as e:
             logger.error(f"FunASR 识别异常: {e}")
@@ -171,13 +170,13 @@ class FunASRProvider(ASRProvider):
             if not shutil.which("ffmpeg"):
                 raise ValueError(
                     "FunASR WebSocket 收到压缩音频，且未安装 ffmpeg，无法转码。"
-                    "请安装 ffmpeg 或将 funasr_url 设为 HTTP 地址（http://localhost:8000）使用批量转录模式。"
+                    "请安装 ffmpeg 或将 funasr_url 设为 HTTP 地址（http://localhost:10096）使用批量转录模式。"
                 )
             return self._convert_to_pcm_with_ffmpeg(audio_data, fmt)
 
         raise ValueError(
             "FunASR WebSocket 模式仅支持 PCM/WAV 输入。"
-            "当前为非 PCM 音频，请改用 HTTP FunASR (http://localhost:8000) 或安装 ffmpeg 进行自动转码。"
+            "当前为非 PCM 音频，请改用 HTTP FunASR (http://localhost:10096) 或安装 ffmpeg 进行自动转码。"
         )
 
     def _convert_to_pcm_with_ffmpeg(self, audio_data: bytes, src_format: str) -> tuple[bytes, int]:

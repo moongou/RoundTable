@@ -20,6 +20,10 @@ from app.voice.standalone_ws_asr import StandaloneWsAsrProvider
 logger = logging.getLogger(__name__)
 
 
+def _local_default_url(provider_id: str, fallback: str = "") -> str:
+    return LOCAL_SERVICE_DEFAULTS.get(provider_id, {}).get("url", fallback)
+
+
 def _cloud_tts_provider(provider_id: str, base_url: str | None = None) -> OpenAITTSProvider:
     resolved_url = base_url or settings.get_voice_service_url(provider_id)
     return OpenAITTSProvider(
@@ -53,14 +57,19 @@ def create_tts_provider(provider_id: str | None = None) -> TTSProvider:
 
     if pid == "chattts":
         return ChatTTSProvider(
-            base_url=settings.chattts_url or "http://localhost:9998",
+            base_url=settings.get_voice_service_url("chattts")
+            or _local_default_url("chattts", "http://localhost:9998"),
         )
     elif pid == "edge_tts":
         return EdgeTTSProvider(
-            base_url=settings.edge_tts_url or settings.tts_url or "http://localhost:5051",
+            base_url=settings.get_voice_service_url("edge_tts")
+            or settings.tts_url
+            or _local_default_url("edge_tts", "http://localhost:5051"),
         )
     elif pid == "cosyvoice":
-        url = settings.cosyvoice_url or "http://localhost:50000"
+        url = settings.get_voice_service_url("cosyvoice") or _local_default_url(
+            "cosyvoice", "http://localhost:50000"
+        )
         return CosyVoiceProvider(base_url=url)
     elif pid == "openai_tts":
         return _cloud_tts_provider(pid)
@@ -120,10 +129,8 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
     if pid == "funasr":
         from app.voice.funasr import FunASRProvider
 
-        # 优先使用 settings.funasr_url，其次是 settings.asr_url，
-        # 最后回退到 LOCAL_SERVICE_DEFAULTS 中的默认值（HTTP 模式：8000）
-        default_url = LOCAL_SERVICE_DEFAULTS.get("funasr", {}).get("url", "http://localhost:8000")
-        # 兼容旧配置：若默认仍是 WS 端口但用户未启动 WS 服务，尝试 HTTP 回退
+        # 优先使用 settings.funasr_url，其次是 settings.asr_url，最后回退到独立 WS 端口。
+        default_url = _local_default_url("funasr", "ws://localhost:10095")
         configured_url = settings.funasr_url or settings.asr_url or default_url
         return FunASRProvider(base_url=configured_url)
     elif pid == "openai_whisper":
@@ -147,7 +154,7 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
     elif pid == "capswriter":
         return StandaloneWsAsrProvider(
             base_url=settings.get_voice_service_url("capswriter")
-            or LOCAL_SERVICE_DEFAULTS.get("capswriter", {}).get("url", "ws://localhost:6016"),
+            or _local_default_url("capswriter", "ws://localhost:6016"),
             ws_path="/ws",
             eof_payload='{"type":"eof"}',
             ws_subprotocol="binary",
@@ -156,18 +163,14 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
     elif pid == "vosk":
         return StandaloneWsAsrProvider(
             base_url=settings.get_voice_service_url("vosk")
-            or LOCAL_SERVICE_DEFAULTS.get("vosk", {}).get("url", "http://localhost:6702"),
+            or _local_default_url("vosk", "http://localhost:6702"),
             ws_path="/stream",
             eof_payload="eof",
         )
     elif pid == "browser":
         # 浏览器原生 ASR 由前端处理，但若前端通过 ServerAsrService 将音频发到后端
         # （如用户在前端设置中选择了 funasr/capswriter 等），则根据配置的后端 ASR URL 自动选择。
-        configured_url = (
-            settings.asr_url
-            or settings.funasr_url
-            or LOCAL_SERVICE_DEFAULTS.get("funasr", {}).get("url", "")
-        )
+        configured_url = settings.asr_url or settings.funasr_url or _local_default_url("funasr")
         if configured_url:
             from app.voice.funasr import FunASRProvider
 

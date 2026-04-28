@@ -1,15 +1,11 @@
 /// Gateway 流式语音服务实现
 ///
-/// 通过 voice-services gateway (端口 6666) 直连 Vosk/CapsWriter 本地 ASR/TTS。
-/// ASR 支持 WebSocket 流式识别（低延迟），TTS 通过 gateway 代理合成。
+/// 直连各自独立端口上的 Vosk/CapsWriter 本地 ASR 服务。
+/// ASR 支持 WebSocket 流式识别（低延迟）。
 ///
-/// Gateway routes:
-///   POST /asr/capswriter - CapsWriter ASR
-///   POST /asr/vosk       - Vosk ASR
-///   POST /tts/vibevoice  - VibeVoice TTS
-///   POST /tts/fireredtts - FireRedTTS TTS
-///   POST /tts/openvoice  - OpenVoice TTS
-///   WS   /asr/stream     - 流式 ASR (Vosk WebSocket)
+/// Local endpoints:
+///   CapsWriter: ws://localhost:6016/ws
+///   Vosk:       ws://localhost:6702/stream
 // ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
@@ -23,8 +19,18 @@ import 'package:dio/dio.dart';
 
 import 'speech_contract.dart';
 
-/// 默认 gateway 地址
-const _defaultGatewayUrl = 'http://localhost:6666';
+const _defaultCapsWriterUrl = 'ws://localhost:6016';
+const _defaultVoskUrl = 'http://localhost:6702';
+
+String _defaultAsrBaseUrl(String service) {
+  return service.trim().toLowerCase() == 'capswriter'
+      ? _defaultCapsWriterUrl
+      : _defaultVoskUrl;
+}
+
+String _defaultAsrWsPath(String service) {
+  return service.trim().toLowerCase() == 'capswriter' ? '/ws' : '/stream';
+}
 
 /// Gateway 流式 ASR 实现：WebSocket 实时流式语音识别
 ///
@@ -44,31 +50,33 @@ class GatewayStreamingAsrService implements AsrService {
       StreamController<AsrResult>.broadcast();
 
   html.WebSocket? _ws;
-  html.MediaStream? _mediaStream;
-  js.JsObject? _audioContext;
-  js.JsObject? _processorNode;
-  js.JsObject? _sourceNode;
   Completer<void>? _stopCompleter;
   Completer<void>? _finalResultCompleter;
   bool _disposed = false;
   String? _capsWriterTaskId;
   double _capsWriterStartSeconds = 0;
-  int? _capsWriterMicSessionId;
-  js.JsFunction? _capsWriterMicStartedCallback;
-  js.JsFunction? _capsWriterMicAudioCallback;
-  js.JsFunction? _capsWriterMicErrorCallback;
+  int? _micSessionId;
+  js.JsFunction? _micStartedCallback;
+  js.JsFunction? _micAudioCallback;
+  js.JsFunction? _micErrorCallback;
 
   // 预热的 WebSocket 连接
   html.WebSocket? _warmWs;
   Timer? _warmupTimer;
 
   GatewayStreamingAsrService({
-    this.gatewayUrl = _defaultGatewayUrl,
-    this.service = 'vosk',
-    this.wsPath = '/asr/stream',
+    String? gatewayUrl,
+    String service = 'vosk',
+    String? wsPath,
     this.wsProtocols = const <String>[],
     this.capsWriterJsonProtocol = false,
-  }) {
+  })  : service = service.trim().isEmpty ? 'vosk' : service.trim().toLowerCase(),
+        gatewayUrl = gatewayUrl != null && gatewayUrl.trim().isNotEmpty
+            ? gatewayUrl.trim()
+            : _defaultAsrBaseUrl(service),
+        wsPath = wsPath != null && wsPath.trim().isNotEmpty
+            ? wsPath.trim()
+            : _defaultAsrWsPath(service) {
     // 启动时预热 WebSocket 连接
     _preWarmConnection();
   }
@@ -95,14 +103,14 @@ class GatewayStreamingAsrService implements AsrService {
     await _ws!.onOpen.first.timeout(const Duration(seconds: 5));
   }
 
-  void _ensureCapsWriterMicBridge() {
-    if (js.context.hasProperty('roundTableCapsWriterMic')) return;
+  void _ensureMicBridge() {
+    if (js.context.hasProperty('roundTableStreamingAsrMic')) return;
 
     js.context.callMethod('eval', [
       r'''
 (function () {
-  if (window.roundTableCapsWriterMic) return;
-  window.roundTableCapsWriterMic = {
+  if (window.roundTableStreamingAsrMic) return;
+  window.roundTableStreamingAsrMic = {
     nextId: 1,
     sessions: {},
     start: function (onStarted, onAudio, onError, sampleRate) {
@@ -206,37 +214,43 @@ class GatewayStreamingAsrService implements AsrService {
     ]);
   }
 
-  Future<void> _startCapsWriterMicBridge() async {
-    _ensureCapsWriterMicBridge();
-    final bridge = js.context['roundTableCapsWriterMic'] as js.JsObject;
+  Future<void> _startMicBridge() async {
+    _ensureMicBridge();
+    final bridge = js.context['roundTableStreamingAsrMic'] as js.JsObject;
     final started = Completer<void>();
 
-    _capsWriterMicStartedCallback =
-        js.JsFunction.withThis((thisArg, dynamic sessionId) {
+    _micStartedCallback = js.JsFunction.withThis((thisArg, dynamic sessionId) {
       if (sessionId is num) {
-        _capsWriterMicSessionId = sessionId.toInt();
+        _micSessionId = sessionId.toInt();
       }
       if (!started.isCompleted) started.complete();
     });
 
-    _capsWriterMicAudioCallback =
-        js.JsFunction.withThis((thisArg, dynamic channelData) {
+    _micAudioCallback = js.JsFunction.withThis((thisArg, dynamic channelData) {
       try {
         if (channelData is js.JsObject) {
           final length = (channelData['length'] as num).toInt();
-          if (length > 0) _sendCapsWriterAudioChunk(channelData, length);
+          if (length <= 0) return;
+          if (capsWriterJsonProtocol) {
+            _sendCapsWriterAudioChunk(channelData, length);
+          } else {
+            _sendPcmAudioChunk(channelData, length);
+          }
         } else if (channelData is Float32List) {
-          _sendCapsWriterAudioList(channelData);
+          if (capsWriterJsonProtocol) {
+            _sendCapsWriterAudioList(channelData);
+          } else {
+            _sendPcmAudioList(channelData);
+          }
         }
       } catch (error) {
         if (!_controller.isClosed) {
-          _controller.addError('CapsWriter 音频块处理失败: $error');
+          _controller.addError('${service.toUpperCase()} 音频块处理失败: $error');
         }
       }
     });
 
-    _capsWriterMicErrorCallback =
-        js.JsFunction.withThis((thisArg, dynamic error) {
+    _micErrorCallback = js.JsFunction.withThis((thisArg, dynamic error) {
       final message = '麦克风流初始化失败: ${error?.toString() ?? 'unknown error'}';
       if (!started.isCompleted) {
         started.completeError(StateError(message));
@@ -246,28 +260,28 @@ class GatewayStreamingAsrService implements AsrService {
     });
 
     bridge.callMethod('start', [
-      _capsWriterMicStartedCallback,
-      _capsWriterMicAudioCallback,
-      _capsWriterMicErrorCallback,
+      _micStartedCallback,
+      _micAudioCallback,
+      _micErrorCallback,
       16000,
     ]);
 
     await started.future.timeout(const Duration(seconds: 8));
   }
 
-  void _stopCapsWriterMicBridge() {
-    final sessionId = _capsWriterMicSessionId;
+  void _stopMicBridge() {
+    final sessionId = _micSessionId;
     if (sessionId != null &&
-        js.context.hasProperty('roundTableCapsWriterMic')) {
+        js.context.hasProperty('roundTableStreamingAsrMic')) {
       try {
-        (js.context['roundTableCapsWriterMic'] as js.JsObject)
+        (js.context['roundTableStreamingAsrMic'] as js.JsObject)
             .callMethod('stop', [sessionId]);
       } catch (_) {}
     }
-    _capsWriterMicSessionId = null;
-    _capsWriterMicStartedCallback = null;
-    _capsWriterMicAudioCallback = null;
-    _capsWriterMicErrorCallback = null;
+    _micSessionId = null;
+    _micStartedCallback = null;
+    _micAudioCallback = null;
+    _micErrorCallback = null;
   }
 
   String _describeStartError(Object error) {
@@ -296,27 +310,10 @@ class GatewayStreamingAsrService implements AsrService {
   }
 
   void _cleanupAfterStartFailure() {
-    _stopCapsWriterMicBridge();
-    try {
-      _processorNode?.callMethod('disconnect');
-    } catch (_) {}
-    try {
-      _sourceNode?.callMethod('disconnect');
-    } catch (_) {}
-    try {
-      _audioContext?.callMethod('close');
-    } catch (_) {}
-    try {
-      _mediaStream?.getTracks().forEach((track) => track.stop());
-    } catch (_) {}
+    _stopMicBridge();
     try {
       _ws?.close();
     } catch (_) {}
-
-    _processorNode = null;
-    _sourceNode = null;
-    _audioContext = null;
-    _mediaStream = null;
     _ws = null;
   }
 
@@ -385,32 +382,8 @@ class GatewayStreamingAsrService implements AsrService {
       _stopCompleter = Completer<void>();
       _finalResultCompleter = Completer<void>();
 
-      if (capsWriterJsonProtocol) {
-        await _connectWebSocketForStreaming();
-        await _startCapsWriterMicBridge();
-      } else {
-        // 1. 获取麦克风
-        final mediaDevices = html.window.navigator.mediaDevices;
-        if (mediaDevices == null) {
-          throw StateError('当前浏览器不支持麦克风采集');
-        }
-        _mediaStream = await mediaDevices.getUserMedia({
-          'audio': {
-            'sampleRate': 16000,
-            'channelCount': 1,
-            'echoCancellation': true,
-            'noiseSuppression': true,
-          }
-        });
-        if (_mediaStream == null || _mediaStream!.getAudioTracks().isEmpty) {
-          throw StateError('未获取到有效的麦克风音轨');
-        }
-
-        await _connectWebSocketForStreaming();
-
-        // 3. 设置 AudioContext + ScriptProcessor 来获取 PCM 数据
-        _setupAudioPipeline();
-      }
+      await _connectWebSocketForStreaming();
+      await _startMicBridge();
 
       // 4. 监听 WebSocket 消息
       _ws!.onMessage.listen((event) {
@@ -548,94 +521,25 @@ class GatewayStreamingAsrService implements AsrService {
     }));
   }
 
-  /// 构建 Web Audio 管道：Mic → AudioContext → ScriptProcessor → WebSocket
-  void _setupAudioPipeline() {
-    final mediaStream = _mediaStream;
-    if (mediaStream == null) {
-      throw StateError('麦克风流初始化失败');
+  void _sendPcmAudioChunk(js.JsObject channelData, int length) {
+    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
+    final int16Data = Int16List(length);
+    for (var i = 0; i < length; i++) {
+      final sample = (channelData[i] as num).toDouble().clamp(-1.0, 1.0);
+      int16Data[i] = (sample * 32767).round();
     }
+    _ws!.sendTypedData(int16Data);
+  }
 
-    final ctx = js.context;
-
-    // 创建 AudioContext (16kHz)
-    final audioContextClass = ctx.hasProperty('AudioContext')
-        ? ctx['AudioContext']
-        : ctx['webkitAudioContext'];
-    try {
-      _audioContext = js.JsObject(audioContextClass as js.JsFunction, [
-        js.JsObject.jsify({'sampleRate': 16000})
-      ]);
-    } catch (_) {
-      _audioContext = js.JsObject(audioContextClass as js.JsFunction);
+  void _sendPcmAudioList(Float32List channelData) {
+    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
+    if (channelData.isEmpty) return;
+    final int16Data = Int16List(channelData.length);
+    for (var i = 0; i < channelData.length; i++) {
+      final sample = channelData[i].clamp(-1.0, 1.0).toDouble();
+      int16Data[i] = (sample * 32767).round();
     }
-
-    // 创建 MediaStreamSource
-    try {
-      _sourceNode = _audioContext!.callMethod(
-        'createMediaStreamSource',
-        [mediaStream],
-      );
-    } catch (firstError) {
-      try {
-        _sourceNode = _audioContext!.callMethod(
-          'createMediaStreamSource',
-          [js.JsObject.fromBrowserObject(mediaStream)],
-        );
-      } catch (secondError) {
-        try {
-          final createMethod = _audioContext!['createMediaStreamSource'];
-          if (createMethod is! js.JsFunction) {
-            throw StateError('createMediaStreamSource is not callable');
-          }
-          _sourceNode = createMethod.apply(
-            [mediaStream],
-            thisArg: _audioContext,
-          ) as js.JsObject;
-        } catch (_) {
-          throw StateError(
-            'createMediaStreamSource failed: $firstError / $secondError',
-          );
-        }
-      }
-    }
-
-    // 创建 ScriptProcessor (bufferSize=4096, inputChannels=1, outputChannels=1)
-    _processorNode = _audioContext!.callMethod(
-      'createScriptProcessor',
-      [4096, 1, 1],
-    );
-
-    // onaudioprocess：将 float32 转 int16 PCM 并发送
-    _processorNode!['onaudioprocess'] =
-        js.JsFunction.withThis((thisArg, event) {
-      if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
-
-      final inputBuffer = (event as js.JsObject)['inputBuffer'];
-      final channelData = inputBuffer.callMethod('getChannelData', [0]);
-
-      // 获取 Float32Array 的长度和数据
-      final length = (channelData['length'] as num).toInt();
-      if (capsWriterJsonProtocol) {
-        _sendCapsWriterAudioChunk(channelData, length);
-        return;
-      }
-
-      final int16Data = Int16List(length);
-
-      for (var i = 0; i < length; i++) {
-        final sample = (channelData[i] as num).toDouble();
-        // Clamp to [-1, 1] and convert to int16
-        final clamped = sample.clamp(-1.0, 1.0);
-        int16Data[i] = (clamped * 32767).round();
-      }
-
-      // 发送 PCM 二进制数据
-      _ws!.sendTypedData(int16Data);
-    });
-
-    // 连接管道
-    _sourceNode!.callMethod('connect', [_processorNode]);
-    _processorNode!.callMethod('connect', [_audioContext!['destination']]);
+    _ws!.sendTypedData(int16Data);
   }
 
   @override
@@ -643,18 +547,7 @@ class GatewayStreamingAsrService implements AsrService {
     if (!_isListening) return;
 
     try {
-      // 断开音频管道
-      _stopCapsWriterMicBridge();
-      _processorNode?.callMethod('disconnect');
-      _sourceNode?.callMethod('disconnect');
-      _audioContext?.callMethod('close');
-      _processorNode = null;
-      _sourceNode = null;
-      _audioContext = null;
-
-      // 停止麦克风
-      _mediaStream?.getTracks().forEach((track) => track.stop());
-      _mediaStream = null;
+      _stopMicBridge();
 
       // 发送 eof 获取最终结果
       if (_ws != null && _ws!.readyState == html.WebSocket.OPEN) {
@@ -739,219 +632,5 @@ class GatewayStreamingAsrService implements AsrService {
     _warmWs?.close();
     stopListening();
     _controller.close();
-  }
-}
-
-/// Gateway TTS 实现：通过 gateway 代理访问本地 TTS 服务
-///
-/// 支持: vibevoice, fireredtts, openvoice
-/// TTS 预加载：可提前合成下一段文本
-class GatewayTtsService implements TtsService {
-  final String gatewayUrl;
-  final String service; // 'vibevoice', 'fireredtts', 'openvoice'
-  final Dio _dio;
-  bool _isSpeaking = false;
-  html.AudioElement? _audioElement;
-  Completer<void>? _pendingCompleter;
-  String? _activeObjectUrl;
-
-  // TTS 预加载缓存
-  final Map<String, Uint8List> _prefetchCache = {};
-  final Map<String, Future<void>> _prefetchInFlight = {};
-  static const int _maxCacheSize = 5;
-  int _prefetchRequested = 0;
-  int _prefetchHit = 0;
-  int _prefetchMiss = 0;
-
-  GatewayTtsService({
-    this.gatewayUrl = _defaultGatewayUrl,
-    this.service = 'vibevoice',
-  }) : _dio = Dio(BaseOptions(
-          baseUrl: gatewayUrl,
-          connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 10),
-          responseType: ResponseType.bytes,
-        ));
-
-  @override
-  bool get isSpeaking => _isSpeaking;
-
-  @override
-  TtsPerfSnapshot getPerfSnapshot() {
-    return TtsPerfSnapshot(
-      prefetchHit: _prefetchHit,
-      prefetchMiss: _prefetchMiss,
-      prefetchRequested: _prefetchRequested,
-    );
-  }
-
-  String _cacheKey(String text, {String? voice}) {
-    return '${voice ?? 'default'}::$text';
-  }
-
-  /// 预加载一段文本的 TTS（后台合成，缓存结果）
-  @override
-  Future<void> prefetch(String text, {String? voice}) async {
-    _prefetchRequested += 1;
-    final key = _cacheKey(text, voice: voice);
-    if (_prefetchCache.containsKey(key)) return;
-    final existing = _prefetchInFlight[key];
-    if (existing != null) {
-      await existing;
-      return;
-    }
-
-    final job = () async {
-      try {
-        final audioBytes = await _synthesize(text, voice: voice);
-        if (audioBytes.isNotEmpty) {
-          // 限制缓存大小
-          if (_prefetchCache.length >= _maxCacheSize) {
-            _prefetchCache.remove(_prefetchCache.keys.first);
-          }
-          _prefetchCache[key] = audioBytes;
-        }
-      } catch (_) {
-        // Ignore prefetch failures; playback path will retry on demand.
-      } finally {
-        _prefetchInFlight.remove(key);
-      }
-    }();
-
-    _prefetchInFlight[key] = job;
-    await job;
-  }
-
-  @override
-  Future<void> prefetchBatch(
-    List<({String text, String? voice})> items, {
-    int maxConcurrent = 2,
-  }) async {
-    if (items.isEmpty) return;
-
-    final queue = List<({String text, String? voice})>.from(items);
-    final workers = maxConcurrent.clamp(1, 4);
-
-    Future<void> worker() async {
-      while (queue.isNotEmpty) {
-        final item = queue.removeLast();
-        await prefetch(item.text, voice: item.voice);
-      }
-    }
-
-    await Future.wait(List.generate(workers, (_) => worker()));
-  }
-
-  Future<Uint8List> _synthesize(String text, {String? voice}) async {
-    final response = await _dio.post<List<int>>(
-      '/tts/$service',
-      data: {
-        'text': text,
-        'speaker': voice ?? 'default',
-      },
-      options: Options(responseType: ResponseType.bytes),
-    );
-    return Uint8List.fromList(response.data!);
-  }
-
-  @override
-  Future<void> speak(
-    String text, {
-    String? voice,
-    double rate = 1.0,
-    void Function()? onStart,
-  }) async {
-    await stop();
-
-    try {
-      _isSpeaking = true;
-      var started = false;
-
-      // 优先使用预加载缓存
-      Uint8List audioBytes;
-      final key = _cacheKey(text, voice: voice);
-      if (_prefetchCache.containsKey(key)) {
-        _prefetchHit += 1;
-        audioBytes = _prefetchCache.remove(key)!;
-      } else {
-        _prefetchMiss += 1;
-        audioBytes = await _synthesize(text, voice: voice);
-      }
-
-      // Gateway 返回 WAV 格式
-      final blob = html.Blob([audioBytes], 'audio/wav');
-      final url = html.Url.createObjectUrlFromBlob(blob);
-      _activeObjectUrl = url;
-
-      _audioElement = html.AudioElement()
-        ..src = url
-        ..playbackRate = rate
-        ..autoplay = true;
-
-      final completer = Completer<void>();
-      _pendingCompleter = completer;
-
-      void markStarted() {
-        if (started) return;
-        started = true;
-        onStart?.call();
-      }
-
-      _audioElement!.onPlaying.listen((_) => markStarted());
-
-      _audioElement!.onEnded.listen((_) {
-        _isSpeaking = false;
-        if (_activeObjectUrl == url) {
-          _activeObjectUrl = null;
-        }
-        html.Url.revokeObjectUrl(url);
-        _audioElement = null;
-        _pendingCompleter = null;
-        if (!completer.isCompleted) completer.complete();
-      });
-
-      _audioElement!.onError.listen((_) {
-        _isSpeaking = false;
-        if (_activeObjectUrl == url) {
-          _activeObjectUrl = null;
-        }
-        html.Url.revokeObjectUrl(url);
-        _audioElement = null;
-        _pendingCompleter = null;
-        if (!completer.isCompleted) {
-          completer.completeError('TTS playback error');
-        }
-      });
-
-      await _audioElement!.play();
-      markStarted();
-      await completer.future;
-    } catch (e) {
-      _isSpeaking = false;
-      rethrow;
-    }
-  }
-
-  @override
-  Future<void> stop() async {
-    _isSpeaking = false;
-    _audioElement?.pause();
-    _audioElement = null;
-    final url = _activeObjectUrl;
-    _activeObjectUrl = null;
-    if (url != null) {
-      html.Url.revokeObjectUrl(url);
-    }
-    if (_pendingCompleter != null && !_pendingCompleter!.isCompleted) {
-      _pendingCompleter!.complete();
-      _pendingCompleter = null;
-    }
-  }
-
-  @override
-  void dispose() {
-    stop();
-    _prefetchCache.clear();
-    _dio.close();
   }
 }

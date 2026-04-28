@@ -52,7 +52,7 @@ class _SafetyFilterStub:
         return content
 
     async def check_human_input(self, _content: str) -> tuple[bool, str]:
-        return True, ""
+        return True, ''
 
 
 class _DiscussionFloorManagerStub:
@@ -428,9 +428,13 @@ async def test_skip_turn_is_not_tracked_as_spoken_reference() -> None:
         }
     )
 
-    await floor_manager._process_event(TextMessage(source='explorer', content='我觉得可以先看分数能量出什么。'))
+    await floor_manager._process_event(
+        TextMessage(source='explorer', content='我觉得可以先看分数能量出什么。')
+    )
     await floor_manager._process_event(TextMessage(source='豆苗', content='（跳过）'))
-    await floor_manager._process_event(TextMessage(source='skeptic', content='我更关心分数会不会受状态影响。'))
+    await floor_manager._process_event(
+        TextMessage(source='skeptic', content='我更关心分数会不会受状态影响。')
+    )
 
     assert floor_manager._recent_display_speakers == ['小探', '小疑']
 
@@ -538,9 +542,7 @@ def test_floor_manager_stream_sentence_splitter_keeps_quotes_and_tail() -> None:
         safety_filter=SimpleNamespace(),
     )
 
-    segments, remainder = floor_manager._drain_complete_stream_sentences(
-        '“先想一想。”然后再回答'
-    )
+    segments, remainder = floor_manager._drain_complete_stream_sentences('“先想一想。”然后再回答')
 
     assert segments == ['“先想一想。”']
     assert remainder == '然后再回答'
@@ -781,11 +783,19 @@ def test_parse_speaker_designation_tolerates_suffix_words() -> None:
     """名字后跟"同学"等后缀词时仍能正确解析点名对象。"""
     participants = ['李老师', '小探', '小思', '小和', '豆苗']
 
-    assert parse_speaker_designation('小思同学，你怎么看豆苗同学的这个想法呢？', participants) == '小思'
+    assert (
+        parse_speaker_designation('小思同学，你怎么看豆苗同学的这个想法呢？', participants)
+        == '小思'
+    )
     assert parse_speaker_designation('那么，小思同学，你觉得呢？', participants) == '小思'
     assert parse_speaker_designation('小和同学，你认为这个方案可行吗？', participants) == '小和'
     assert parse_speaker_designation('豆苗同学你有没有类似的经历？', participants) == '豆苗'
-    assert parse_speaker_designation('豆苗同学，你先来开个头吧，你觉得“追求完美”是好事还是坏事呢？', participants) == '豆苗'
+    assert (
+        parse_speaker_designation(
+            '豆苗同学，你先来开个头吧，你觉得“追求完美”是好事还是坏事呢？', participants
+        )
+        == '豆苗'
+    )
 
 
 def test_parse_speaker_designation_supports_thinker_alias_titles() -> None:
@@ -810,7 +820,12 @@ def test_turn_scheduler_prefers_moderator_when_entering_closing_window() -> None
         humans=[_agent('豆苗')],
         selector_client=SimpleNamespace(),
         max_turns=8,
-        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
     )
     selector = team._selector_func
 
@@ -836,7 +851,12 @@ def test_turn_scheduler_prefers_moderator_for_second_closing_inquiry() -> None:
         humans=[_agent('豆苗')],
         selector_client=SimpleNamespace(),
         max_turns=8,
-        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
     )
     selector = team._selector_func
 
@@ -846,9 +866,14 @@ def test_turn_scheduler_prefers_moderator_for_second_closing_inquiry() -> None:
         SimpleNamespace(source='豆苗', content='有时候扶手也会挡住路。'),
         SimpleNamespace(source='moderator', content='你刚才说扶手也会挡住路，这个观察很妙。'),
         SimpleNamespace(source='skeptic', content='那要看扶手是不是太多了。'),
-        SimpleNamespace(source='moderator', content='收尾前，我想先问问大家，还有没有想补充的观点或想法？豆苗，如果你还有新发现，也可以继续说。'),
+        SimpleNamespace(
+            source='moderator',
+            content='收尾前，我想先问问大家，还有没有想补充的观点或想法？豆苗，如果你还有新发现，也可以继续说。',
+        ),
         SimpleNamespace(source='豆苗', content='我觉得扶手最好能跟着人一起变。'),
-        SimpleNamespace(source='moderator', content='你刚才说扶手最好能跟着人一起变，这个想法特别有创造力。'),
+        SimpleNamespace(
+            source='moderator', content='你刚才说扶手最好能跟着人一起变，这个想法特别有创造力。'
+        ),
         SimpleNamespace(source='explorer', content='那就像会移动的桥。'),
     ]
 
@@ -906,7 +931,9 @@ def test_turn_scheduler_invites_human_after_teacher_returns_without_explicit_des
         SimpleNamespace(source='moderator', content='今天我们来聊聊习惯是怎么形成的。'),
         SimpleNamespace(source='explorer', content='我觉得习惯像一条常走的小路。'),
         SimpleNamespace(source='pavlov', content='我会先从重复和信号之间的关系来看。'),
-        SimpleNamespace(source='moderator', content='你们都给了一个好起点，我们再把目光转回到同学自己的经验。'),
+        SimpleNamespace(
+            source='moderator', content='你们都给了一个好起点，我们再把目光转回到同学自己的经验。'
+        ),
     ]
 
     assert selector(thread) == '豆苗'
@@ -985,6 +1012,61 @@ def test_turn_scheduler_stops_proactively_inviting_human_after_soft_cap() -> Non
     assert selector(thread) is None
 
 
+def test_turn_scheduler_invites_human_up_to_expanded_normal_target() -> None:
+    def _agent(name: str) -> SimpleNamespace:
+        return SimpleNamespace(name=name, description=name)
+
+    team = create_discussion_team(
+        moderator=_agent('moderator'),
+        characters=[_agent('explorer'), _agent('skeptic')],
+        humans=[_agent('豆苗')],
+        selector_client=SimpleNamespace(),
+        max_turns=40,
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
+    )
+    selector = team._selector_func
+
+    thread = [
+        SimpleNamespace(source='moderator', content='我们先从自由和纪律开始。'),
+        SimpleNamespace(source='explorer', content='我觉得自由像打开地图。'),
+        SimpleNamespace(source='豆苗', content='但地图也需要方向。'),
+        SimpleNamespace(source='moderator', content='你这个提醒很关键。'),
+        SimpleNamespace(source='skeptic', content='习惯会决定人怎么使用自由。'),
+        SimpleNamespace(source='explorer', content='我更关心孩子会不会孤单。'),
+        SimpleNamespace(source='豆苗', content='是啊，社交真的很重要。'),
+        SimpleNamespace(source='moderator', content='你把问题抓到了中心。'),
+        SimpleNamespace(source='skeptic', content='重复互动本身就是训练。'),
+        SimpleNamespace(source='explorer', content='可以保留一点家庭弹性。'),
+        SimpleNamespace(source='豆苗', content='我赞成周末保留弹性。'),
+        SimpleNamespace(source='moderator', content='那我们继续往实施层面想。'),
+        SimpleNamespace(source='skeptic', content='关键在于边界和节奏。'),
+        SimpleNamespace(source='explorer', content='不同年龄段可以不同安排。'),
+        SimpleNamespace(source='豆苗', content='低年级需要更多陪伴。'),
+        SimpleNamespace(source='moderator', content='这个年龄差异很重要。'),
+        SimpleNamespace(source='skeptic', content='家长负担也得算进去。'),
+        SimpleNamespace(source='explorer', content='还要安排同伴活动。'),
+        SimpleNamespace(source='豆苗', content='可以固定每周一起做项目。'),
+        SimpleNamespace(source='moderator', content='这已经有方案感了。'),
+        SimpleNamespace(source='skeptic', content='项目也需要评价标准。'),
+        SimpleNamespace(source='explorer', content='评价最好不只看分数。'),
+        SimpleNamespace(source='豆苗', content='可以看作品和过程记录。'),
+        SimpleNamespace(source='moderator', content='你把评价方式补上了。'),
+        SimpleNamespace(source='skeptic', content='过程记录也可能变成形式主义。'),
+        SimpleNamespace(source='explorer', content='那记录应该简单一点。'),
+        SimpleNamespace(source='豆苗', content='每周只写三个重点就够。'),
+        SimpleNamespace(source='moderator', content='这个约束很实用。'),
+        SimpleNamespace(source='skeptic', content='还需要有人定期回看。'),
+        SimpleNamespace(source='explorer', content='老师和家长可以轮流看。'),
+    ]
+
+    assert selector(thread) == 'moderator'
+
+
 def test_turn_scheduler_relaxes_human_soft_cap_after_two_hand_raises() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
@@ -995,7 +1077,12 @@ def test_turn_scheduler_relaxes_human_soft_cap_after_two_hand_raises() -> None:
         humans=[_agent('豆苗')],
         selector_client=SimpleNamespace(),
         max_turns=30,
-        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
         get_human_engagement_level=lambda: 1,
     )
     selector = team._selector_func
@@ -1037,7 +1124,12 @@ def test_turn_scheduler_delays_closing_after_two_hand_raises() -> None:
         humans=[_agent('豆苗')],
         selector_client=SimpleNamespace(),
         max_turns=10,
-        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
         get_human_engagement_level=lambda: 1,
     )
     selector = team._selector_func
@@ -1077,7 +1169,12 @@ def test_turn_scheduler_delays_closing_even_further_after_three_hand_raises() ->
         humans=[_agent('豆苗')],
         selector_client=SimpleNamespace(),
         max_turns=10,
-        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
         get_human_engagement_level=lambda: 1,
     )
     level_two_team = create_discussion_team(
@@ -1086,7 +1183,12 @@ def test_turn_scheduler_delays_closing_even_further_after_three_hand_raises() ->
         humans=[_agent('豆苗')],
         selector_client=SimpleNamespace(),
         max_turns=10,
-        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
         get_human_engagement_level=lambda: 2,
     )
 
@@ -1144,7 +1246,12 @@ def test_turn_scheduler_reasks_closing_question_after_single_new_follow_up() -> 
         humans=[_agent('豆苗')],
         selector_client=SimpleNamespace(),
         max_turns=8,
-        display_name_to_agent={'李老师': 'moderator', '小探': 'explorer', '小疑': 'skeptic', '豆苗': '豆苗'},
+        display_name_to_agent={
+            '李老师': 'moderator',
+            '小探': 'explorer',
+            '小疑': 'skeptic',
+            '豆苗': '豆苗',
+        },
     )
     selector = team._selector_func
 
@@ -1154,7 +1261,10 @@ def test_turn_scheduler_reasks_closing_question_after_single_new_follow_up() -> 
         SimpleNamespace(source='豆苗', content='有时候扶手也会挡住路。'),
         SimpleNamespace(source='moderator', content='你刚才说扶手也会挡住路，这个观察很妙。'),
         SimpleNamespace(source='skeptic', content='那要看扶手是不是太多了。'),
-        SimpleNamespace(source='moderator', content='收尾前，我想先问问大家，还有没有想补充的观点或想法？豆苗，如果你还有新发现，也可以继续说。'),
+        SimpleNamespace(
+            source='moderator',
+            content='收尾前，我想先问问大家，还有没有想补充的观点或想法？豆苗，如果你还有新发现，也可以继续说。',
+        ),
         SimpleNamespace(source='豆苗', content='我还想补一句，扶手最好还能跟着人慢慢调整。'),
     ]
 
@@ -1352,7 +1462,9 @@ async def test_floor_manager_sets_current_human_before_waiting_callback() -> Non
 
 
 @pytest.mark.asyncio
-async def test_floor_manager_forces_teacher_to_open_if_selector_returns_wrong_first_speaker() -> None:
+async def test_floor_manager_forces_teacher_to_open_if_selector_returns_wrong_first_speaker() -> (
+    None
+):
     floor_manager = FloorManager(
         team=_TeamStub(),
         ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='pavlov')],
