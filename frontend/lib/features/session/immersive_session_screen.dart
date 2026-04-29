@@ -866,6 +866,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _teacherFarewellHeard = false;
   bool _showEndingQuotesScreen = false;
   bool _mountEndingQuotesOverlay = false;
+  bool _quickFeedbackVisible = false;
+  String _quickFeedbackText = '';
+  bool _awaitingTeacherFeedbackMetric = false;
+  DateTime? _pendingTeacherReplySeenAt;
+  int? _pendingTeacherReplyEventSeq;
+  final Map<String, ({DateTime replySeenAt, int? eventSeq})>
+      _ttsFirstAudioPendingBySession = {};
   // TTS 顺序播放队列 (i)
   final List<
       ({
@@ -964,6 +971,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   List<CandleParticle>? _particles;
   OverlayEntry? _statusToastEntry;
   Timer? _statusToastTimer;
+  Timer? _quickFeedbackTimer;
   bool _disposed = false;
   int _bgTaskRunning = 0;
   final List<Future<void> Function()> _bgTaskQueue = [];
@@ -1001,6 +1009,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   final List<_PerfReportEntry> _reportHistory = [];
   static const int _maxPhaseTelemetryHistory = 80;
   final List<_PhaseTelemetryEntry> _phaseTelemetryHistory = [];
+  DateTime? _pendingFeedbackOverlayMetricAt;
 
   String _resolveProviderUrl(
     SpeechConfig? speechConfig,
@@ -2416,11 +2425,105 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     });
   }
 
+  void _reportClientMetric({
+    required String name,
+    required int valueMs,
+    String? speaker,
+    String? phase,
+    int? eventSeq,
+    String? detail,
+  }) {
+    if (valueMs < 0) {
+      return;
+    }
+    _wsClient.sendClientMetric(
+      name: name,
+      valueMs: valueMs,
+      speaker: speaker,
+      phase: phase,
+      eventSeq: eventSeq,
+      detail: detail,
+    );
+  }
+
+  void _clearPendingTeacherFeedbackMetric() {
+    _awaitingTeacherFeedbackMetric = false;
+    _pendingTeacherReplySeenAt = null;
+    _pendingTeacherReplyEventSeq = null;
+    _ttsFirstAudioPendingBySession.clear();
+  }
+
+  void _markPendingTeacherFeedbackMetric({int? eventSeq}) {
+    if (!_awaitingTeacherFeedbackMetric || _pendingTeacherReplySeenAt != null) {
+      return;
+    }
+    _pendingTeacherReplySeenAt = DateTime.now();
+    _pendingTeacherReplyEventSeq = eventSeq;
+  }
+
+  bool _isMeaningfulImmediateFeedbackText(String text) {
+    final compact = text
+        .replaceAll(RegExp(r'[\s\p{P}\p{S}]', unicode: true), '')
+        .trim();
+    if (compact.isEmpty || compact == '跳过') {
+      return false;
+    }
+    return compact.length >= 5;
+  }
+
+  String _buildImmediateFeedbackText(String text) {
+    final compact = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (compact.isEmpty) {
+      return '已收到，老师正在组织回应';
+    }
+    final variants = <String>[
+      '已收到，老师正在组织回应',
+      '这个观点记下了，马上接着讨论',
+      '你的补充已加入，老师很快回应',
+    ];
+    return variants[compact.runes.fold<int>(0, (sum, rune) => sum + rune) %
+        variants.length];
+  }
+
+  void _showImmediateFeedbackOverlay(String submitText) {
+    final overlayText = _buildImmediateFeedbackText(submitText);
+    _quickFeedbackTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _quickFeedbackText = overlayText;
+        _quickFeedbackVisible = true;
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_quickFeedbackVisible) {
+        return;
+      }
+      final startedAt = _pendingFeedbackOverlayMetricAt;
+      if (startedAt != null) {
+        _reportClientMetric(
+          name: 'feedback_overlay_shown_ms',
+          valueMs: DateTime.now().difference(startedAt).inMilliseconds,
+          speaker: widget.humanName,
+          phase: 'human_submit',
+          detail: 'quick_feedback_overlay',
+        );
+        _pendingFeedbackOverlayMetricAt = null;
+      }
+    });
+    _quickFeedbackTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (!mounted) return;
+      setState(() {
+        _quickFeedbackVisible = false;
+      });
+    });
+  }
+
   void _activateHumanTurnNow({String speaker = ''}) {
     _cancelTurnCountdown();
     _cancelMaxSpeechTimer();
     _cancelPendingHumanTurnGuard();
     _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
+    _clearPendingTeacherFeedbackMetric();
     final activateSpeaker = speaker.isEmpty ? widget.humanName : speaker;
     _completedHumanTurnSpeaker = '';
     _commander.markHumanTurnActivated(speaker: activateSpeaker);
@@ -2827,6 +2930,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           final content = ((data['content'] ?? '') as Object).toString();
           final msgType = ((data['msg_type'] ?? 'text') as Object).toString();
           final shouldSpeak = msgType != 'system' && source != humanName;
+          final teacherSpeech = shouldSpeak &&
+              _isTeacherSpeechMessage(source: source, msgType: msgType);
+          if (teacherSpeech) {
+            _markPendingTeacherFeedbackMetric(eventSeq: event.eventSeq);
+          }
           if (shouldSpeak) {
             _clearAwaitingAiResponseAfterHumanSubmit(
               resetSpeechTurnLatch: true,
@@ -2910,7 +3018,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           if (shouldSpeak) {
             final voice = _resolveSpeakerVoice(source);
             for (final segment in queuedTtsSegments) {
-              _enqueueTts(source: source, text: segment, voice: voice);
+              _enqueueTts(
+                source: source,
+                text: segment,
+                voice: voice,
+                eventSeq: event.eventSeq,
+              );
             }
             // 批量入队后立即触发一次"全段并行预取"，规避逐句入队时
             // 120ms debounce 导致只有第 1 句被预取的问题——这是开场
@@ -2923,11 +3036,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               );
             }
           }
-
-          final teacherSpeech = _isTeacherSpeechMessage(
-            source: source,
-            msgType: msgType,
-          );
           if (teacherSpeech && _looksLikeTeacherClosingCue(content)) {
             _startHumanReviewPrefetchIfNeeded();
           }
@@ -3087,6 +3195,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           );
           // 语音与字幕同步：AI 流式文本不提前渲染，统一在 TTS 开始时显示。
           if (source != humanName) {
+            final teacherSpeech = _isTeacherSpeechMessage(
+              source: source,
+              msgType: 'text',
+            );
+            if (teacherSpeech && queuedTtsSegments.isNotEmpty) {
+              _markPendingTeacherFeedbackMetric(eventSeq: event.eventSeq);
+            }
             _clearAwaitingAiResponseAfterHumanSubmit(
               resetSpeechTurnLatch: true,
             );
@@ -3099,7 +3214,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             if (queuedTtsSegments.isNotEmpty) {
               final voice = _resolveSpeakerVoice(source);
               for (final segment in queuedTtsSegments) {
-                _enqueueTts(source: source, text: segment, voice: voice);
+                _enqueueTts(
+                  source: source,
+                  text: segment,
+                  voice: voice,
+                  eventSeq: event.eventSeq,
+                );
               }
               if (queuedTtsSegments.length > 1) {
                 _kickBatchPrefetch(
@@ -3646,6 +3766,16 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       recording: recording,
     );
     _awaitingAiResponseAfterHumanSubmit = true;
+    _awaitingTeacherFeedbackMetric = submitText != '（跳过）';
+    _pendingTeacherReplySeenAt = null;
+    _pendingTeacherReplyEventSeq = null;
+    _ttsFirstAudioPendingBySession.clear();
+    if (_isMeaningfulImmediateFeedbackText(submitText)) {
+      _pendingFeedbackOverlayMetricAt = DateTime.now();
+      _showImmediateFeedbackOverlay(submitText);
+    } else {
+      _pendingFeedbackOverlayMetricAt = null;
+    }
     _scheduleHumanResponseWatchdog();
     _completedHumanTurnSpeaker = widget.humanName;
     setState(() {
@@ -3717,6 +3847,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _deferredAutoSkipTimer?.cancel();
     _deferredAutoSkipTimer = null;
     _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
+    _clearPendingTeacherFeedbackMetric();
     _activeTtsItem = null;
     _activeTtsSessionId = '';
     _wsClient.sendHumanInput(speaker: widget.humanName, content: '（跳过）');
@@ -3860,7 +3991,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   /// Add text to the TTS queue and start playback if not already playing.
   void _enqueueTts(
-      {required String source, required String text, String? voice}) {
+      {required String source,
+      required String text,
+      String? voice,
+      int? eventSeq}) {
     // 暂停期间直接丢弃新增 TTS 请求；恢复时仅重读暂停前的当前字幕。
     if (_isPaused) return;
     final speechText = _stripStageDirectionsForSpeech(text);
@@ -3874,6 +4008,15 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       playbackSessionId: playbackSessionId,
       enqueuedAt: DateTime.now(),
     ));
+    if (_pendingTeacherReplySeenAt != null &&
+        _isTeacherSpeechMessage(source: source, msgType: 'text')) {
+      _ttsFirstAudioPendingBySession[playbackSessionId] = (
+        replySeenAt: _pendingTeacherReplySeenAt!,
+        eventSeq: _pendingTeacherReplyEventSeq ?? eventSeq,
+      );
+      _pendingTeacherReplySeenAt = null;
+      _pendingTeacherReplyEventSeq = null;
+    }
     _lastMainTtsQueuedAt = DateTime.now();
     if (_openingCueState == _OpeningCueState.preparing && mounted) {
       setState(() {
@@ -3968,6 +4111,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       final item = _ttsQueue.removeAt(0);
       _activeTtsItem = item;
       _activeTtsSessionId = item.playbackSessionId;
+        final ttsFirstAudioMetric =
+          _ttsFirstAudioPendingBySession.remove(item.playbackSessionId);
+        var ttsFirstAudioMetricReported = false;
       final startupWaitMs =
           DateTime.now().difference(item.enqueuedAt).inMilliseconds;
       _ttsStartupSamples += 1;
@@ -4045,9 +4191,26 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   item.text,
                   voice: item.voice,
                   rate: speed,
-                  onStart: () => activateSubtitleAtSpeechStart(
-                    playbackStarted: true,
-                  ),
+                  onStart: () {
+                    if (!ttsFirstAudioMetricReported &&
+                        ttsFirstAudioMetric != null) {
+                      ttsFirstAudioMetricReported = true;
+                      _awaitingTeacherFeedbackMetric = false;
+                      _reportClientMetric(
+                        name: 'tts_first_audio_delay_ms',
+                        valueMs: DateTime.now()
+                            .difference(ttsFirstAudioMetric.replySeenAt)
+                            .inMilliseconds,
+                        speaker: item.source,
+                        phase: 'teacher_feedback',
+                        eventSeq: ttsFirstAudioMetric.eventSeq,
+                        detail: 'teacher_first_audio',
+                      );
+                    }
+                    activateSubtitleAtSpeechStart(
+                      playbackStarted: true,
+                    );
+                  },
                 )
                 .timeout(timeout);
             played = true;
@@ -4261,6 +4424,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _discussionClockTimer?.cancel();
     _statusToastTimer?.cancel();
     _statusToastEntry?.remove();
+    _quickFeedbackTimer?.cancel();
     _ctrlHeld = false;
     _awaitingAsrFirstPacket = false;
     HardwareKeyboard.instance.removeHandler(_onHardwareKey);
@@ -5534,6 +5698,79 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                           ),
                         );
                       },
+                    ),
+                  ),
+                ),
+
+              if (_quickFeedbackText.isNotEmpty)
+                Positioned(
+                  top: max(
+                    MediaQuery.of(context).padding.top + 124,
+                    tableCenterY - 56,
+                  ),
+                  left: 16,
+                  width: min(280.0, size.width * 0.24),
+                  child: IgnorePointer(
+                    child: AnimatedSlide(
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOutCubic,
+                      offset: _quickFeedbackVisible
+                          ? Offset.zero
+                          : const Offset(-0.08, 0),
+                      child: AnimatedOpacity(
+                        duration: const Duration(milliseconds: 180),
+                        opacity: _quickFeedbackVisible ? 1.0 : 0.0,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xD9111720),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: const Color(0xFF5DE2C2)
+                                  .withValues(alpha: 0.35),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.16),
+                                blurRadius: 18,
+                                offset: const Offset(0, 8),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                margin: const EdgeInsets.only(top: 5),
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFF5DE2C2),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _quickFeedbackText,
+                                  style: GoogleFonts.notoSansSc(
+                                    color: const Color(0xFFF2F7F7),
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.4,
+                                  ),
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),

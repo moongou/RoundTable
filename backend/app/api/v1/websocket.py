@@ -70,6 +70,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
     human_hand_raise_counts: dict[str, int] = {}
     pending_human_request_ts: dict[str, float] = {}
     pending_human_request_id: dict[str, str] = {}
+    client_metric_stats: dict[str, dict[str, object]] = {}
 
     def note_human_hand_raise(agent_name: str) -> None:
         normalized = (agent_name or "").strip()
@@ -95,6 +96,60 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             "reason": reason,
             "event_type": dropped_event_type,
         }
+
+    def note_client_metric(
+        name: str,
+        value_ms: int,
+        *,
+        speaker: str,
+        phase: str,
+        event_seq: int | None,
+        detail: str,
+    ) -> None:
+        normalized_name = (name or "").strip()
+        if not normalized_name:
+            return
+        bucket = client_metric_stats.setdefault(
+            normalized_name,
+            {
+                "count": 0,
+                "total_ms": 0,
+                "max_ms": value_ms,
+                "min_ms": value_ms,
+                "last_ms": value_ms,
+                "last_speaker": speaker,
+                "last_phase": phase,
+                "last_event_seq": event_seq,
+                "last_detail": detail,
+            },
+        )
+        bucket["count"] = int(bucket.get("count", 0)) + 1
+        bucket["total_ms"] = int(bucket.get("total_ms", 0)) + value_ms
+        bucket["max_ms"] = max(int(bucket.get("max_ms", value_ms)), value_ms)
+        bucket["min_ms"] = min(int(bucket.get("min_ms", value_ms)), value_ms)
+        bucket["last_ms"] = value_ms
+        bucket["last_speaker"] = speaker
+        bucket["last_phase"] = phase
+        bucket["last_event_seq"] = event_seq
+        bucket["last_detail"] = detail
+
+    def export_client_metric_stats() -> dict[str, dict[str, object]]:
+        exported: dict[str, dict[str, object]] = {}
+        for name, bucket in client_metric_stats.items():
+            count = int(bucket.get("count", 0))
+            total_ms = int(bucket.get("total_ms", 0))
+            exported[name] = {
+                "count": count,
+                "avg_ms": round(total_ms / count, 2) if count else 0,
+                "max_ms": int(bucket.get("max_ms", 0)),
+                "min_ms": int(bucket.get("min_ms", 0)),
+                "last_ms": int(bucket.get("last_ms", 0)),
+                "last_speaker": str(bucket.get("last_speaker", "") or ""),
+                "last_phase": str(bucket.get("last_phase", "") or ""),
+                "last_event_seq": bucket.get("last_event_seq"),
+                "last_detail": str(bucket.get("last_detail", "") or ""),
+            }
+        return exported
 
     def with_send_observability(data: dict) -> dict:
         payload = dict(data)
@@ -592,6 +647,36 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                             msg["request_wait_ms"] = wait_ms
                         if pending_id:
                             msg["request_id"] = pending_id
+                    elif msg_type == "client_metric":
+                        name = str(msg.get("name", "") or "").strip()
+                        raw_value_ms = msg.get("value_ms")
+                        try:
+                            value_ms = max(0, int(raw_value_ms))
+                        except (TypeError, ValueError):
+                            value_ms = -1
+                        speaker = normalize_display_name(msg.get("speaker", ""))
+                        phase = str(msg.get("phase", "") or "").strip()
+                        detail = str(msg.get("detail", "") or "").strip()
+                        raw_event_seq = msg.get("event_seq")
+                        try:
+                            linked_event_seq = int(raw_event_seq) if raw_event_seq is not None else None
+                        except (TypeError, ValueError):
+                            linked_event_seq = None
+                        msg["speaker"] = speaker
+                        msg["name"] = name
+                        msg["phase"] = phase
+                        msg["detail"] = detail
+                        msg["event_seq"] = linked_event_seq
+                        if value_ms >= 0:
+                            msg["value_ms"] = value_ms
+                            note_client_metric(
+                                name,
+                                value_ms,
+                                speaker=speaker,
+                                phase=phase,
+                                event_seq=linked_event_seq,
+                                detail=detail,
+                            )
 
                     if history_store is not None:
                         await history_store.append_entry(
@@ -765,6 +850,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         "drop_reasons": dict(send_drop_reasons),
                         "last_drop": dict(last_send_drop) if last_send_drop else None,
                     },
+                    "client_metrics": export_client_metric_stats(),
                     "floor_manager": floor_diag,
                 },
             )

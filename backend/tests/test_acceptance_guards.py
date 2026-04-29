@@ -1136,9 +1136,32 @@ def test_meeting_history_script_keeps_agent_debug_fields() -> None:
     assert human_input_line['request_wait_ms'] == 932
     assert human_input_line['request_id'] == 'req-1'
 
+    client_metric_line = _build_script_line(
+        'inbound',
+        'client_metric',
+        {
+            'speaker': '豆苗',
+            'name': 'tts_first_audio_delay_ms',
+            'value_ms': 184,
+            'phase': 'teacher_feedback',
+            'detail': 'teacher_first_audio',
+            'event_seq': 12,
+        },
+        timestamp='2026-04-28T00:00:03Z',
+        event_seq=None,
+    )
+    assert client_metric_line is not None
+    assert client_metric_line['metric_name'] == 'tts_first_audio_delay_ms'
+    assert client_metric_line['metric_value_ms'] == 184
+    assert client_metric_line['linked_event_seq'] == 12
+
     exported = _export_line_record(request_line, index=1)
     assert exported['agent_speaker'] == 'u8c46u82d7'
     assert exported['request_reason'] == 'moderator_designated_human'
+
+    exported_metric = _export_line_record(client_metric_line, index=2)
+    assert exported_metric['metric_name'] == 'tts_first_audio_delay_ms'
+    assert exported_metric['metric_value_ms'] == 184
 
 
 def test_floor_manager_rewrites_teacher_self_quote_to_real_owner_from_session_seven() -> None:

@@ -192,6 +192,27 @@ class DiscussionWebSocket {
     }));
   }
 
+  void sendClientMetric({
+    required String name,
+    required int valueMs,
+    String? speaker,
+    String? phase,
+    int? eventSeq,
+    String? detail,
+  }) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'client_metric',
+      'name': name,
+      'value_ms': valueMs,
+      if (speaker != null && speaker.isNotEmpty) 'speaker': speaker,
+      if (phase != null && phase.isNotEmpty) 'phase': phase,
+      if (eventSeq != null) 'event_seq': eventSeq,
+      if (detail != null && detail.isNotEmpty) 'detail': detail,
+    }));
+  }
+
   /// 发送暂停信号
   void sendPause() {
     if (!_connected || _channel == null) return;

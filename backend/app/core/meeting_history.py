@@ -179,6 +179,10 @@ def _build_preview(entry_type: str, data: Any) -> str:
             preview = f"轮到 {payload.get('speaker', '')}".strip()
         elif entry_type == "human_input_requested":
             preview = f"等待 {payload.get('speaker', '')} 发言".strip()
+        elif entry_type == "client_metric":
+            preview = (
+                f"指标 {payload.get('name', '')}={payload.get('value_ms', '')}ms"
+            ).strip()
         elif entry_type == "state_change":
             preview = f"状态 {payload.get('old_label', payload.get('old_state', ''))} → {payload.get('new_label', payload.get('new_state', ''))}".strip()
         else:
@@ -287,6 +291,31 @@ def _build_script_line(
             line["request_id"] = request_id
         if request_state:
             line["request_state"] = request_state
+        return line
+
+    if entry_type == "client_metric":
+        metric_name = str(payload.get("name", "") or "").strip()
+        value_ms = payload.get("value_ms")
+        if not metric_name or not isinstance(value_ms, int):
+            return None
+        speaker = str(payload.get("speaker", "") or "").strip()
+        phase = str(payload.get("phase", "") or "").strip()
+        detail = str(payload.get("detail", "") or "").strip()
+        linked_event_seq = payload.get("event_seq")
+        line = {
+            **base_line,
+            "kind": "note",
+            "speaker": speaker or "前端指标",
+            "text": f"指标 {metric_name} = {value_ms}ms",
+            "metric_name": metric_name,
+            "metric_value_ms": value_ms,
+        }
+        if phase:
+            line["metric_phase"] = phase
+        if detail:
+            line["metric_detail"] = detail
+        if isinstance(linked_event_seq, int):
+            line["linked_event_seq"] = linked_event_seq
         return line
 
     if entry_type == "designate_speaker":
@@ -431,6 +460,9 @@ def _export_line_record(line: dict[str, Any], *, index: int) -> dict[str, Any]:
     for key in ("agent_source", "agent_speaker", "request_reason"):
         if line.get(key) is not None:
             record[key] = line.get(key)
+    for key in ("metric_name", "metric_value_ms", "metric_phase", "metric_detail"):
+        if line.get(key) is not None:
+            record[key] = line.get(key)
     recording = line.get("recording")
     if isinstance(recording, dict):
         record["recording"] = recording
@@ -438,6 +470,8 @@ def _export_line_record(line: dict[str, Any], *, index: int) -> dict[str, Any]:
         record["echo_event_seq"] = line.get("echo_event_seq")
     if line.get("echo_timestamp") is not None:
         record["echo_timestamp"] = line.get("echo_timestamp")
+    if line.get("linked_event_seq") is not None:
+        record["linked_event_seq"] = line.get("linked_event_seq")
     return record
 
 
