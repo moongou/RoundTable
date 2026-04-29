@@ -861,6 +861,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _discussionEnded = false;
   bool _isGeneratingHumanReview = false;
   bool _humanReviewMuted = false;
+  bool _humanReviewOverlayVisible = false;
+  bool _humanReviewPrefetchStarted = false;
+  bool _teacherFarewellHeard = false;
   bool _showEndingQuotesScreen = false;
   bool _mountEndingQuotesOverlay = false;
   // TTS 顺序播放队列 (i)
@@ -1981,8 +1984,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
     setState(() {
       _isGeneratingHumanReview = true;
-      _humanReview = '';
-      _humanReviewMuted = false;
+      if (_humanReview.isEmpty) {
+        _humanReviewMuted = false;
+      }
     });
 
     try {
@@ -2000,12 +2004,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       if (!mounted || _lastErrorMessage != null) return;
       setState(() {
         _humanReview = normalized;
-        _humanReviewMuted = false;
-        if (_lastErrorMessage == null) {
+        if (_humanReviewOverlayVisible) {
+          _humanReviewMuted = false;
           _statusText = '讨论已结束，左侧可以查看李老师给你的会后点评';
         }
       });
-      unawaited(_readAloudHumanReview(normalized));
+      if (_humanReviewOverlayVisible && !_humanReviewMuted) {
+        unawaited(_readAloudHumanReview(normalized));
+      }
     } catch (error) {
       if (kDebugMode) {
         debugPrint('human review generation failed: $error');
@@ -2016,6 +2022,73 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           _isGeneratingHumanReview = false;
         });
       }
+    }
+  }
+
+  bool _isTeacherSpeechMessage({
+    required String source,
+    required String msgType,
+  }) {
+    if (msgType == 'system') return false;
+    return ImmersiveSessionScreen.normalizeSpeakerLabel(source) ==
+        ImmersiveSessionScreen.normalizeSpeakerLabel(
+            ImmersiveSessionScreen.teacherDisplayName);
+  }
+
+  bool _looksLikeTeacherClosingCue(String content) {
+    final compact = content.replaceAll(RegExp(r'\s+'), '');
+    if (compact.isEmpty) return false;
+    return compact.contains('收尾前') ||
+        compact.contains('最后我再问一次') ||
+        compact.contains('小总结') ||
+        compact.contains('总结吧') ||
+        compact.contains('讨论结束');
+  }
+
+  bool _containsTeacherFarewell(String content) {
+    final compact = content.replaceAll(RegExp(r'\s+'), '');
+    return compact.contains('再见');
+  }
+
+  void _startHumanReviewPrefetchIfNeeded() {
+    if (_humanReviewPrefetchStarted ||
+        _isGeneratingHumanReview ||
+        _humanReview.isNotEmpty) {
+      return;
+    }
+    if (!ImmersiveSessionScreen.hasHumanReviewMaterial(
+      _goldenQuoteSourceMessages(),
+      humanName: widget.humanName,
+    )) {
+      return;
+    }
+    _humanReviewPrefetchStarted = true;
+    unawaited(_generateHumanReview());
+  }
+
+  void _revealHumanReviewOverlayAfterFarewell() {
+    if (_lastErrorMessage != null) return;
+    _teacherFarewellHeard = true;
+    if (mounted) {
+      setState(() {
+        _humanReviewOverlayVisible = true;
+        if (_discussionEnded) {
+          _statusText =
+              _humanReview.isEmpty ? '老师正在整理你的会后点评…' : '讨论已结束，左侧可以查看李老师给你的会后点评';
+        }
+      });
+    }
+
+    if (_humanReview.isNotEmpty) {
+      if (!_humanReviewMuted) {
+        unawaited(_readAloudHumanReview(_humanReview));
+      }
+      return;
+    }
+
+    _startHumanReviewPrefetchIfNeeded();
+    if (!_isGeneratingHumanReview) {
+      unawaited(_generateHumanReview());
     }
   }
 
@@ -2851,6 +2924,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             }
           }
 
+          final teacherSpeech = _isTeacherSpeechMessage(
+            source: source,
+            msgType: msgType,
+          );
+          if (teacherSpeech && _looksLikeTeacherClosingCue(content)) {
+            _startHumanReviewPrefetchIfNeeded();
+          }
+          if (teacherSpeech && _containsTeacherFarewell(content)) {
+            _revealHumanReviewOverlayAfterFarewell();
+          }
+
           _buildParticipants();
         }
         break;
@@ -3260,30 +3344,27 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         setState(() {
           _statusText = endedWithError
               ? '会话已中断: ${_lastErrorMessage!}'
-              : shouldGenerateHumanReview
+              : (_teacherFarewellHeard && shouldGenerateHumanReview)
                   ? '讨论已结束，李老师正在给你写会后点评'
                   : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
           _goldenQuotes.clear();
-          _humanReview = '';
-          _humanReviewMuted = false;
           _discussionEnded = true;
           _showEndingQuotesScreen = false;
         });
         if (shouldGenerateHumanReview) {
-          // 等老师把"讨论结束语"完整播完后再弹出点评卡。
-          // 通过稳定空闲窗口确保不会与老师的最后一句重叠。
-          unawaited(() async {
-            await _waitForMainTtsToSettleBeforeHumanReview();
-            if (!mounted) return;
-            if (_lastErrorMessage != null) return;
-            // 老师讲完后再清掉中间字幕，准备弹出全屏点评。
-            setState(() {
-              _centerMessage = '';
-            });
-            await _generateHumanReview();
-          }());
+          _startHumanReviewPrefetchIfNeeded();
+          if (_teacherFarewellHeard) {
+            unawaited(() async {
+              await _waitForMainTtsToSettleBeforeHumanReview();
+              if (!mounted || _lastErrorMessage != null) return;
+              setState(() {
+                _centerMessage = '';
+              });
+              _revealHumanReviewOverlayAfterFarewell();
+            }());
+          }
         }
         break;
       case WsEventType.interrupt:
@@ -5174,6 +5255,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               // ── 需求 8：金句不再常驻显示，改为讨论结束后通过老师点评弹窗的「查看金句」按钮查看。──
               // 旧的 _QuoteSidebar 已被移除以保持讨论页画面整洁。
               if (_discussionEnded &&
+                  _humanReviewOverlayVisible &&
                   reviewCardWidth > 200 &&
                   (_humanReview.isNotEmpty || _isGeneratingHumanReview))
                 // 旧版左侧紧凑点评卡已被新的全屏点评浮层取代，
@@ -5634,8 +5716,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                           },
                           padding: EdgeInsets.zero,
                           constraints:
-                              const BoxConstraints(minWidth: 36, minHeight: 36),
+                              const BoxConstraints(minWidth: 40, minHeight: 40),
                         ),
+                        const SizedBox(width: 6),
                         IconButton(
                           icon: Icon(
                             _showPhasePanel
@@ -5650,9 +5733,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                           },
                           padding: EdgeInsets.zero,
                           constraints:
-                              const BoxConstraints(minWidth: 36, minHeight: 36),
+                              const BoxConstraints(minWidth: 40, minHeight: 40),
                         ),
-                        const SizedBox(width: 2),
+                        const SizedBox(width: 8),
                         // ── 右上：历史 ──
                         IconButton(
                           icon: const Icon(Icons.history,
@@ -5660,7 +5743,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                           onPressed: _showChatHistory,
                           padding: EdgeInsets.zero,
                           constraints:
-                              const BoxConstraints(minWidth: 36, minHeight: 36),
+                              const BoxConstraints(minWidth: 40, minHeight: 40),
                         ),
                       ],
                     ),
@@ -5734,6 +5817,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 .transform(_endingQuotesTransitionController.value);
             final baseContent = child ?? const SizedBox.shrink();
             final showReviewOverlay = _discussionEnded &&
+                _humanReviewOverlayVisible &&
                 (_humanReview.isNotEmpty || _isGeneratingHumanReview) &&
                 !showEndingQuotesOverlay;
             return Stack(

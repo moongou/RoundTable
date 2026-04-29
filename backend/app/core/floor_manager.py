@@ -95,6 +95,16 @@ class FloorManager:
         re.compile(r"\(([^)\n]{1,220})\)"),
         re.compile(r"（([^）\n]{1,220})）"),
     )
+    _MODERATOR_REGULAR_SENTENCE_LIMIT = 2
+    _MODERATOR_INVITE_SENTENCE_LIMIT = 3
+    _MODERATOR_CLOSING_SENTENCE_LIMIT = 3
+    _MODERATOR_END_MARKERS = (
+        "讨论结束",
+        "就到这里",
+        "聊到这里",
+        "下次见",
+        "结束啦",
+    )
 
     def __init__(
         self,
@@ -148,6 +158,10 @@ class FloorManager:
         self._streaming_emitted_raw_prefix: dict[str, str] = {}
         self._streaming_emitted_segment_keys: dict[str, set[str]] = {}
         self._current_streaming_source: Optional[str] = None
+        self._first_human_handoff_streamed = False
+        self._moderator_stream_sentence_emitted = 0
+        self._dropped_ai_stream_while_human_waiting = 0
+        self._dropped_ai_message_while_human_waiting = 0
 
         # display name → agent name 映射（需求4：用于指定发言者解析）
         self._display_name_to_agent: dict[str, str] = {}
@@ -171,6 +185,7 @@ class FloorManager:
         self._min_human_turn_window_sec = 8.0
         self._human_turn_started_mono = 0.0
         self._last_human_input_requested_speaker = ""
+        self._human_input_request_seq = 0
         self._pending_human_input_reason = "normal"
         self._human_turn_idle_notice_sent = False
 
@@ -201,6 +216,12 @@ class FloorManager:
                 logger.debug("team resume raised", exc_info=True)
             self._touch_progress("resumed")
             self._last_watchdog_action_ts = 0.0
+
+    def diagnostics(self) -> dict[str, int]:
+        return {
+            "dropped_ai_stream_while_human_waiting": self._dropped_ai_stream_while_human_waiting,
+            "dropped_ai_message_while_human_waiting": self._dropped_ai_message_while_human_waiting,
+        }
 
     async def _wait_until_resumed(self) -> None:
         while self._paused:
@@ -259,6 +280,95 @@ class FloorManager:
                 names.append(display_name)
         return names
 
+    def _preferred_human_agent_name(self) -> str:
+        for agent in self.human_agents:
+            name = getattr(agent, "name", "")
+            if name in self.human_names:
+                return name
+        return sorted(self.human_names)[0] if self.human_names else ""
+
+    def _has_human_spoken(self) -> bool:
+        return any(self._speaker_message_count.get(name, 0) > 0 for name in self.human_names)
+
+    def _non_human_turn_count_before_first_human(self) -> int:
+        return sum(
+            count
+            for name, count in self._speaker_message_count.items()
+            if name not in self.human_names and name != "moderator" and count > 0
+        )
+
+    def _should_force_first_human_invite(self) -> bool:
+        return (
+            bool(self.human_names)
+            and not self._has_human_spoken()
+            and self._non_human_turn_count_before_first_human() >= 2
+            and self.state not in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+        )
+
+    def _build_first_human_handoff_text(self, original_text: str = "") -> str:
+        human_agent = self._preferred_human_agent_name()
+        human_display = self._agent_to_display_name.get(human_agent, human_agent)
+        human_vocative = self._format_display_vocative(human_display)
+        handoff = f"我们先把麦克风交给{human_vocative}。{human_vocative}，你怎么看？"
+
+        lead = ""
+        display_names = self._get_all_display_names()
+        segments, _ = self._drain_complete_stream_sentences(original_text or "")
+        for segment in segments[:2]:
+            compact = re.sub(r"\s+", "", segment)
+            if not compact or len(compact) > 44:
+                continue
+            if re.search(r"(请|想问问|问问|想听听|听听|有请|邀请|轮到|下一位|接下来|交给|发言)", segment):
+                continue
+            if display_names and parse_speaker_designation(segment, display_names):
+                continue
+            lead = segment.strip()
+            break
+
+        return f"{lead}{handoff}" if lead else handoff
+
+    def _force_first_human_invitation(
+        self,
+        source: str,
+        text: str,
+        designated: Optional[str],
+    ) -> tuple[str, Optional[str], bool]:
+        if source != "moderator" or not text or not self._should_force_first_human_invite():
+            return text, designated, False
+
+        human_agent = self._preferred_human_agent_name()
+        if not human_agent:
+            return text, designated, False
+        human_display = self._agent_to_display_name.get(human_agent, human_agent)
+        forced_text = self._build_first_human_handoff_text(text)
+        if forced_text != text:
+            logger.info(
+                "[FloorManager] 首次真人发言已到期，强制把麦克风交给: %s",
+                human_agent,
+            )
+        return forced_text, human_display, True
+
+    def _force_first_human_stream_segment(self, source: str, segment: str) -> str:
+        if source != "moderator" or not segment or not self._should_force_first_human_invite():
+            return segment
+
+        display_names = self._get_all_display_names()
+        designated = parse_speaker_designation(segment, display_names) if display_names else None
+        inviteish = bool(
+            re.search(
+                r"(请|想问问|问问|想听听|听听|有请|邀请|轮到|下一位|接下来|交给|发言|你怎么看)",
+                segment,
+            )
+        )
+        if not designated and not inviteish:
+            return segment
+
+        if self._first_human_handoff_streamed:
+            return "" if inviteish else segment
+
+        self._first_human_handoff_streamed = True
+        return self._build_first_human_handoff_text("")
+
     def _display_role_suffix(self, display_name: str, fallback: str = "同学") -> str:
         agent_name = self._display_name_to_agent.get(display_name, display_name)
         if agent_name in self.thinker_names or display_name in self._thinker_display_names:
@@ -300,6 +410,139 @@ class FloorManager:
         for pattern, replacement in replacements:
             text = re.sub(pattern, replacement, text)
         return text
+
+    def _has_moderator_invitation_intent(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"(请|想问问|问问|想听听|听听|有请|邀请|轮到|下一位|接下来|交给|发言|你怎么看)",
+                text or "",
+            )
+        )
+
+    def _limit_text_sentence_count(self, text: str, *, max_sentences: int) -> str:
+        value = (text or "").strip()
+        if not value or max_sentences <= 0:
+            return ""
+
+        segments, remainder = self._drain_complete_stream_sentences(value)
+        sentence_units = [*segments]
+        if remainder:
+            sentence_units.append(remainder)
+        if len(sentence_units) <= max_sentences:
+            return value
+        return "".join(sentence_units[:max_sentences]).strip()
+
+    def _enforce_moderator_brevity(self, text: str, *, is_final_closing: bool) -> str:
+        value = (text or "").strip()
+        if not value:
+            return ""
+        if is_final_closing:
+            limit = self._MODERATOR_CLOSING_SENTENCE_LIMIT
+        elif self._has_moderator_invitation_intent(value):
+            limit = self._MODERATOR_INVITE_SENTENCE_LIMIT
+        else:
+            limit = self._MODERATOR_REGULAR_SENTENCE_LIMIT
+        return self._limit_text_sentence_count(value, max_sentences=limit)
+
+    def _sanitize_unknown_student_vocatives(self, text: str, *, last_display: str) -> str:
+        value = text or ""
+        known_names = set(self._agent_to_display_name.values())
+
+        def repl(match: re.Match[str]) -> str:
+            name = (match.group('name') or "").strip()
+            suffix = (match.group('suffix') or "").strip()
+            if name in known_names:
+                return match.group(0)
+            if last_display:
+                fallback = "先生" if suffix == "先生" else "同学"
+                return self._format_display_vocative(last_display, fallback=fallback)
+            return "有同学"
+
+        return re.sub(
+            r"(?P<name>小[\u4e00-\u9fff]{1,2})(?P<suffix>同学|哥哥|姐姐|先生)",
+            repl,
+            value,
+        )
+
+    def _sanitize_ungrounded_neutral_quote_claims(self, text: str) -> str:
+        value = text or ""
+
+        def repl(match: re.Match[str]) -> str:
+            fragment = (match.group('fragment') or "").strip()
+            if not fragment:
+                return match.group(0)
+            owner = self._guess_reference_owner(fragment)
+            if owner:
+                return f"{owner}提到“{fragment}”"
+            return "这个点"
+
+        return re.sub(
+            r"有同学(?:刚才)?(?:提到|说|讲|分享|指出)(?:的)?[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]",
+            repl,
+            value,
+        )
+
+    def _is_traceable_quote_fragment(self, fragment: str) -> bool:
+        normalized = normalize_reference_match_text(fragment)
+        if len(normalized) < 2:
+            return False
+
+        # 与最近真实发言可对齐，才允许保留引号片段。
+        if self._guess_reference_owner(fragment):
+            return True
+
+        topic_norm = normalize_reference_match_text(self._current_topic)
+        if topic_norm and len(normalized) >= 4 and normalized in topic_norm:
+            return True
+
+        return False
+
+    def _sanitize_moderator_quote_whitelist(self, text: str) -> str:
+        value = text or ""
+
+        def rewrite_untraceable_quoted_label(match: re.Match[str]) -> str:
+            fragment = (match.group('fragment') or "").strip()
+            if not fragment:
+                return "这个点"
+            if self._is_traceable_quote_fragment(fragment):
+                return match.group(0)
+            return "这个点"
+
+        value = re.sub(
+            r"[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]\s*这个(?:比喻|说法|提法|称呼|词|表达)",
+            rewrite_untraceable_quoted_label,
+            value,
+        )
+
+        def rewrite_teacher_self_quote(match: re.Match[str]) -> str:
+            prefix = match.group('prefix') or ''
+            fragment = (match.group('fragment') or "").strip()
+            if not fragment:
+                return f"{prefix}这个点"
+            owner = self._guess_reference_owner(fragment)
+            if owner:
+                return f"{owner}刚才说“{fragment}”"
+            return f"{prefix}这个点"
+
+        value = re.sub(
+            r"(?P<prefix>老师|我)(?:刚才)?(?:说|提到|讲到|提出|分享)[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]",
+            rewrite_teacher_self_quote,
+            value,
+        )
+
+        value = re.sub(r"这个点\s*这个点", "这个点", value)
+        return value
+
+    def _ensure_moderator_explicit_goodbye(self, text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return value
+        compact = re.sub(r"\s+", "", value)
+        if "再见" in compact:
+            return value
+        if not any(marker in compact for marker in self._MODERATOR_END_MARKERS):
+            return value
+        return f"{value} 再见！"
 
     def _rewrite_unspoken_named_attribution(
         self,
@@ -426,6 +669,21 @@ class FloorManager:
                 text = re.sub(
                     rf"{re.escape(name)}(?:同学|先生)?\s*(提了|问了|说了|想到了|建议了|补充了|指出了)",
                     r"刚才有同学\1",
+                    text,
+                )
+                text = re.sub(
+                    rf"(谢谢|感谢|多谢)\s*{re.escape(name)}(?:同学|先生)?",
+                    rf"\1{self._format_display_vocative(last_display)}",
+                    text,
+                )
+                text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?[，,:：]?\s*你\s*(这个|刚才|说得|讲得|提到|提得|问得|分享)",
+                    rf"{self._format_display_vocative(last_display)}，你\1",
+                    text,
+                )
+                text = re.sub(
+                    rf"{re.escape(name)}(?:同学|先生)?\s*(?:说得|讲得|问得|提得)(?:太|真|特别|非常|挺|很|也)?(?:好|棒|精彩|到位)",
+                    rf"{self._format_display_vocative(last_display)}，你这个点说得很到位",
                     text,
                 )
                 text = self._rewrite_unspoken_named_attribution(
@@ -569,6 +827,11 @@ class FloorManager:
 
         if source == "moderator":
             text = self._sanitize_repeated_self_invitation(text, last_display=last_display)
+
+        text = self._sanitize_unknown_student_vocatives(text, last_display=last_display)
+        text = self._sanitize_ungrounded_neutral_quote_claims(text)
+        if source == "moderator":
+            text = self._sanitize_moderator_quote_whitelist(text)
 
         text = re.sub(r"\s{2,}", " ", text).strip()
         text = re.sub(r"^[，,:：\s]+", "", text)
@@ -1052,7 +1315,6 @@ class FloorManager:
         return (
             self.state == FloorState.HUMAN_TURN_WAITING
             and source in self.ai_names
-            and source != "moderator"
         )
 
     async def _make_human_input_requested_event(
@@ -1082,11 +1344,15 @@ class FloorManager:
             await self._set_state(FloorState.HUMAN_TURN_WAITING, reason=reason)
         else:
             self._touch_progress(reason)
+        self._human_input_request_seq += 1
+        request_id = f"hr-{self._human_input_request_seq}"
         return {
             "event_type": "human_input_requested",
             "data": {
                 "speaker": speaker,
                 "reason": self._pending_human_input_reason or "normal",
+                "request_id": request_id,
+                "state": self.state.value,
             },
         }
 
@@ -1257,6 +1523,7 @@ class FloorManager:
             await self.summary_memory.clear()
         if self.human_guidance_memory is not None:
             await self.human_guidance_memory.clear()
+        had_error = False
 
         try:
             stream = self.team.run_stream(task=topic)
@@ -1272,6 +1539,7 @@ class FloorManager:
                         break
 
         except Exception as e:
+            had_error = True
             error_info = describe_model_error(e)
             logger.error(
                 "讨论运行异常: %s: %s",
@@ -1284,6 +1552,27 @@ class FloorManager:
                 "data": error_info.to_event_data(),
             }
         finally:
+            if (
+                not had_error
+                and not self._discussion_end_requested
+                and "moderator" in self.ai_names
+            ):
+                forced_goodbye = self._enforce_moderator_brevity(
+                    self._ensure_moderator_explicit_goodbye("同学们，今天讨论就到这里。"),
+                    is_final_closing=True,
+                )
+                if forced_goodbye:
+                    await self._emit_message("moderator", forced_goodbye, "normal")
+                    yield {
+                        "event_type": "message",
+                        "data": {
+                            "source": "moderator",
+                            "content": forced_goodbye,
+                            "tts_text": forced_goodbye,
+                        },
+                    }
+                    self._discussion_end_requested = True
+
             self._watchdog_stop.set()
             if self._watchdog_task:
                 self._watchdog_task.cancel()
@@ -1330,6 +1619,8 @@ class FloorManager:
             else:
                 await self._set_state(FloorState.AI_SPEAKING, reason="speaker_selected_ai")
             self._last_human_input_requested_speaker = ""
+            if speaker == "moderator":
+                self._moderator_stream_sentence_emitted = 0
 
             await self._emit_turn_change(speaker, is_human)
             return {
@@ -1343,6 +1634,7 @@ class FloorManager:
             content = event.content if hasattr(event, "content") else str(event)
 
             if self._should_suppress_ai_while_human_waiting(source):
+                self._dropped_ai_stream_while_human_waiting += 1
                 logger.warning(
                     "[FloorManager] 真人等待中丢弃错插 AI 流: source=%s content=%s",
                     source,
@@ -1373,9 +1665,18 @@ class FloorManager:
                         )
                         continue
                     segment = self._sanitize_all_references(source, cleaned_raw_segment)
+                    segment = self._force_first_human_stream_segment(source, segment)
                     if not segment:
                         consumed_raw_segments.append(raw_segment)
                         continue
+                    if source == "moderator":
+                        segment = self._enforce_moderator_brevity(segment, is_final_closing=False)
+                        if not segment:
+                            consumed_raw_segments.append(raw_segment)
+                            continue
+                        if self._moderator_stream_sentence_emitted >= self._MODERATOR_INVITE_SENTENCE_LIMIT:
+                            consumed_raw_segments.append(raw_segment)
+                            continue
                     segment = await self.safety_filter.filter_or_rewrite(segment)
                     segment = self._strip_meta_reasoning_text(segment).strip()
                     if segment:
@@ -1387,6 +1688,8 @@ class FloorManager:
                                 segment[:80],
                             )
                             continue
+                        if source == "moderator":
+                            self._moderator_stream_sentence_emitted += 1
                         tts_segments.append(segment)
                     else:
                         consumed_raw_segments.append(raw_segment)
@@ -1412,6 +1715,7 @@ class FloorManager:
                 return None
 
             if self._should_suppress_ai_while_human_waiting(source):
+                self._dropped_ai_message_while_human_waiting += 1
                 logger.warning(
                     "[FloorManager] 真人等待中丢弃错插 AI 消息: source=%s content=%s",
                     source,
@@ -1444,6 +1748,8 @@ class FloorManager:
                     self._moderator_roleplay_target = None
                 return None
 
+            if source == "moderator":
+                content = self._ensure_moderator_explicit_goodbye(content)
             is_final_closing = source == "moderator" and self._is_moderator_final_closing(content)
 
             # 点名解析应尽量基于原始语义，先于安全改写尝试。
@@ -1453,6 +1759,13 @@ class FloorManager:
             if all_display_names and (source in self.ai_names or source in self.human_names):
                 designated_pre_filter = parse_speaker_designation(content, all_display_names)
 
+            if not is_final_closing:
+                content, designated_pre_filter, _ = self._force_first_human_invitation(
+                    source,
+                    content,
+                    designated_pre_filter,
+                )
+
             had_streamed_tts, remaining_tts_raw = self._pop_streaming_message_tail(source, raw_content)
 
             # 安全过滤 AI 输出
@@ -1461,6 +1774,15 @@ class FloorManager:
                 content = self._strip_meta_reasoning_text(content)
                 if not content:
                     logger.info("[FloorManager] 安全过滤后消息为空，跳过发送: source=%s", source)
+                    return None
+
+            if source == "moderator":
+                content = self._enforce_moderator_brevity(
+                    content,
+                    is_final_closing=is_final_closing,
+                )
+                if not content:
+                    logger.info("[FloorManager] 主持人消息被长度约束后为空，跳过发送")
                     return None
 
             # 如果是老师或用户的发言，检查是否指定了下一位发言者（需求4）
@@ -1507,6 +1829,7 @@ class FloorManager:
             if immediate_human_request:
                 if source == "moderator":
                     self._moderator_roleplay_target = None
+                    self._first_human_handoff_streamed = False
                 human_request = await self._make_human_input_requested_event(
                     immediate_human_request,
                     reason="moderator_designated_human",
@@ -1517,6 +1840,8 @@ class FloorManager:
 
             if source == "moderator":
                 self._moderator_roleplay_target = None
+                self._first_human_handoff_streamed = False
+                self._moderator_stream_sentence_emitted = 0
             return {
                 "event_type": "message",
                 "data": {"source": source, "content": content, "tts_text": tts_text},
@@ -1547,21 +1872,18 @@ class FloorManager:
         text = re.sub(r"\s+", "", content or "")
         if not text:
             return False
-        final_markers = (
-            "讨论结束",
-            "今天就聊到这儿",
-            "今天就聊到这里",
-            "今天聊到这儿",
-            "今天聊到这里",
-            "今天就到这里",
-            "今天到这里",
-            "下次见",
-            "再见",
-            "再见啦",
-            "再见了",
-            "拜拜啦",
+        return "再见" in text
+
+    def _looks_like_reported_designation_mistake(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text or "")
+        if not compact:
+            return False
+        patterns = (
+            r"(?:老师|你).{0,24}(?:叫|让|说|点名|安排|请).{0,40}(?:搞错|弄错|搞混|错了|错啦)",
+            r"(?:老师|你).{0,20}(?:叫我|让我|点名让我|安排我).{0,24}(?:又|却).{0,12}(?:说|请|让|安排)",
+            r"(?:刚才|之前|前面).{0,16}(?:叫|让|说|点名|安排|请).{0,30}(?:搞错|弄错|搞混|错了|错啦)",
         )
-        return any(marker in text for marker in final_markers)
+        return any(re.search(pattern, compact) for pattern in patterns)
 
     async def submit_human_input(self, name: str, text: str) -> None:
         """提交人类参与者的输入文本。
@@ -1648,6 +1970,14 @@ class FloorManager:
             else all_participant_names
         )
         designated = parse_speaker_designation(normalized_text, participant_labels)
+        if designated:
+            if self._looks_like_reported_designation_mistake(normalized_text):
+                logger.info(
+                    "[FloorManager] 用户 %s 正在反馈点名错误，忽略文本中的历史点名: %s",
+                    normalized_name,
+                    designated,
+                )
+                designated = None
         if designated:
             logger.info("[FloorManager] 用户 %s 指定下一位发言者: %s", normalized_name, designated)
             # 转换为 agent name

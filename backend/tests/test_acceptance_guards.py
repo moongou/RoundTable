@@ -593,6 +593,63 @@ def test_sanitize_all_references_rewrites_cross_sentence_quote_followups_to_real
     assert '小行提出的“违规扣分”' in sanitized
 
 
+def test_sanitize_all_references_moderator_quote_whitelist_drops_untraceable_quote() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._recent_display_speakers = ['李老师', '小探']
+    floor_manager._speaker_message_count.update({'moderator': 1, 'explorer': 1})
+    floor_manager._recent_reference_quotes = [
+        ('小探', '演员要先会观察生活，再去尝试不同角色。'),
+    ]
+
+    sanitized = floor_manager._sanitize_all_references(
+        'moderator',
+        '小探同学，你说的“情绪海绵”这个比喻很有意思。',
+    )
+
+    assert '情绪海绵' not in sanitized
+    assert '这个点' in sanitized
+
+
+def test_sanitize_all_references_moderator_quote_whitelist_keeps_traceable_quote() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._recent_display_speakers = ['李老师', '小探']
+    floor_manager._speaker_message_count.update({'moderator': 1, 'explorer': 1})
+    floor_manager._recent_reference_quotes = [
+        ('小探', '演员要先会观察生活，再去尝试不同角色。'),
+    ]
+
+    sanitized = floor_manager._sanitize_all_references(
+        'moderator',
+        '小探同学，你刚才说“演员要先会观察生活，再去尝试不同角色”这个观点很扎实。',
+    )
+
+    assert '演员要先会观察生活，再去尝试不同角色' in sanitized
+
+
 @pytest.mark.asyncio
 async def test_skip_turn_is_not_tracked_as_spoken_reference() -> None:
     floor_manager = FloorManager(
@@ -1050,6 +1107,8 @@ def test_meeting_history_script_keeps_agent_debug_fields() -> None:
             'speaker': '豆苗',
             'agent_speaker': 'u8c46u82d7',
             'reason': 'moderator_designated_human',
+            'request_id': 'req-1',
+            'state': 'human_turn_waiting',
         },
         timestamp='2026-04-28T00:00:01Z',
         event_seq=8,
@@ -1058,6 +1117,24 @@ def test_meeting_history_script_keeps_agent_debug_fields() -> None:
     assert request_line['speaker'] == '豆苗'
     assert request_line['agent_speaker'] == 'u8c46u82d7'
     assert request_line['request_reason'] == 'moderator_designated_human'
+    assert request_line['request_id'] == 'req-1'
+    assert request_line['request_state'] == 'human_turn_waiting'
+
+    human_input_line = _build_script_line(
+        'inbound',
+        'human_input',
+        {
+            'speaker': '豆苗',
+            'content': '我来补充一个例子。',
+            'request_wait_ms': 932,
+            'request_id': 'req-1',
+        },
+        timestamp='2026-04-28T00:00:02Z',
+        event_seq=None,
+    )
+    assert human_input_line is not None
+    assert human_input_line['request_wait_ms'] == 932
+    assert human_input_line['request_id'] == 'req-1'
 
     exported = _export_line_record(request_line, index=1)
     assert exported['agent_speaker'] == 'u8c46u82d7'
@@ -1245,7 +1322,7 @@ def test_turn_scheduler_prefers_ai_after_moderator_opening() -> None:
     assert selector(opening_with_ai_designation) == 'explorer'
 
 
-def test_turn_scheduler_does_not_select_human_without_moderator_human_invite() -> None:
+def test_turn_scheduler_selects_human_after_warmup_without_explicit_invite() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
 
@@ -1274,7 +1351,7 @@ def test_turn_scheduler_does_not_select_human_without_moderator_human_invite() -
         SimpleNamespace(source='moderator', content='大家说得不错，我们继续听另一位同学。'),
     ]
 
-    assert selector(thread) != '豆苗'
+    assert selector(thread) == '豆苗'
 
 
 def test_parse_speaker_designation_supports_natural_follow_up_questions() -> None:
@@ -1324,6 +1401,25 @@ def test_parse_speaker_designation_prefers_invited_name_over_context_mention() -
             participants,
         )
         == '小思'
+    )
+
+
+def test_parse_speaker_designation_prefers_target_before_dash_context_mentions() -> None:
+    participants = ['老师', '可乐', '小探', '小疑', '小说', '孔子', '豆苗']
+
+    assert (
+        parse_speaker_designation(
+            '不过我想问问咱们的真人同学豆苗——可乐说他用冰淇淋当动力，你觉得这和"心里装着更重要的事"是一回事吗？豆苗同学，你怎么看？',
+            participants,
+        )
+        == '豆苗'
+    )
+    assert (
+        parse_speaker_designation(
+            '那我想问问小疑同学——你听了小探和可乐的故事，你觉得勇气有没有"大小"之分呀？',
+            participants,
+        )
+        == '小疑'
     )
 
 
@@ -1517,6 +1613,70 @@ async def test_floor_manager_stops_after_moderator_goodbye_message() -> None:
     assert events[0]['data']['source'] == 'moderator'
 
 
+@pytest.mark.asyncio
+async def test_floor_manager_appends_explicit_goodbye_for_moderator_closing() -> None:
+    floor_manager = FloorManager(
+        team=_StreamingTeamStub(
+            [
+                TextMessage(source='moderator', content='今天就到这里啦，同学们下次见。'),
+                UserInputRequestedEvent(request_id='should-not-fire', source='豆苗'),
+            ]
+        ),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map({'moderator': '老师', '豆苗': '豆苗'})
+
+    events = [event async for event in floor_manager.run('测试话题')]
+
+    assert [event['event_type'] for event in events] == ['message', 'ended']
+    assert '再见' in events[0]['data']['content']
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_rewrites_ungrounded_neutral_quote_claims() -> None:
+    floor_manager = FloorManager(
+        team=_StreamingTeamStub(
+            [
+                TextMessage(source='moderator', content='有同学提到“抖水珠”的比喻太绝了。你愿意展开说说吗？'),
+            ]
+        ),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map({'moderator': '老师', '豆苗': '豆苗'})
+
+    events = [event async for event in floor_manager.run('测试话题')]
+
+    assert events[0]['event_type'] == 'message'
+    assert '有同学提到“抖水珠”' not in events[0]['data']['content']
+    assert '抖水珠' not in events[0]['data']['content']
+    assert '展开说说' in events[0]['data']['content']
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_forces_moderator_goodbye_before_end_when_missing() -> None:
+    floor_manager = FloorManager(
+        team=_StreamingTeamStub(
+            [
+                TextMessage(source='explorer', content='我觉得演员要先会观察生活。'),
+            ]
+        ),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map({'moderator': '老师', 'explorer': '小探', '豆苗': '豆苗'})
+
+    events = [event async for event in floor_manager.run('测试话题')]
+
+    assert [event['event_type'] for event in events] == ['message', 'message', 'ended']
+    assert events[1]['data']['source'] == 'moderator'
+    assert '再见' in events[1]['data']['content']
+
+
 def test_turn_scheduler_pulls_teacher_back_if_human_has_not_spoken_yet() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
@@ -1545,7 +1705,7 @@ def test_turn_scheduler_pulls_teacher_back_if_human_has_not_spoken_yet() -> None
     assert selector(thread) == 'moderator'
 
 
-def test_turn_scheduler_requires_explicit_human_invite_after_teacher_returns() -> None:
+def test_turn_scheduler_brings_in_human_after_teacher_returns_to_invite_phase() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
 
@@ -1573,7 +1733,7 @@ def test_turn_scheduler_requires_explicit_human_invite_after_teacher_returns() -
         ),
     ]
 
-    assert selector(thread) != '豆苗'
+    assert selector(thread) == '豆苗'
 
     explicit_invite_thread = [
         *thread[:-1],
@@ -2194,6 +2354,82 @@ async def test_submit_human_input_ignores_self_designation_target() -> None:
     queue = get_human_queue('豆苗')
     assert await asyncio.wait_for(queue.get(), timeout=0.1) == '我也想请豆苗再补充一下。'
     assert designated_updates == [None]
+
+
+@pytest.mark.asyncio
+async def test_submit_human_input_ignores_reported_moderator_designation_mistake() -> None:
+    clear_human_queues()
+    designated_updates: list[str | None] = []
+
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='comedian')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+        designated_speaker_setter=lambda name: designated_updates.append(name),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'comedian': '可乐',
+            '豆苗': '豆苗',
+        }
+    )
+
+    text = '老师，我是豆苗，你叫我发言，又说请可乐发言，你搞错了。'
+    await floor_manager.submit_human_input('豆苗', text)
+
+    queue = get_human_queue('豆苗')
+    assert await asyncio.wait_for(queue.get(), timeout=0.1) == text
+    assert designated_updates == [None]
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_forces_first_human_handoff_after_two_ai_turns() -> None:
+    designated_updates: list[str | None] = []
+    emitted_messages: list[tuple[str, str, str]] = []
+
+    async def capture_message(source: str, content: str, msg_type: str) -> None:
+        emitted_messages.append((source, content, msg_type))
+
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[
+            SimpleNamespace(name='moderator'),
+            SimpleNamespace(name='explorer'),
+            SimpleNamespace(name='skeptic'),
+        ],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+        designated_speaker_setter=lambda name: designated_updates.append(name),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            'skeptic': '小疑',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager.on_message(capture_message)
+    floor_manager._speaker_message_count['explorer'] = 1
+    floor_manager._speaker_message_count['skeptic'] = 1
+    floor_manager._recent_display_speakers.extend(['小探', '小疑'])
+
+    result = await floor_manager._process_event(
+        TextMessage(
+            source='moderator',
+            content='小疑同学刚才的问题很有意思！那我想问问小探同学，你怎么看？',
+        )
+    )
+
+    assert result is not None
+    assert result['event_type'] == 'human_input_requested'
+    assert result['data']['speaker'] == '豆苗'
+    assert designated_updates[-1] == '豆苗'
+    assert emitted_messages[-1][0] == 'moderator'
+    assert '麦克风交给豆苗同学' in emitted_messages[-1][1]
+    assert '小探同学，你怎么看' not in emitted_messages[-1][1]
 
 
 @pytest.mark.asyncio

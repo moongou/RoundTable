@@ -15,7 +15,6 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:html' as html;
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -24,6 +23,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+
+import 'platform/replay_platform.dart' as replay_platform;
+import 'platform/replay_platform_types.dart';
 
 class ReplayScreen extends StatefulWidget {
   const ReplayScreen({super.key});
@@ -66,13 +68,6 @@ class _ReplayPackage {
     required this.sessionMeta,
     required this.speakerCharacterIds,
   });
-}
-
-class _PickedReplayZip {
-  final String name;
-  final Uint8List bytes;
-
-  _PickedReplayZip({required this.name, required this.bytes});
 }
 
 class _ReplayScreenState extends State<ReplayScreen> {
@@ -120,10 +115,9 @@ class _ReplayScreenState extends State<ReplayScreen> {
   String? _error;
   String? _statusLine;
 
-  html.AudioElement? _audioEl;
-  String? _activeObjectUrl;
-  Completer<void>? _playCompleter;
   bool _disposed = false;
+  final ReplayAudioController _audioController =
+      replay_platform.createReplayAudioController();
 
   final Dio _dio = Dio(BaseOptions(
     baseUrl: kIsWeb ? Uri.base.origin : 'http://localhost:8001',
@@ -135,6 +129,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
   void dispose() {
     _disposed = true;
     _stopAudio();
+    _audioController.dispose();
     super.dispose();
   }
 
@@ -167,55 +162,8 @@ class _ReplayScreenState extends State<ReplayScreen> {
     }
   }
 
-  Future<_PickedReplayZip?> _pickZipFile() async {
-    final input = html.FileUploadInputElement()
-      ..accept = '.zip,application/zip,application/x-zip-compressed'
-      ..multiple = false;
-    input.style.display = 'none';
-    html.document.body?.append(input);
-    input.click();
-    try {
-      await input.onChange.first.timeout(
-        const Duration(minutes: 3),
-        onTimeout: () => html.Event('timeout'),
-      );
-      final files = input.files;
-      if (files == null || files.isEmpty) {
-        return null;
-      }
-      final file = files.first;
-      final bytes = await _readFileAsBytes(file);
-      return _PickedReplayZip(name: file.name, bytes: bytes);
-    } finally {
-      input.remove();
-    }
-  }
-
-  Future<Uint8List> _readFileAsBytes(html.File file) async {
-    final reader = html.FileReader();
-    final loadFuture = reader.onLoad.first;
-    final errorFuture = reader.onError.first.then<void>((_) {
-      throw Exception('无法读取 ZIP 内容');
-    });
-    final abortFuture = reader.onAbort.first.then<void>((_) {
-      throw Exception('已取消读取 ZIP 内容');
-    });
-
-    reader.readAsArrayBuffer(file);
-    await Future.any([loadFuture, errorFuture, abortFuture]);
-
-    final result = reader.result;
-    if (result is ByteBuffer) {
-      return Uint8List.view(result);
-    }
-    if (result is Uint8List) {
-      return result;
-    }
-    if (result is List<int>) {
-      return Uint8List.fromList(result);
-    }
-    throw Exception('无法解析 ZIP 内容');
-  }
+  Future<PickedReplayZip?> _pickZipFile() =>
+      replay_platform.pickReplayZipFile();
 
   String _formatLoadError(Object error) {
     final raw = error.toString().replaceFirst(RegExp(r'^Exception: '), '');
@@ -515,51 +463,15 @@ class _ReplayScreenState extends State<ReplayScreen> {
   }
 
   Future<void> _playBytes(Uint8List bytes, String mime) async {
-    _stopAudio();
-    final blob = html.Blob([bytes], mime);
-    final url = html.Url.createObjectUrlFromBlob(blob);
-    _activeObjectUrl = url;
-    final el = html.AudioElement()
-      ..src = url
-      ..playbackRate = _playbackSpeed
-      ..autoplay = true;
-    _audioEl = el;
-    final completer = Completer<void>();
-    _playCompleter = completer;
-
-    el.onEnded.listen((_) {
-      if (!completer.isCompleted) completer.complete();
-    });
-    el.onError.listen((_) {
-      if (!completer.isCompleted) completer.complete();
-    });
-
-    try {
-      await el.play();
-    } catch (_) {
-      // play() 抛异常时仍等待 ended/error
-    }
-    await completer.future;
-    if (_activeObjectUrl == url) {
-      html.Url.revokeObjectUrl(url);
-      _activeObjectUrl = null;
-    }
-    _audioEl = null;
-    _playCompleter = null;
+    await _audioController.playBytes(
+      bytes,
+      mime: mime,
+      playbackRate: _playbackSpeed,
+    );
   }
 
   void _stopAudio() {
-    try {
-      _audioEl?.pause();
-    } catch (_) {}
-    if (_activeObjectUrl != null) {
-      html.Url.revokeObjectUrl(_activeObjectUrl!);
-      _activeObjectUrl = null;
-    }
-    _audioEl = null;
-    final c = _playCompleter;
-    if (c != null && !c.isCompleted) c.complete();
-    _playCompleter = null;
+    _audioController.stop();
   }
 
   void _jumpTo(int index) {

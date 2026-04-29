@@ -68,6 +68,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
     send_drop_reasons: dict[str, int] = {}
     last_send_drop: dict[str, str] = {}
     human_hand_raise_counts: dict[str, int] = {}
+    pending_human_request_ts: dict[str, float] = {}
+    pending_human_request_id: dict[str, str] = {}
 
     def note_human_hand_raise(agent_name: str) -> None:
         normalized = (agent_name or "").strip()
@@ -565,6 +567,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 observer_mode=observer_mode,
                 agent_display_map=agent_display_map,
                 session_id=session_id,
+                pending_human_request_ts=pending_human_request_ts,
+                pending_human_request_id=pending_human_request_id,
             )
         )
 
@@ -575,20 +579,34 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 while True:
                     data = await websocket.receive_text()
                     msg = json.loads(data)
+                    msg_type = str(msg.get("type", "unknown") or "unknown")
+
+                    if msg_type == "human_input":
+                        speaker = normalize_display_name(msg.get("speaker", ""))
+                        pending_ts = pending_human_request_ts.pop(speaker, None)
+                        pending_id = pending_human_request_id.pop(speaker, "")
+                        if pending_ts is not None:
+                            wait_ms = int(
+                                max(0.0, (asyncio.get_running_loop().time() - pending_ts) * 1000)
+                            )
+                            msg["request_wait_ms"] = wait_ms
+                        if pending_id:
+                            msg["request_id"] = pending_id
+
                     if history_store is not None:
                         await history_store.append_entry(
                             "inbound",
-                            str(msg.get("type", "unknown") or "unknown"),
+                            msg_type,
                             msg,
                         )
 
-                    if msg.get("type") == "human_input":
+                    if msg_type == "human_input":
                         speaker = normalize_display_name(msg.get("speaker", ""))
                         content = (msg.get("content", "") or "").strip()
                         if not content:
                             content = "（跳过）"
                         await floor_manager.submit_human_input(speaker, content)
-                    elif msg.get("type") == "designate_speaker":
+                    elif msg_type == "designate_speaker":
                         # 用户通过 UI 指定下一位发言者
                         target = msg.get("target", "")
                         if target:
@@ -597,19 +615,19 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                             agent_name = reverse_map.get(target, target)
                             set_session_designated_speaker(agent_name)
                             logger.info("用户指定下一位发言者: %s (agent: %s)", target, agent_name)
-                    elif msg.get("type") == "interrupt":
+                    elif msg_type == "interrupt":
                         # 打断请求 - 通知主持人并切换状态
                         speaker = normalize_display_name(msg.get("speaker", ""))
                         await floor_manager.request_interrupt(speaker)
-                    elif msg.get("type") == "push_to_talk_start":
+                    elif msg_type == "push_to_talk_start":
                         # PTT 开始 - 标记用户开始发言
                         speaker = normalize_display_name(msg.get("speaker", ""))
                         await floor_manager.handle_push_to_talk_start(speaker)
-                    elif msg.get("type") == "push_to_talk_end":
+                    elif msg_type == "push_to_talk_end":
                         # PTT 结束 - 标记用户结束发言
                         speaker = normalize_display_name(msg.get("speaker", ""))
                         await floor_manager.handle_push_to_talk_end(speaker)
-                    elif msg.get("type") == "asr_status":
+                    elif msg_type == "asr_status":
                         speaker = normalize_display_name(msg.get("speaker", ""))
                         provider = str(msg.get("provider", "unknown") or "unknown")
                         status = str(msg.get("status", "unknown") or "unknown")
@@ -646,11 +664,11 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                                 "asr_error": error,
                             }
                         )
-                    elif msg.get("type") == "pause":
+                    elif msg_type == "pause":
                         if floor_manager is not None:
                             floor_manager.set_paused(True)
                             await send_event("system", {"message": "讨论已暂停"})
-                    elif msg.get("type") == "resume":
+                    elif msg_type == "resume":
                         if floor_manager is not None:
                             floor_manager.set_paused(False)
                             await send_event("system", {"message": "讨论已恢复"})
@@ -737,6 +755,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             final_status = history_final_status
             if final_status == "running":
                 final_status = "disconnected"
+            floor_diag = floor_manager.diagnostics() if floor_manager is not None else {}
             await history_store.finish(
                 status=final_status,
                 reason=history_final_reason,
@@ -745,7 +764,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         "drop_total": send_drop_total,
                         "drop_reasons": dict(send_drop_reasons),
                         "last_drop": dict(last_send_drop) if last_send_drop else None,
-                    }
+                    },
+                    "floor_manager": floor_diag,
                 },
             )
         logger.info(f"WebSocket 清理完成: session_id={session_id}")
@@ -758,6 +778,8 @@ async def _run_discussion(
     observer_mode: bool = False,
     agent_display_map: dict[str, str] | None = None,
     session_id: str = "",
+    pending_human_request_ts: dict[str, float] | None = None,
+    pending_human_request_id: dict[str, str] | None = None,
 ):
     """运行讨论并推送事件。"""
     async for event in floor_manager.run(topic):
@@ -786,6 +808,12 @@ async def _run_discussion(
                 display_speaker = agent_display_map.get(speaker, speaker)
                 data["agent_speaker"] = speaker
                 data["speaker"] = display_speaker
+            if pending_human_request_ts is not None and display_speaker:
+                pending_human_request_ts[display_speaker] = asyncio.get_running_loop().time()
+            if pending_human_request_id is not None and display_speaker:
+                request_id = str(data.get("request_id") or "").strip()
+                if request_id:
+                    pending_human_request_id[display_speaker] = request_id
             await send_event("human_input_requested", data)
             await send_event(
                 "phase_telemetry",

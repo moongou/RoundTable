@@ -246,6 +246,12 @@ def _build_script_line(
         recording = payload.get("recording")
         if isinstance(recording, dict) and recording.get("recording_id"):
             line["recording"] = _jsonable(recording)
+        request_wait_ms = payload.get("request_wait_ms")
+        if isinstance(request_wait_ms, int):
+            line["request_wait_ms"] = request_wait_ms
+        request_id = str(payload.get("request_id", "") or "").strip()
+        if request_id:
+            line["request_id"] = request_id
         return line
 
     if entry_type == "turn_change":
@@ -271,10 +277,16 @@ def _build_script_line(
         }
         agent_speaker = str(payload.get("agent_speaker", "") or "").strip()
         request_reason = str(payload.get("reason", "") or "").strip()
+        request_id = str(payload.get("request_id", "") or "").strip()
+        request_state = str(payload.get("state", "") or "").strip()
         if agent_speaker:
             line["agent_speaker"] = agent_speaker
         if request_reason:
             line["request_reason"] = request_reason
+        if request_id:
+            line["request_id"] = request_id
+        if request_state:
+            line["request_state"] = request_state
         return line
 
     if entry_type == "designate_speaker":

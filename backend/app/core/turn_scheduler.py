@@ -40,13 +40,13 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 1. **人类学生是讨论的绝对核心**（占讨论重要性30%-50%），所有讨论应以人类学生的观点为中心展开
 2. 人类学生每次发言后，老师应立即点评（总结、补充提问或引导深入）
 3. 一场讨论里，老师一般安排人类学生发言3到6次；如果人类学生是通过举手获得发言，也计入这3到6次
-3.1 老师开场后，通常先让1到2位非人类参与者铺垫，再开始第一次点名人类学生发言，帮助其自然融入
+3.1 老师开场后，通常先让1到2位非人类参与者铺垫，再开始第一次点名人类学生发言；真人学生必须在开场后的前3分钟内获得第一次发言机会
 3.2 在达到建议上限前，人类学生的频率可以稍高；达到建议上限后，除非老师明确点名或人类学生主动举手，一般不要继续主动安排
 3.3 如果人类学生已经多次主动举手，说明其参与意愿很强，此时可以放宽到5到10次甚至更多发言，并相应推迟收尾时机
 4. 不要让同一个人连续发言两次（除老师外）
 5. 优先让还没发言的人先说
 6. 人类学生通常至少间隔2位非人类发言者后可再次安排，但如果讨论需要人类回应则可提前
-7. 如果有人被指定发言（如"请XX发言"），优先安排该角色
+7. 如果有人被指定发言（如"请XX发言"），必须安排该角色；同一句里出现多个名字时，只按邀请动词后第一个受邀者执行，不要把后文引用到的人当成被点名者
 8. 当AI角色发言时，应经常引用或回应人类学生此前的观点，形成以人类为中心的讨论网络
 9. 讨论接近收尾时，优先让老师启动收尾流程：第一次请明确用"收尾前，我想先问问大家，还有没有什么想说的或者想要分享的……"征询一次；如果后来又出现新的补充，再让老师明确用"最后我再问一次，还有没有什么想说的或者想要分享的……"进行第二次征询
 10. 只输出参与者名字，不要其他内容
@@ -148,7 +148,7 @@ def parse_speaker_designation(text: str, participant_names: list[str]) -> Option
             r"(?:想问问|问问|想请|也请|不如请|要不请|正式邀请|邀请|想听听|听听|有请|请|轮到|下一位|接下来请|交给)"
         )
         target_tail = (
-            r"(?=$|[，,、：:\s。！？!?；;]"
+            r"(?=$|[，,、：:\s。！？!?；;—-]"
             r"|发言|先说|来说|来谈|谈谈|说说|讲讲|分享|回应|补充|的|该|您|你)"
         )
         alias_items = sorted(alias_map.items(), key=lambda item: len(item[0]), reverse=True)
@@ -177,7 +177,7 @@ def parse_speaker_designation(text: str, participant_names: list[str]) -> Option
         escaped_alias = re.escape(alias)
         # 允许"请/想问问/邀请"等动词与名字之间出现最多 12 个非句末标点的修饰字符，
         # 例如"想问问一直没说话的豆苗同学"。注意 [^。！？\n] 排除句末标点防止跨句。
-        invite_filler = r"[^。！？，,；;\n]{0,12}"
+        invite_filler = r"[^。！？，,；;—\-、\n]{0,12}"
         title_suffix = r"(?:同学|老师|先生|女士|小朋友)?"
         patterns = [
             rf'请\s*{escaped_alias}{title_suffix}\s*(发言|先说|来谈|谈谈|先来|先讲|先分享)?',
@@ -285,7 +285,9 @@ def create_discussion_team(
     human_turn_min_target = 0
     human_turn_soft_cap = 0
     first_human_invite_after_turns = 2
+    forced_first_human_after_turns = 3
     human_reinvite_gap = 3
+    moderator_soft_cap_ratio = 0.42
     if humans:
         human_turn_min_target = min(3, max(1, round(nominal_max_turns / 7)))
         human_turn_soft_cap = 7
@@ -316,6 +318,12 @@ def create_discussion_team(
         has_human_spoken = any(
             getattr(m, "source", None) in human_name_set for m in participant_msgs
         )
+        moderator_turn_count = sum(
+            1 for m in participant_msgs if getattr(m, "source", None) == moderator.name
+        )
+        moderator_ratio = (
+            moderator_turn_count / max(1, len(participant_msgs))
+        )
         human_turn_count = sum(
             1 for m in participant_msgs if getattr(m, "source", None) in human_name_set
         )
@@ -330,9 +338,6 @@ def create_discussion_team(
         is_opening_round = last_source == moderator.name and not non_moderator_msgs
 
         # 思想家发言计数（嘉宾必须被点名至少一次，否则视为未完成讨论）
-        thinker_turn_count = sum(
-            1 for m in participant_msgs if getattr(m, "source", None) in thinker_name_set
-        )
         unspoken_thinkers = [
             n for n in thinker_name_set
             if not any(getattr(m, "source", None) == n for m in participant_msgs)
@@ -416,6 +421,25 @@ def create_discussion_team(
 
             return [n for n in all_names if n not in human_name_set and n != moderator.name]
 
+        def preferred_human_name() -> Optional[str]:
+            if not human_name_set:
+                return None
+            return sorted(human_name_set)[0]
+
+        def balancing_candidate() -> Optional[str]:
+            if unspoken_thinkers:
+                return unspoken_thinkers[0]
+            if unspoken_non_human:
+                return unspoken_non_human[0]
+            if human_reinvite_due:
+                human_name = preferred_human_name()
+                if human_name:
+                    return human_name
+            non_human = non_human_continuation_candidates()
+            if non_human:
+                return non_human[0]
+            return None
+
         human_cooldown = 2
         since_human = turns_since_last_human()
         human_within_soft_cap = human_turn_count < effective_human_turn_soft_cap
@@ -449,6 +473,41 @@ def create_discussion_team(
                 engagement_level,
             )
             return moderator.name
+
+        latest_msg = participant_msgs[-1] if participant_msgs else None
+        latest_source = getattr(latest_msg, "source", None) if latest_msg else None
+        latest_content = (
+            str(getattr(latest_msg, "content", "") or getattr(latest_msg, "messages", ""))
+            if latest_msg
+            else ""
+        )
+        explicit_next_speaker: Optional[str] = None
+        if latest_content and latest_source == moderator.name:
+            next_display = None
+            if _display_names:
+                next_display = parse_speaker_designation(latest_content, _display_names)
+            explicit_next_speaker = next_display or parse_speaker_designation(
+                latest_content,
+                all_names,
+            )
+            if explicit_next_speaker in _display_name_to_agent:
+                explicit_next_speaker = _display_name_to_agent[explicit_next_speaker]
+
+        # 当老师发言占比过高时，优先让非老师继续，避免主持人垄断话轮。
+        if (
+            last_source == moderator.name
+            and len(non_moderator_msgs) >= 3
+            and moderator_ratio >= moderator_soft_cap_ratio
+            and not explicit_next_speaker
+        ):
+            candidate = balancing_candidate()
+            if candidate and candidate != moderator.name:
+                logger.info(
+                    "[TurnScheduler] 老师占比偏高(%.2f)，切换给 %s",
+                    moderator_ratio,
+                    candidate,
+                )
+                return candidate
 
         # ── 优先级2.3：思想家嘉宾必须被点名至少一次 ──
         # 在已经热身（非首轮且至少有 4 条非主持人发言）后，如果思想家还没说话，
@@ -517,20 +576,18 @@ def create_discussion_team(
                     return selected
 
         # ── 优先级3：只解析“最新一条”老师/用户发言中的点名，避免旧消息误触发 ──
-        latest_msg = participant_msgs[-1] if participant_msgs else None
-        latest_source = getattr(latest_msg, "source", None) if latest_msg else None
-        latest_content = (
-            str(getattr(latest_msg, "content", "") or getattr(latest_msg, "messages", ""))
-            if latest_msg
-            else ""
-        )
         if latest_content and (latest_source == moderator.name or latest_source in human_name_set):
             # 优先使用 display names 解析点名（moderator 发言中使用的是 display names）
-            next_display = None
-            if _display_names:
-                next_display = parse_speaker_designation(latest_content, _display_names)
-            # 回退到 agent names（兼容性）
-            next_speaker = next_display or parse_speaker_designation(latest_content, all_names)
+            next_speaker = explicit_next_speaker
+            if next_speaker is None:
+                next_display = None
+                if _display_names:
+                    next_display = parse_speaker_designation(latest_content, _display_names)
+                # 回退到 agent names（兼容性）
+                next_speaker = next_display or parse_speaker_designation(
+                    latest_content,
+                    all_names,
+                )
             if next_speaker and next_speaker != latest_source:
                 # 将 display name 转换为 agent name
                 if next_speaker in _display_name_to_agent:
@@ -558,6 +615,14 @@ def create_discussion_team(
                     return selected
 
             if latest_source == moderator.name and not is_opening_round and not has_human_spoken:
+                if len(non_moderator_msgs) >= first_human_invite_after_turns:
+                    forced_human = preferred_human_name()
+                    if forced_human:
+                        logger.info(
+                            "[TurnScheduler] 首轮铺垫已达阈值，优先安排真人发言: %s",
+                            forced_human,
+                        )
+                        return forced_human
                 warmup_candidates = non_human_continuation_candidates()
                 if warmup_candidates:
                     selected = warmup_candidates[0]
