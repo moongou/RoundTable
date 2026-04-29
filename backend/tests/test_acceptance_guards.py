@@ -650,6 +650,37 @@ def test_sanitize_all_references_moderator_quote_whitelist_keeps_traceable_quote
     assert '演员要先会观察生活，再去尝试不同角色' in sanitized
 
 
+def test_sanitize_all_references_rewrites_thinker_alias_and_untraceable_quote() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            'tagore': '罗宾德拉纳特·泰戈尔',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._recent_display_speakers = ['李老师', '小探']
+    floor_manager._speaker_message_count.update({'moderator': 1, 'explorer': 1})
+    floor_manager._recent_reference_quotes = [
+        ('小探', '我更在意学习节奏是不是可持续。'),
+    ]
+
+    sanitized = floor_manager._sanitize_all_references(
+        'moderator',
+        '泰戈尔先生说得太好了，尤其是“闪电麦昆”这个比喻。',
+    )
+
+    assert '泰戈尔先生说得太好了' not in sanitized
+    assert '闪电麦昆' not in sanitized
+    assert '请泰戈尔' in sanitized
+
+
 @pytest.mark.asyncio
 async def test_skip_turn_is_not_tracked_as_spoken_reference() -> None:
     floor_manager = FloorManager(
@@ -2453,6 +2484,63 @@ async def test_floor_manager_forces_first_human_handoff_after_two_ai_turns() -> 
     assert emitted_messages[-1][0] == 'moderator'
     assert '麦克风交给豆苗同学' in emitted_messages[-1][1]
     assert '小探同学，你怎么看' not in emitted_messages[-1][1]
+
+
+def test_floor_manager_first_human_invite_has_time_limit_fallback() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager._discussion_started_mono = time.monotonic() - 170.0
+    floor_manager.state = FloorState.AI_SPEAKING
+
+    assert floor_manager._should_force_first_human_invite() is True
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_blocks_wrong_ai_before_designated_ai_speaks() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='tagore'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'tagore': '罗宾德拉纳特·泰戈尔',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+
+    moderator_turn = await floor_manager._process_event(
+        TextMessage(
+            source='moderator',
+            content='我们请泰戈尔先生先说说他怎么看这个问题。',
+        )
+    )
+    assert moderator_turn is not None
+
+    blocked = await floor_manager._process_event(
+        TextMessage(
+            source='moderator',
+            content='我觉得泰戈尔先生刚才说得特别好。',
+        )
+    )
+    assert blocked is None
+
+    tagore_turn = await floor_manager._process_event(
+        TextMessage(
+            source='tagore',
+            content='自由不是逃离约束，而是在约束中生长。',
+        )
+    )
+    assert tagore_turn is not None
+    assert tagore_turn['event_type'] == 'message'
+    assert tagore_turn['data']['source'] == 'tagore'
 
 
 @pytest.mark.asyncio

@@ -287,7 +287,7 @@ def create_discussion_team(
     first_human_invite_after_turns = 2
     forced_first_human_after_turns = 3
     human_reinvite_gap = 3
-    moderator_soft_cap_ratio = 0.42
+    moderator_soft_cap_ratio = 0.30
     if humans:
         human_turn_min_target = min(3, max(1, round(nominal_max_turns / 7)))
         human_turn_soft_cap = 7

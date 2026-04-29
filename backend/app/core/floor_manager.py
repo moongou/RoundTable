@@ -95,9 +95,9 @@ class FloorManager:
         re.compile(r"\(([^)\n]{1,220})\)"),
         re.compile(r"（([^）\n]{1,220})）"),
     )
-    _MODERATOR_REGULAR_SENTENCE_LIMIT = 2
-    _MODERATOR_INVITE_SENTENCE_LIMIT = 3
-    _MODERATOR_CLOSING_SENTENCE_LIMIT = 3
+    _MODERATOR_REGULAR_SENTENCE_LIMIT = 1
+    _MODERATOR_INVITE_SENTENCE_LIMIT = 2
+    _MODERATOR_CLOSING_SENTENCE_LIMIT = 2
     _MODERATOR_END_MARKERS = (
         "讨论结束",
         "就到这里",
@@ -172,6 +172,8 @@ class FloorManager:
         self._recent_turn_summaries: list[tuple[str, str]] = []
         self._recent_reference_quotes: list[tuple[str, str]] = []
         self._moderator_roleplay_target: Optional[str] = None
+        self._expected_next_ai_speaker: Optional[str] = None
+        self._discussion_started_mono: float = 0.0
 
         # Stalled watchdog: detect no-progress windows and auto-recover human wait stalls.
         self._watchdog_task: Optional[asyncio.Task] = None
@@ -278,7 +280,46 @@ class FloorManager:
             if display_name and display_name not in seen:
                 seen.add(display_name)
                 names.append(display_name)
+        # display 映射可能先于 agent 列表更新，额外并入映射键避免简称解析遗漏。
+        for display_name in self._display_name_to_agent.keys():
+            if display_name and display_name not in seen:
+                seen.add(display_name)
+                names.append(display_name)
         return names
+
+    def _iter_display_name_aliases(self) -> list[tuple[str, str]]:
+        """返回 (规范展示名, 可识别别名) 对，覆盖简称/尾名等自然称呼。"""
+        alias_pairs: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        for canonical in self._get_all_display_names():
+            candidates = {canonical}
+            compact = canonical.replace(" ", "")
+            if compact:
+                candidates.add(compact)
+            for token in re.split(r"[·•・\-—\s]+", canonical):
+                token = token.strip()
+                if len(token) >= 2:
+                    candidates.add(token)
+            if len(compact) >= 3:
+                candidates.add(compact[-3:])
+            if len(compact) >= 2:
+                candidates.add(compact[-2:])
+
+            for alias in sorted(candidates, key=len, reverse=True):
+                alias = alias.strip()
+                if len(alias) < 2:
+                    continue
+                if alias in seen:
+                    continue
+                seen.add(alias)
+                alias_pairs.append((canonical, alias))
+
+        alias_pairs.sort(key=lambda item: len(item[1]), reverse=True)
+        return alias_pairs
+
+    def _display_aliases(self) -> list[str]:
+        return [alias for _canonical, alias in self._iter_display_name_aliases()]
 
     def _preferred_human_agent_name(self) -> str:
         for agent in self.human_agents:
@@ -298,12 +339,33 @@ class FloorManager:
         )
 
     def _should_force_first_human_invite(self) -> bool:
-        return (
-            bool(self.human_names)
-            and not self._has_human_spoken()
-            and self._non_human_turn_count_before_first_human() >= 2
-            and self.state not in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+        if not bool(self.human_names):
+            return False
+        if self._has_human_spoken():
+            return False
+        if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
+            return False
+        if self._non_human_turn_count_before_first_human() >= 2:
+            return True
+        if self._discussion_started_mono > 0 and (time.monotonic() - self._discussion_started_mono) >= 165.0:
+            logger.info("[FloorManager] 首次真人发言到达时间上限，强制交还麦克风")
+            return True
+        return False
+
+    def _enforce_expected_ai_speaker(self, source: str) -> bool:
+        expected = self._expected_next_ai_speaker
+        if not expected or source not in self.ai_names:
+            return False
+        if source == expected:
+            self._expected_next_ai_speaker = None
+            return False
+        logger.warning(
+            "[FloorManager] 点名后发言者不匹配，拦截 source=%s expected=%s",
+            source,
+            expected,
         )
+        self._set_designated_speaker(expected)
+        return True
 
     def _build_first_human_handoff_text(self, original_text: str = "") -> str:
         human_agent = self._preferred_human_agent_name()
@@ -657,7 +719,7 @@ class FloorManager:
         # 构建"已实际发言过"的名字集合
         spoke_set = self._get_spoken_display_names()
 
-        display_names = sorted(set(self._agent_to_display_name.values()), key=len, reverse=True)
+        display_names = self._display_aliases()
         for name in display_names:
             if name == current_display:
                 continue
@@ -843,7 +905,7 @@ class FloorManager:
         if source != "moderator" or not text:
             return text
 
-        display_names = sorted(set(self._agent_to_display_name.values()), key=len, reverse=True)
+        display_names = self._display_aliases()
         for display_name in display_names:
             if not display_name or display_name == self._agent_to_display_name.get("moderator", "moderator"):
                 continue
@@ -1000,14 +1062,17 @@ class FloorManager:
         if not value or not self._recent_reference_quotes:
             return value
 
-        display_names = sorted(set(self._agent_to_display_name.values()), key=len, reverse=True)
+        alias_pairs = self._iter_display_name_aliases()
+        display_names = [alias for _canonical, alias in alias_pairs]
+        alias_to_canonical = {alias: canonical for canonical, alias in alias_pairs}
         if not display_names:
             return value
         names_pattern = "|".join(re.escape(name) for name in display_names)
         invalidated_names: set[str] = set()
 
         def rewrite_named_vocative(match: re.Match[str]) -> str:
-            name = match.group('name')
+            name_alias = match.group('name')
+            name = alias_to_canonical.get(name_alias, name_alias)
             honorific = match.group('honorific') or ''
             verb = match.group('verb')
             fragment = match.group('fragment')
@@ -1015,9 +1080,9 @@ class FloorManager:
             if owner == name:
                 return match.group(0)
             if owner:
-                invalidated_names.add(name)
+                invalidated_names.add(name_alias)
                 return f"{self._format_reference_name(owner, honorific)}，你{verb}“{fragment}”"
-            invalidated_names.add(name)
+            invalidated_names.add(name_alias)
             return f"有同学{verb}“{fragment}”"
 
         value = re.sub(
@@ -1032,7 +1097,8 @@ class FloorManager:
         )
 
         def rewrite_named_report(match: re.Match[str]) -> str:
-            name = match.group('name')
+            name_alias = match.group('name')
+            name = alias_to_canonical.get(name_alias, name_alias)
             honorific = match.group('honorific') or ''
             verb = match.group('verb')
             fragment = match.group('fragment')
@@ -1040,9 +1106,9 @@ class FloorManager:
             if owner == name:
                 return match.group(0)
             if owner:
-                invalidated_names.add(name)
+                invalidated_names.add(name_alias)
                 return f"{self._format_reference_name(owner, honorific)}{verb}“{fragment}”"
-            invalidated_names.add(name)
+            invalidated_names.add(name_alias)
             return f"有同学{verb}“{fragment}”"
 
         value = re.sub(
@@ -1057,12 +1123,13 @@ class FloorManager:
         )
 
         def rewrite_named_object(match: re.Match[str]) -> str:
-            name = match.group('name')
+            name_alias = match.group('name')
+            name = alias_to_canonical.get(name_alias, name_alias)
             fragment = match.group('fragment')
             owner = self._guess_reference_owner(fragment)
             if owner == name:
                 return match.group(0)
-            invalidated_names.add(name)
+            invalidated_names.add(name_alias)
             if owner:
                 return f"{owner}提到的“{fragment}”"
             return f"有同学提到的“{fragment}”"
@@ -1518,6 +1585,8 @@ class FloorManager:
         self._current_topic = (topic or "").strip()
         self._pending_human_guidance = False
         self._discussion_end_requested = False
+        self._discussion_started_mono = time.monotonic()
+        self._expected_next_ai_speaker = None
         self._recent_turn_summaries.clear()
         if self.summary_memory is not None:
             await self.summary_memory.clear()
@@ -1621,6 +1690,8 @@ class FloorManager:
             self._last_human_input_requested_speaker = ""
             if speaker == "moderator":
                 self._moderator_stream_sentence_emitted = 0
+            if speaker and speaker == self._expected_next_ai_speaker:
+                self._expected_next_ai_speaker = None
 
             await self._emit_turn_change(speaker, is_human)
             return {
@@ -1632,6 +1703,9 @@ class FloorManager:
         if isinstance(event, ModelClientStreamingChunkEvent):
             source = event.source if hasattr(event, "source") else self.current_speaker
             content = event.content if hasattr(event, "content") else str(event)
+
+            if self._enforce_expected_ai_speaker(source):
+                return None
 
             if self._should_suppress_ai_while_human_waiting(source):
                 self._dropped_ai_stream_while_human_waiting += 1
@@ -1712,6 +1786,10 @@ class FloorManager:
 
             # 过滤 AutoGen 内部任务注入消息（source="user" 是 AutoGen 框架内部产生的）
             if source == "user":
+                return None
+
+            if self._enforce_expected_ai_speaker(source):
+                self._pop_streaming_message_tail(source, raw_content)
                 return None
 
             if self._should_suppress_ai_while_human_waiting(source):
@@ -1796,8 +1874,12 @@ class FloorManager:
                     self._set_designated_speaker(agent_name)
                     if source == "moderator" and agent_name in self.human_names:
                         immediate_human_request = agent_name
+                        self._expected_next_ai_speaker = None
+                    elif source == "moderator" and agent_name in self.ai_names and agent_name != "moderator":
+                        self._expected_next_ai_speaker = agent_name
             elif is_final_closing:
                 self._set_designated_speaker(None)
+                self._expected_next_ai_speaker = None
                 self._discussion_end_requested = True
 
             tts_text = ""
@@ -1960,6 +2042,7 @@ class FloorManager:
 
         # 进入真实提交前先清空陈旧点名，避免上一轮残留目标在本轮提交后再次触发。
         self._set_designated_speaker(None)
+        self._expected_next_ai_speaker = None
 
         # 检查用户是否指定了下一位发言者（需求4）
         all_participant_names = list(self.all_names)
@@ -1995,6 +2078,8 @@ class FloorManager:
                 )
             else:
                 self._set_designated_speaker(agent_name)
+                if agent_name in self.ai_names and agent_name != "moderator":
+                    self._expected_next_ai_speaker = agent_name
 
         try:
             await self._put_human_input(normalized_name, normalized_text)
