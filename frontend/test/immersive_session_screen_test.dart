@@ -117,13 +117,13 @@ void main() {
     );
   });
 
-  test('pending human turn only waits for current speaker playback to finish',
-      () {
+  test('pending human turn waits for any queued or active playback', () {
     expect(
       ImmersiveSessionScreen.shouldBlockPendingHumanTurn(
         ttsPlaying: false,
         ttsServiceSpeaking: false,
         hasQueuedCurrentSpeakerSpeech: false,
+        hasQueuedSpeech: false,
       ),
       isFalse,
     );
@@ -133,6 +133,7 @@ void main() {
         ttsPlaying: true,
         ttsServiceSpeaking: false,
         hasQueuedCurrentSpeakerSpeech: false,
+        hasQueuedSpeech: false,
       ),
       isTrue,
     );
@@ -142,8 +143,111 @@ void main() {
         ttsPlaying: false,
         ttsServiceSpeaking: false,
         hasQueuedCurrentSpeakerSpeech: true,
+        hasQueuedSpeech: true,
       ),
       isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldBlockPendingHumanTurn(
+        ttsPlaying: false,
+        ttsServiceSpeaking: false,
+        hasQueuedCurrentSpeakerSpeech: false,
+        hasQueuedSpeech: true,
+      ),
+      isTrue,
+    );
+  });
+
+  test('single mic defers speaker switch until queued speech is finished', () {
+    expect(
+      ImmersiveSessionScreen.shouldDeferTurnSwitchForSingleMic(
+        speakerChanged: true,
+        ttsPlaying: false,
+        ttsServiceSpeaking: false,
+        hasQueuedSpeech: true,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldDeferTurnSwitchForSingleMic(
+        speakerChanged: true,
+        ttsPlaying: true,
+        ttsServiceSpeaking: false,
+        hasQueuedSpeech: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldDeferTurnSwitchForSingleMic(
+        speakerChanged: false,
+        ttsPlaying: true,
+        ttsServiceSpeaking: true,
+        hasQueuedSpeech: true,
+      ),
+      isFalse,
+    );
+  });
+
+  test('human review waits until main room speech is fully settled', () {
+    final now = DateTime(2026, 4, 28, 12);
+
+    expect(
+      ImmersiveSessionScreen.shouldWaitForHumanReviewAfterMainSpeech(
+        ttsPlaying: true,
+        ttsPumpRunning: false,
+        ttsServiceSpeaking: false,
+        browserFallbackSpeaking: false,
+        hasQueuedSpeech: false,
+        hasActiveTtsItem: false,
+        lastActivityAt: now.subtract(const Duration(seconds: 5)),
+        now: now,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldWaitForHumanReviewAfterMainSpeech(
+        ttsPlaying: false,
+        ttsPumpRunning: false,
+        ttsServiceSpeaking: false,
+        browserFallbackSpeaking: false,
+        hasQueuedSpeech: true,
+        hasActiveTtsItem: false,
+        lastActivityAt: now.subtract(const Duration(seconds: 5)),
+        now: now,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldWaitForHumanReviewAfterMainSpeech(
+        ttsPlaying: false,
+        ttsPumpRunning: false,
+        ttsServiceSpeaking: false,
+        browserFallbackSpeaking: false,
+        hasQueuedSpeech: false,
+        hasActiveTtsItem: false,
+        lastActivityAt: now.subtract(const Duration(milliseconds: 600)),
+        now: now,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldWaitForHumanReviewAfterMainSpeech(
+        ttsPlaying: false,
+        ttsPumpRunning: false,
+        ttsServiceSpeaking: false,
+        browserFallbackSpeaking: false,
+        hasQueuedSpeech: false,
+        hasActiveTtsItem: false,
+        lastActivityAt: now.subtract(const Duration(seconds: 2)),
+        now: now,
+      ),
+      isFalse,
     );
   });
 
@@ -177,6 +281,17 @@ void main() {
         isMyTurn: false,
         pendingHumanTurn: true,
         handApprovedToSpeak: true,
+      ),
+      isFalse,
+    );
+  });
+
+  test('pending human turn never hard-cuts current speaker queue', () {
+    expect(
+      ImmersiveSessionScreen.shouldYieldQueuedSpeechForHumanTurn(
+        ttsPlaying: false,
+        ttsServiceSpeaking: false,
+        hasQueuedCurrentSpeakerSpeech: true,
       ),
       isFalse,
     );
@@ -319,15 +434,14 @@ void main() {
     expect(teacherToThinker >= 2 && teacherToThinker <= 3, isTrue);
   });
 
-  test('queued tail can be yielded to human turn once active speech is over',
-      () {
+  test('queued tail is preserved for current speaker before human turn', () {
     expect(
       ImmersiveSessionScreen.shouldYieldQueuedSpeechForHumanTurn(
         ttsPlaying: false,
         ttsServiceSpeaking: false,
         hasQueuedCurrentSpeakerSpeech: true,
       ),
-      isTrue,
+      isFalse,
     );
 
     expect(

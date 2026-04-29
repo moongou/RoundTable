@@ -92,7 +92,7 @@ class ApiClient {
     required List<String> characterIds,
     required List<String> humanNames,
     List<String> thinkerIds = const [],
-    int maxTurns = 30,
+    int maxTurns = 24,
     String freeTopic = '',
     String freeTopicDetail = '',
   }) async {

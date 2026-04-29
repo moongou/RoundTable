@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -18,6 +19,7 @@ from app.agents.character_templates import load_all_templates
 from app.agents.human_proxy import clear_human_queues, create_human_proxy
 from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
+from app.config import settings
 from app.core.floor_manager import FloorManager
 from app.core.golden_quotes import (
     build_golden_quotes_prompt,
@@ -26,6 +28,7 @@ from app.core.golden_quotes import (
 )
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.safety_filter import SafetyFilter
+from app.core.session_store import SessionStore
 from app.core.thinkers import get_thinker, thinker_label
 from app.core.topics import FREE_TOPIC_CATEGORY_ID, FREE_TOPIC_CATEGORY_NAME, get_topic_by_id
 from app.core.turn_scheduler import create_discussion_team
@@ -46,9 +49,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
-# 内存中的会话存储（Phase 1 简单实现，Phase 3 迁移到数据库）
-_sessions: dict[str, SessionResponse] = {}
+# 轻量持久化会话存储（JSON 文件）
+_SESSION_STORE = SessionStore(Path(settings.base_dir) / "runtime" / "sessions")
+_sessions: dict[str, SessionResponse] = _SESSION_STORE.load_all()
 _floor_managers: dict[str, FloorManager] = {}
+
+
+def get_cached_session(session_id: str) -> SessionResponse | None:
+    """返回已缓存会话，用于 websocket 等运行时查询。"""
+    return _sessions.get(session_id)
 
 
 class GoldenQuoteMessage(BaseModel):
@@ -168,7 +177,7 @@ async def create_session(request: CreateSessionRequest):
             )
         )
 
-    session_id = f"session-{len(_sessions) + 1}"
+    session_id = _SESSION_STORE.next_session_id(_sessions.keys())
 
     session = SessionResponse(
         session_id=session_id,
@@ -178,6 +187,7 @@ async def create_session(request: CreateSessionRequest):
         max_turns=request.max_turns,
     )
     _sessions[session_id] = session
+    _SESSION_STORE.save(session)
 
     return session
 
@@ -278,5 +288,6 @@ async def delete_session(session_id: str):
     if session_id in _floor_managers:
         del _floor_managers[session_id]
     del _sessions[session_id]
+    _SESSION_STORE.delete(session_id)
 
     return {"message": "会话已删除"}

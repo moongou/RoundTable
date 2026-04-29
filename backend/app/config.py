@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -416,10 +418,20 @@ class Settings(BaseSettings):
     port: int = 8001
     debug: bool = True
     hardware_detection_on_startup: bool = False
+    cors_allowed_origins: str = (
+        "http://localhost:8001,"
+        "http://127.0.0.1:8001,"
+        "http://localhost:3000,"
+        "http://127.0.0.1:3000,"
+        "http://localhost:5173,"
+        "http://127.0.0.1:5173"
+    )
+    management_api_token: str = ""
+    management_auth_enforced: bool = False
 
     # ── 讨论参数 ───────────────────────────────────────────────────────────
 
-    max_turns: int = 30
+    max_turns: int = 24
     human_turn_timeout: int = 15
 
     # ── 路径 ────────────────────────────────────────────────────────────────
@@ -654,6 +666,46 @@ class Settings(BaseSettings):
         return voice_map.get(
             sid, VOICE_SERVICE_META.get(sid, {}).get("default_voice", self.tts_voice)
         )
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """解析 CORS 白名单（支持 JSON 数组或逗号分隔）。"""
+        raw = (self.cors_allowed_origins or "").strip()
+        if not raw:
+            return []
+
+        origins: list[str]
+        if raw.startswith("["):
+            try:
+                payload = json.loads(raw)
+                if isinstance(payload, list):
+                    origins = [str(item).strip() for item in payload if str(item).strip()]
+                else:
+                    origins = []
+            except Exception:
+                origins = []
+        else:
+            origins = [item.strip() for item in raw.split(",") if item.strip()]
+
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for origin in origins:
+            parsed = urlparse(origin)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            if not parsed.netloc:
+                continue
+            normalized = f"{parsed.scheme}://{parsed.netloc}"
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
+    @property
+    def management_auth_required(self) -> bool:
+        """是否启用管理接口鉴权。"""
+        return self.management_auth_enforced or bool((self.management_api_token or "").strip())
 
 
 settings = Settings()

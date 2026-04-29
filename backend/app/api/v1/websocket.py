@@ -18,6 +18,7 @@ from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
 from app.core.floor_manager import FloorManager
+from app.core.llm_errors import describe_model_error
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.meeting_history import MeetingHistoryStore
 from app.core.rolling_summary_memory import HumanResponseGuidanceMemory, RollingSummaryMemory
@@ -249,9 +250,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         topic = None
         session_topic = None
         try:
-            from app.api.v1.sessions import _sessions  # noqa: PLC0415
+            from app.api.v1.sessions import get_cached_session  # noqa: PLC0415
 
-            session = _sessions.get(session_id)
+            session = get_cached_session(session_id)
             if session is not None:
                 session_topic = session.topic
         except Exception:
@@ -468,14 +469,23 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             display_source = agent_display_map.get(source, source)
             await send_event(
                 "message",
-                {"source": display_source, "content": content, "msg_type": msg_type},
+                {
+                    "source": display_source,
+                    "agent_source": source,
+                    "content": content,
+                    "msg_type": msg_type,
+                },
             )
 
         async def on_turn_change(speaker, is_human):
             display_speaker = agent_display_map.get(speaker, speaker)
             await send_event(
                 "turn_change",
-                {"speaker": display_speaker, "is_human": is_human},
+                {
+                    "speaker": display_speaker,
+                    "agent_speaker": speaker,
+                    "is_human": is_human,
+                },
             )
 
         async def on_state_change(old_state, new_state, reason="", recovery=False):
@@ -554,6 +564,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 topic.title + "\n\n" + topic.description,
                 observer_mode=observer_mode,
                 agent_display_map=agent_display_map,
+                session_id=session_id,
             )
         )
 
@@ -672,17 +683,21 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                logger.error(f"讨论运行出错: {e}")
+                error_info = describe_model_error(e)
+                logger.error("讨论运行出错: %s", error_info.technical_detail or e, exc_info=True)
                 history_final_status = "error"
-                history_final_reason = str(e).strip() or history_final_reason
-                msg = str(e).strip()
+                history_final_reason = error_info.message or history_final_reason
+                msg = error_info.message.strip()
                 if ws_closed:
                     continue
                 if "websocket.send" in msg and "Unexpected ASGI message" in msg:
                     continue
                 if not msg:
                     continue
-                await send_event("error", {"message": msg})
+                await send_event(
+                    "api_error" if error_info.is_model_error else "error",
+                    error_info.to_event_data(),
+                )
 
     except WebSocketDisconnect:
         ws_closed = True
@@ -690,14 +705,17 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         history_final_reason = "websocket_disconnect"
         logger.info(f"WebSocket 断开: session_id={session_id}")
     except Exception as e:
-        ws_closed = True
+        error_info = describe_model_error(e)
         history_final_status = "error"
-        history_final_reason = str(e).strip() or history_final_reason
-        logger.error(f"WebSocket 错误: {e}")
+        history_final_reason = error_info.message or history_final_reason
+        logger.error("WebSocket 错误: %s", error_info.technical_detail or e, exc_info=True)
         try:
-            msg = str(e).strip()
+            msg = error_info.message.strip()
             if msg:
-                await send_event("error", {"message": msg})
+                await send_event(
+                    "api_error" if error_info.is_model_error else "error",
+                    error_info.to_event_data(),
+                )
         except Exception:
             pass
     finally:
@@ -739,6 +757,7 @@ async def _run_discussion(
     topic: str,
     observer_mode: bool = False,
     agent_display_map: dict[str, str] | None = None,
+    session_id: str = "",
 ):
     """运行讨论并推送事件。"""
     async for event in floor_manager.run(topic):
@@ -754,6 +773,7 @@ async def _run_discussion(
             data = dict(event.get("data", {}))
             source = (data.get("source") or "").strip()
             if source and agent_display_map is not None:
+                data["agent_source"] = source
                 data["source"] = agent_display_map.get(source, source)
             await send_event("stream", data)
         elif event["event_type"] == "human_input_requested":
@@ -764,8 +784,21 @@ async def _run_discussion(
             display_speaker = speaker
             if speaker and agent_display_map is not None:
                 display_speaker = agent_display_map.get(speaker, speaker)
+                data["agent_speaker"] = speaker
                 data["speaker"] = display_speaker
             await send_event("human_input_requested", data)
+            await send_event(
+                "phase_telemetry",
+                {
+                    "source": "backend",
+                    "phase": "human_turn_waiting",
+                    "reason": f"human_input_requested_{request_reason}",
+                    "recovery": request_reason in {"moderator_designated_human", "watchdog"},
+                    "speaker": display_speaker,
+                    "agent_speaker": speaker,
+                    "session_id": session_id,
+                },
+            )
             if observer_mode and display_speaker and request_reason != "interrupt":
                 try:
                     await floor_manager.submit_human_input(display_speaker, "（旁听）")

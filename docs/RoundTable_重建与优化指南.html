@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>RoundTable 重建与优化指南</title>
+  <style>
+    body {
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #1f2937;
+      line-height: 1.7;
+      margin: 40px auto;
+      max-width: 960px;
+      padding: 0 24px 48px;
+    }
+    h1, h2, h3 {
+      color: #0f172a;
+    }
+    h1 {
+      font-size: 28px;
+      border-bottom: 2px solid #cbd5e1;
+      padding-bottom: 12px;
+      margin-bottom: 24px;
+    }
+    h2 {
+      font-size: 22px;
+      margin-top: 32px;
+      border-left: 6px solid #334155;
+      padding-left: 12px;
+    }
+    h3 {
+      font-size: 18px;
+      margin-top: 22px;
+    }
+    p, li {
+      font-size: 14px;
+    }
+    code, pre {
+      font-family: Menlo, Monaco, Consolas, monospace;
+    }
+    pre {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+    }
+    .muted {
+      color: #475569;
+    }
+    .box {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin: 16px 0;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+    }
+    th, td {
+      border: 1px solid #cbd5e1;
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+    th {
+      background: #e2e8f0;
+    }
+    ul {
+      margin: 10px 0 10px 22px;
+    }
+  </style>
+</head>
+<body>
+  <h1>RoundTable 重建与优化指南</h1>
+  <p class="muted">用途：帮助你在未来“从零再建一个完全一样的项目”时，用最清晰的方式向我交付需求；同时梳理本项目现状、整体轮廓、功能规则与下一步优化方向。</p>
+
+  <h2>1. 先说结论：以后你该怎样提示我，才能最快把这个项目重建出来</h2>
+  <p>如果目标是“尽量复制 RoundTable 当前项目，而不是做一个泛泛的 AI 讨论平台”，最有效的方式不是一句“帮我做一个类似项目”，而是一次性给我 8 类信息。你给得越完整，我越能少走弯路、少返工、少做错误抽象。</p>
+
+  <div class="box">
+    <strong>最理想的提示输入包：</strong>
+    <ul>
+      <li>产品定位：这是一个面向中国小学生的 AI 引导思辨讨论平台，不是普通聊天室。</li>
+      <li>目标用户：1 到 3 名人类学生参与，多名 AI 同学与思想家角色共同发言，李老师主持。</li>
+      <li>核心机制：主持人主导点名、真人学生优先、每轮只有一人发言、讨论围绕真人学生观点展开。</li>
+      <li>技术栈：前端 Flutter Web，后端 FastAPI，讨论编排基于 AutoGen SelectorGroupChat，实时通信使用 WebSocket。</li>
+      <li>语音链路：支持 TTS/ASR，设置页可切换 provider，讨论页要求字幕、语音、回合状态强同步。</li>
+      <li>关键产品规则：小学生适龄、安全过滤、老师开场、用户发言后老师必须回应、首轮禁止互引。</li>
+      <li>页面结构：主页选题 + 自由话题、沉浸式讨论页、设置页、开发/诊断面板。</li>
+      <li>验收标准：需要哪些功能优先落地、哪些行为必须与旧项目一致、哪些地方允许不同实现。</li>
+    </ul>
+  </div>
+
+  <h3>1.1 你可以直接复制的“最佳重建提示词”</h3>
+  <pre>我要从零重建一个与 RoundTable 当前版本尽可能一致的项目，请你直接按工程落地方式来实现，不要先泛泛讲方案。
+
+项目定位：
+- 面向中国小学生的 AI 引导思辨讨论平台。
+- 1 到 3 名人类学生 + 多个 AI 虚拟角色 + 1 个 AI 主持人“李老师”。
+- 重点不是闲聊，而是“围绕真人学生观点展开的有秩序讨论”。
+
+必须保留的核心规则：
+- 老师必须开场，介绍背景和问题，再点名。
+- 真人学生是讨论核心，重要性占 30% 到 50%。
+- 真人学生每次发言后，老师必须立即回应，并引用其具体表述。
+- 每次只有一人发言，不允许乱序抢话。
+- 首轮阶段禁止“上一位同学说得对”这类互引式表达。
+- 所有角色必须有身份自觉，禁止错认自己是谁。
+- 讨论要适合小学生，但不要幼稚化、不要说教化。
+
+技术栈要求：
+- 前端使用 Flutter Web。
+- 后端使用 Python FastAPI。
+- 多角色讨论编排基于 AutoGen SelectorGroupChat 或等价能力。
+- 前后端通过 REST + WebSocket 协作。
+- 支持可插拔 LLM、TTS、ASR provider。
+
+功能范围：
+- 主页：预设话题、自由话题、角色选择、开始讨论。
+- 讨论页：圆桌沉浸式界面、回合状态、字幕、TTS、PTT、聊天记录。
+- 设置页：LLM/TTS/ASR provider 配置、连接测试、运行时同步。
+- 后端：会话管理、配置 API、话题系统、角色模板、会议历史持久化、安全过滤。
+- 诊断能力：会议记录、健康检查、运行时配置查看。
+
+我希望你输出时遵守：
+- 先搭完整工程骨架，再逐模块补实现。
+- 优先把“讨论编排”和“设置链路”做正确。
+- 代码、接口、目录结构都要明确。
+- 每完成一个关键模块就配最小测试。
+
+如果有不确定的地方：
+- 优先沿用 RoundTable 当前项目的交互原则和工程分层。
+- 不要擅自改成普通聊天产品。
+
+请直接开始创建项目结构、关键文件和第一阶段可运行版本。</pre>
+
+  <h3>1.2 如果你只想最短提示，也至少要写成这样</h3>
+  <pre>帮我从零重建一个与 RoundTable 当前版本一致的项目：
+前端 Flutter Web，后端 FastAPI，AutoGen 多角色讨论，WebSocket 实时推送，面向中国小学生。李老师主持，真人学生优先，老师开场、用户发言后老师必须引用并点评。要包含主页、沉浸式讨论页、设置页、TTS/ASR/LLM 配置、会议记录和安全过滤。请按工程方式直接实现，不要泛泛给建议。</pre>
+
+  <h3>1.3 为了让我更快完成，建议你额外附上这些材料</h3>
+  <ul>
+    <li>当前项目的截图：主页、讨论页、设置页、开发面板各 1 到 2 张。</li>
+    <li>你确认过的重要交互原则，例如“字幕先出现，0.3 秒后老师开口”。</li>
+    <li>你最满意和最不想改的部分，例如当前 OpenVoice 老师音色、儿童角色体验、主持人节奏。</li>
+    <li>你认为最容易做错的规则，例如“不要把它做成普通聊天室”“不要把老师写成幼儿园主持风格”。</li>
+    <li>如果要完全复刻，请明确“哪些是必须一致，哪些可以工程上等价替代”。</li>
+  </ul>
+
+  <h2>2. 这个项目目前最清晰的整体轮廓</h2>
+  <h3>2.1 产品定位</h3>
+  <ul>
+    <li>产品名称：RoundTable / 圆桌思辨。</li>
+    <li>核心目标：为中国小学生提供 AI 引导的思辨讨论环境。</li>
+    <li>产品本质：不是群聊产品，而是“有主持、有秩序、有回合、有点评、有启发”的讨论训练平台。</li>
+  </ul>
+
+  <h3>2.2 用户与参与者模型</h3>
+  <ul>
+    <li>真人学生：讨论中心，系统必须围绕其观点展开。</li>
+    <li>主持人“李老师”：负责开场、点名、点评、收尾，总控讨论秩序。</li>
+    <li>AI 同学角色：不同思维风格和表达风格，参与讨论。</li>
+    <li>思想家角色：从哲学、社会、科学等角度补充讨论。</li>
+  </ul>
+
+  <h3>2.3 当前工程分层</h3>
+  <table>
+    <tr><th>层</th><th>技术</th><th>职责</th></tr>
+    <tr><td>前端</td><td>Flutter Web</td><td>主页、讨论页、设置页、沉浸式 UI、字幕、语音播放、交互控制</td></tr>
+    <tr><td>后端</td><td>FastAPI</td><td>REST API、WebSocket 会话、配置管理、话题/角色/会话调度</td></tr>
+    <tr><td>讨论引擎</td><td>AutoGen SelectorGroupChat</td><td>主持人驱动的多角色发言选择与协作生成</td></tr>
+    <tr><td>语音层</td><td>多 provider TTS/ASR</td><td>老师与学生语音、浏览器/服务端识别、设置与测试链路</td></tr>
+    <tr><td>观测层</td><td>会议历史文件 + 开发面板</td><td>记录 summary.json / events.jsonl，辅助问题诊断</td></tr>
+  </table>
+
+  <h2>3. 目前项目的关键架构</h2>
+  <h3>3.1 Backend</h3>
+  <ul>
+    <li>入口：FastAPI 应用位于 backend/app/main.py，负责 API 路由、CORS、静态文件挂载、启动期预热。</li>
+    <li>配置中心：backend/app/config.py，统一管理 LLM、TTS、ASR、服务 URL、provider 默认值与运行时读取逻辑。</li>
+    <li>讨论编排：backend/app/core/turn_scheduler.py + backend/app/core/floor_manager.py。</li>
+    <li>角色构建：backend/app/agents/moderator.py、backend/app/agents/virtual_character.py、backend/app/agents/human_proxy.py。</li>
+    <li>接口层：backend/app/api/v1/router.py 汇总 sessions、config、voice、websocket、topics、characters、thinkers 等接口。</li>
+    <li>语音工厂：backend/app/voice/factory.py 及各 provider 实现，支持多种 TTS/ASR。</li>
+    <li>持久化观测：backend/app/core/meeting_history.py，将 session 过程写入 backend/runtime/meeting_history。</li>
+  </ul>
+
+  <h3>3.2 Frontend</h3>
+  <ul>
+    <li>应用入口：frontend/lib/main.dart → frontend/lib/app.dart。</li>
+    <li>主页：frontend/lib/features/home，负责话题进入、自由话题、预热配置与角色入口。</li>
+    <li>讨论页：frontend/lib/features/session，负责圆桌 UI、回合状态、字幕、TTS、PTT、历史记录、金句等。</li>
+    <li>设置页：frontend/lib/features/settings，负责 LLM / ASR / TTS provider 配置、连接测试、runtime 同步。</li>
+    <li>状态管理：Riverpod + 本地设置持久化。</li>
+    <li>服务层：REST API Client、WebSocket Client、Speech Services。</li>
+  </ul>
+
+  <h3>3.3 构建与发布方式</h3>
+  <ul>
+    <li>不是前后端分离部署的浏览器开发模式优先，而是通过 build_web.sh 将 Flutter Web 构建产物复制到 backend/static。</li>
+    <li>因此浏览器最终访问的是后端托管的静态文件，前端改动后必须重新 build 才能在 8001 生效。</li>
+  </ul>
+
+  <h2>4. 当前项目最核心的原则与规则</h2>
+  <h3>4.1 讨论机制规则</h3>
+  <ul>
+    <li>老师必须开场，先介绍背景与问题，再安排后续发言。</li>
+    <li>真人学生是绝对核心，不允许被边缘化。</li>
+    <li>真人学生每次发言后，老师必须立即回应，并且引用其具体表述。</li>
+    <li>每轮只允许一人发言，不能把它做成群聊抢话模式。</li>
+    <li>首轮阶段禁止互引式表达，例如“上一位同学说得对”。</li>
+    <li>讨论接近结束时，老师要进行两轮征询，再自然收尾。</li>
+  </ul>
+
+  <h3>4.2 角色一致性规则</h3>
+  <ul>
+    <li>角色必须知道自己是谁，不能错把自己当成其他角色。</li>
+    <li>主持人要保持第一人称“我”，不能第三人称自称“李老师觉得……”。</li>
+    <li>点名、引用、点评必须尽量使用准确的说话人归属。</li>
+  </ul>
+
+  <h3>4.3 小学生适龄与安全规则</h3>
+  <ul>
+    <li>内容应适合小学生，但不能幼稚化到破坏真实讨论感。</li>
+    <li>安全过滤主要拦截明确不适宜内容，而不是把所有复杂话题都删掉。</li>
+    <li>允许开放型思辨，但表达必须温和、清楚、可理解。</li>
+  </ul>
+
+  <h3>4.4 语音与时序规则</h3>
+  <ul>
+    <li>TTS/ASR provider 可切换，设置页与讨论页必须共享同一运行时事实来源。</li>
+    <li>讨论页要求字幕、语音、回合状态严格协同。</li>
+    <li>当前开场节奏要求：中心提示“老师准备中……” → “开始讨论” → 老师字幕出现 → 300ms 后老师开口。</li>
+    <li>同一角色在同一轮中，不应把刚刚已经播过的完整句子再重复播一遍。</li>
+  </ul>
+
+  <h2>5. 功能清单：如果要完整复刻，至少要覆盖这些能力</h2>
+  <table>
+    <tr><th>功能域</th><th>当前能力</th></tr>
+    <tr><td>话题系统</td><td>预设话题分类、自由话题输入、话题描述与类别展示</td></tr>
+    <tr><td>会话管理</td><td>创建/查询/删除会话，WebSocket 进入讨论</td></tr>
+    <tr><td>多角色讨论</td><td>主持人、虚拟同学、思想家、真人学生共同发言</td></tr>
+    <tr><td>主持人规则</td><td>开场、点名、点评、引导、收尾</td></tr>
+    <tr><td>沉浸式讨论页</td><td>圆桌布局、当前说话人状态、字幕、语音、PTT、历史记录</td></tr>
+    <tr><td>设置页</td><td>LLM/TTS/ASR provider 切换、连接测试、运行时配置同步</td></tr>
+    <tr><td>语音能力</td><td>多 provider TTS/ASR、OpenVoice 声纹配置、浏览器/服务端混合支持</td></tr>
+    <tr><td>安全过滤</td><td>AI 生成文本的适龄性与安全性检查</td></tr>
+    <tr><td>会议记录</td><td>summary.json + events.jsonl 持久化，便于回放和诊断</td></tr>
+    <tr><td>开发与观测</td><td>健康检查、当前配置、历史发言记录板、运行时日志辅助</td></tr>
+  </table>
+
+  <h2>6. 如果你让我“最快重建”，我建议采用的落地顺序</h2>
+  <ol>
+    <li>先搭后端骨架：FastAPI、配置中心、话题/角色数据加载、session CRUD、WebSocket 通道。</li>
+    <li>再搭讨论引擎：主持人 Agent、虚拟角色 Agent、真人学生桥接、SelectorGroupChat、FloorManager 状态机。</li>
+    <li>随后搭前端主流程：主页进入 → 创建 session → 连接 WebSocket → 最简讨论页可运行。</li>
+    <li>再补语音：先 EdgeTTS / 浏览器 ASR 跑通，再逐步加 OpenVoice、FunASR 与设置同步。</li>
+    <li>补观测与可诊断性：会议记录、配置 health、历史发言记录板。</li>
+    <li>最后做交互细节与回归测试：字幕时序、回合节奏、重复发言保护、设置页测试链路。</li>
+  </ol>
+
+  <h2>7. 目前这个项目下一步值得优化提升的方向</h2>
+  <h3>7.1 产品体验层</h3>
+  <ul>
+    <li><strong>讨论前准备流程</strong>：在开始前加入“角色确认、语音检查、话题确认、学生人数确认”的轻量向导，减少会话启动后才发现配置不对的问题。</li>
+    <li><strong>会话结束产物</strong>：目前已有金句与历史记录，下一步可补“讨论摘要、观点分歧、学生亮点、老师建议”等结构化总结卡片。</li>
+    <li><strong>自由话题可视反馈</strong>：让用户更明确看到自由话题已被提炼成什么正式讨论题目。</li>
+  </ul>
+
+  <h3>7.2 AI 讨论质量层</h3>
+  <ul>
+    <li><strong>建立系统化评测</strong>：对主持人开场、点名准确率、用户中心化、重复率、错认身份率做可回归评估，而不是只靠人工试跑。</li>
+    <li><strong>提示词版本化</strong>：将 moderator / virtual character / thinker 的提示词与规则做版本管理和差异记录，便于回滚与比较。</li>
+    <li><strong>角色发言去重与压缩</strong>：目前已处理部分流式重复，后续可继续减少长句、套话、空洞复述、无效表演化表达。</li>
+  </ul>
+
+  <h3>7.3 语音与多模态层</h3>
+  <ul>
+    <li><strong>服务端 TTS 预取缓存</strong>：已有方向，但可以进一步做多句缓存、命中统计和按 provider 的缓存策略。</li>
+    <li><strong>ASR 统一上传格式</strong>：把浏览器 WebM、本地 WAV、网关代理等路径进一步标准化，减少 provider 适配分叉。</li>
+    <li><strong>会话内语音诊断</strong>：把当前 provider、voice、延迟、失败重试信息更直接显示在讨论页开发视图里。</li>
+  </ul>
+
+  <h3>7.4 工程架构层</h3>
+  <ul>
+    <li><strong>配置模型统一</strong>：把“环境变量配置、运行时配置、设置页表单值、前端本地缓存”之间的映射进一步收束成单一事实来源。</li>
+    <li><strong>讨论编排与语音编排解耦</strong>：FloorManager 现在承担很多职责，后续可以把发言选择、文本后处理、语音发射拆分成更清晰的层。</li>
+    <li><strong>会话恢复与回放</strong>：让断开连接后的 session 可以恢复，而不是主要依赖内存态与历史文件诊断。</li>
+  </ul>
+
+  <h3>7.5 可观测性与运维层</h3>
+  <ul>
+    <li><strong>统一会话监控</strong>：现在监控有一部分是 runtime 文件，一部分是页面内存。后续可统一成后端可查询的会话诊断 API。</li>
+    <li><strong>结构化指标</strong>：增加 token、轮次、平均响应时间、TTS 命中率、ASR 成功率、用户发言占比等指标。</li>
+    <li><strong>错误分级</strong>：区分 provider 配置错误、模型输出异常、会话状态错乱、网络中断等不同故障类别。</li>
+  </ul>
+
+  <h3>7.6 内容与运营层</h3>
+  <ul>
+    <li><strong>话题编辑后台</strong>：让话题 YAML 不再只靠手工维护，可以做导入、标签、难度级别、适龄建议。</li>
+    <li><strong>角色模板管理</strong>：统一维护角色人设、口头禅、发言长度、质疑风格、适用年龄层。</li>
+    <li><strong>思想家资源扩展</strong>：把思想家模板从静态 YAML 升级为更易扩展的数据资产。</li>
+  </ul>
+
+  <h2>8. 我建议你接下来优先做的优化顺序</h2>
+  <table>
+    <tr><th>优先级</th><th>建议事项</th><th>原因</th></tr>
+    <tr><td>P0</td><td>建立讨论质量评测与回归集</td><td>这是避免后续“修一个地方坏另一个地方”的最重要工程基础</td></tr>
+    <tr><td>P0</td><td>统一配置事实来源与设置页同步链路</td><td>当前系统功能很多，配置漂移最容易引发隐性故障</td></tr>
+    <tr><td>P1</td><td>继续拆分 FloorManager 职责</td><td>后续功能越多，当前大总控类越难维护和验证</td></tr>
+    <tr><td>P1</td><td>完善会话监控与历史查询 API</td><td>现在已有持久化基础，继续做很划算</td></tr>
+    <tr><td>P1</td><td>强化 TTS/ASR 性能缓存与诊断</td><td>直接影响讨论体感和上线稳定性</td></tr>
+    <tr><td>P2</td><td>做话题/角色内容管理后台</td><td>有利于产品长期扩展，但不是当前最急迫的稳定性问题</td></tr>
+  </table>
+
+  <h2>9. 最后给你的建议</h2>
+  <p>如果你以后真的要“重头开始再建一个完全一样的项目”，最省时间的做法不是让我自己猜，而是把这份文档里的“最佳重建提示词”直接发给我，再附上当前最满意的页面截图与关键交互原则。我就能更快把项目搭到你要的形状，而不是做成一个只有名字相似、但产品精神已经偏掉的替代品。</p>
+
+  <p class="muted">文档生成时间：2026-04-25</p>
+</body>
+</html>

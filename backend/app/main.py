@@ -103,14 +103,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="RoundTable",
     description="圆桌思辨讨论平台 - 为小学生提供AI引导的思辨训练场",
-    version="0.1.0",
+    version="1.0.2",
     lifespan=lifespan,
 )
 
+cors_origins = settings.cors_origins_list
+if not cors_origins:
+    cors_origins = ["http://localhost:8001", "http://127.0.0.1:8001"]
+    logger.warning("CORS 白名单为空，已回退到本地默认来源。")
+
+if not settings.management_auth_required:
+    logger.warning("管理接口鉴权未启用：建议配置 MANAGEMENT_API_TOKEN。")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=[

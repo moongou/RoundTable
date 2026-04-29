@@ -21,10 +21,58 @@ MEETING_HISTORY_RETENTION_LIMIT = 10
 MEETING_RECORDINGS_DIRNAME = "recordings"
 MEETING_RECORDINGS_MANIFEST = "recordings.json"
 MEETING_SCRIPT_FILENAME = "script.json"
+MEETING_RUNNING_STALE_TIMEOUT_SECONDS = 600
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalize_summary_status(summary: dict[str, Any]) -> dict[str, Any]:
+    status = str(summary.get("status") or "").strip().lower()
+    if status != "running":
+        return summary
+
+    marker = _parse_iso_datetime(
+        summary.get("updated_at")
+        or summary.get("ended_at")
+        or summary.get("started_at")
+    )
+    if marker is None:
+        normalized = dict(summary)
+        normalized["status"] = "disconnected"
+        if not normalized.get("finish_reason"):
+            normalized["finish_reason"] = "stale_running_session"
+        if not normalized.get("ended_at"):
+            normalized["ended_at"] = normalized.get("updated_at") or _utc_now_iso()
+        return normalized
+
+    age_seconds = (datetime.now(timezone.utc) - marker).total_seconds()
+    if age_seconds <= MEETING_RUNNING_STALE_TIMEOUT_SECONDS:
+        return summary
+
+    normalized = dict(summary)
+    normalized["status"] = "disconnected"
+    if not normalized.get("finish_reason"):
+        normalized["finish_reason"] = "stale_running_session"
+    if not normalized.get("ended_at"):
+        normalized["ended_at"] = normalized.get("updated_at") or _utc_now_iso()
+    return normalized
 
 
 def _sanitize_session_id(session_id: str) -> str:
@@ -165,19 +213,24 @@ def _build_script_line(
         content = str(payload.get("content", "") or "").strip()
         if not source or not content:
             return None
+        agent_source = str(payload.get("agent_source", "") or "").strip()
         if source == "系统" or str(payload.get("msg_type", "") or "").strip() == "system":
-            return {
+            line = {
                 **base_line,
                 "kind": "note",
                 "speaker": source,
                 "text": content,
             }
-        return {
-            **base_line,
-            "kind": "speech",
-            "speaker": source,
-            "text": content,
-        }
+        else:
+            line = {
+                **base_line,
+                "kind": "speech",
+                "speaker": source,
+                "text": content,
+            }
+        if agent_source:
+            line["agent_source"] = agent_source
+        return line
 
     if entry_type == "human_input":
         speaker = str(payload.get("speaker", "") or "").strip()
@@ -197,19 +250,32 @@ def _build_script_line(
 
     if entry_type == "turn_change":
         speaker = str(payload.get("speaker", "") or "").strip() or "未知角色"
-        return {
+        line = {
             **base_line,
             "kind": "note",
+            "speaker": speaker,
             "text": f"轮到 {speaker} 发言",
         }
+        agent_speaker = str(payload.get("agent_speaker", "") or "").strip()
+        if agent_speaker:
+            line["agent_speaker"] = agent_speaker
+        return line
 
     if entry_type == "human_input_requested":
         speaker = str(payload.get("speaker", "") or "").strip() or "用户"
-        return {
+        line = {
             **base_line,
             "kind": "note",
+            "speaker": speaker,
             "text": f"等待 {speaker} 发言",
         }
+        agent_speaker = str(payload.get("agent_speaker", "") or "").strip()
+        request_reason = str(payload.get("reason", "") or "").strip()
+        if agent_speaker:
+            line["agent_speaker"] = agent_speaker
+        if request_reason:
+            line["request_reason"] = request_reason
+        return line
 
     if entry_type == "designate_speaker":
         target = str(payload.get("target", "") or payload.get("speaker", "") or "").strip() or "未知角色"
@@ -295,13 +361,7 @@ def store_meeting_recording(
 def load_meeting_script(session_id: str) -> dict[str, Any]:
     safe_session_id = _sanitize_session_id(session_id)
     session_dir = MEETING_HISTORY_DIR / safe_session_id
-    summary_path = session_dir / "summary.json"
-    if not summary_path.exists():
-        raise FileNotFoundError("meeting_history_not_found")
-
-    summary = _safe_json_load(summary_path, default={})
-    if not isinstance(summary, dict):
-        summary = {}
+    summary = _read_meeting_summary(session_id)
 
     script_payload = _safe_json_load(_script_path(session_dir), default={})
     if not isinstance(script_payload, dict):
@@ -338,7 +398,9 @@ def _read_meeting_summary(session_id: str) -> dict[str, Any]:
     if not summary_path.exists():
         raise FileNotFoundError("meeting_history_not_found")
     payload = _safe_json_load(summary_path, default={})
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    return _normalize_summary_status(payload)
 
 
 def _export_line_record(line: dict[str, Any], *, index: int) -> dict[str, Any]:
@@ -354,6 +416,9 @@ def _export_line_record(line: dict[str, Any], *, index: int) -> dict[str, Any]:
         "entry_type": line.get("entry_type") or "unknown",
         "event_seq": line.get("event_seq"),
     }
+    for key in ("agent_source", "agent_speaker", "request_reason"):
+        if line.get(key) is not None:
+            record[key] = line.get(key)
     recording = line.get("recording")
     if isinstance(recording, dict):
         record["recording"] = recording
@@ -433,6 +498,12 @@ def render_meeting_script_markdown(session_id: str) -> str:
         extras: list[str] = [f"kind={kind}"]
         if line.get("event_seq") is not None:
             extras.append(f"event_seq={line.get('event_seq')}")
+        if line.get("agent_source"):
+            extras.append(f"agent_source={line.get('agent_source')}")
+        if line.get("agent_speaker"):
+            extras.append(f"agent_speaker={line.get('agent_speaker')}")
+        if line.get("request_reason"):
+            extras.append(f"request_reason={line.get('request_reason')}")
         if line.get("echo_event_seq") is not None:
             extras.append(f"echo_event_seq={line.get('echo_event_seq')}")
         recording = line.get("recording")
@@ -611,6 +682,9 @@ class MeetingHistoryStore:
         self._lock = asyncio.Lock()
         self._summary: dict[str, Any] | None = None
         self._script_lines: list[dict[str, Any]] = []
+        self._recordings_manifest_mtime_ns: int | None = None
+        self._recording_count_cache = 0
+        self._recording_duration_ms_cache = 0
 
     async def start(self, *, topic: Any = None, config: Any = None) -> None:
         async with self._lock:
@@ -639,9 +713,11 @@ class MeetingHistoryStore:
                 "final_stats": {},
             }
             self._script_lines = []
+            self._recordings_manifest_mtime_ns = None
+            self._recording_count_cache = 0
+            self._recording_duration_ms_cache = 0
             self.events_path.write_text("", encoding="utf-8")
-            self._write_summary_locked()
-            self._write_script_locked()
+            self._write_snapshot_locked()
             _prune_meeting_histories(keep_safe_session_id=self.safe_session_id)
 
     async def update_context(
@@ -664,8 +740,7 @@ class MeetingHistoryStore:
             if agent_display_map is not None:
                 self._summary["agent_display_map"] = _jsonable(agent_display_map)
             self._summary["updated_at"] = _utc_now_iso()
-            self._write_summary_locked()
-            self._write_script_locked()
+            self._write_snapshot_locked()
 
     async def append_entry(
         self,
@@ -704,8 +779,7 @@ class MeetingHistoryStore:
                 timestamp=now,
                 event_seq=event_seq,
             )
-            self._write_summary_locked()
-            self._write_script_locked()
+            self._write_snapshot_locked()
 
     async def finish(self, *, status: str, reason: str = "", final_stats: Any = None) -> None:
         async with self._lock:
@@ -719,8 +793,7 @@ class MeetingHistoryStore:
                 self._summary["finish_reason"] = reason
             if final_stats is not None:
                 self._summary["final_stats"] = _jsonable(final_stats)
-            self._write_summary_locked()
-            self._write_script_locked()
+            self._write_snapshot_locked()
             _prune_meeting_histories(keep_safe_session_id=self.safe_session_id)
 
     def _append_script_line_locked(
@@ -762,22 +835,42 @@ class MeetingHistoryStore:
 
         self._script_lines.append(line)
 
-    def _write_summary_locked(self) -> None:
-        if self._summary is None:
+    def _refresh_recording_stats_locked(self) -> None:
+        manifest_path = _recordings_manifest_path(self.session_dir)
+        if not manifest_path.exists():
+            self._recordings_manifest_mtime_ns = None
+            self._recording_count_cache = 0
+            self._recording_duration_ms_cache = 0
             return
+
+        mtime_ns = manifest_path.stat().st_mtime_ns
+        if self._recordings_manifest_mtime_ns == mtime_ns:
+            return
+
         manifest = _load_recordings_manifest(self.session_dir)
         recordings = [item for item in manifest.get("recordings", []) if isinstance(item, dict)]
         recording_count, recording_duration_ms = _recording_summary(recordings)
-        self._summary["recording_count"] = recording_count
-        self._summary["recording_duration_ms"] = recording_duration_ms
+
+        self._recordings_manifest_mtime_ns = mtime_ns
+        self._recording_count_cache = recording_count
+        self._recording_duration_ms_cache = recording_duration_ms
+
+    def _write_snapshot_locked(self) -> None:
+        self._refresh_recording_stats_locked()
+        self._write_summary_locked()
+        self._write_script_locked()
+
+    def _write_summary_locked(self) -> None:
+        if self._summary is None:
+            return
+        self._summary["recording_count"] = self._recording_count_cache
+        self._summary["recording_duration_ms"] = self._recording_duration_ms_cache
         self._summary["script_line_count"] = len(self._script_lines)
         _write_json_file(self.summary_path, self._summary)
 
     def _write_script_locked(self) -> None:
         if self._summary is None:
             return
-        manifest = _load_recordings_manifest(self.session_dir)
-        recordings = [item for item in manifest.get("recordings", []) if isinstance(item, dict)]
         payload = {
             "session_id": self.session_id,
             "safe_session_id": self.safe_session_id,
@@ -785,7 +878,7 @@ class MeetingHistoryStore:
             "topic": self._summary.get("topic", {}),
             "participants": self._summary.get("participants", []),
             "line_count": len(self._script_lines),
-            "recording_count": len(recordings),
+            "recording_count": self._recording_count_cache,
             "lines": self._script_lines,
         }
         _write_json_file(self.script_path, payload)

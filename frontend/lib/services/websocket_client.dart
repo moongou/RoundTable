@@ -79,7 +79,7 @@ class DiscussionWebSocket {
     required List<String> humanNames,
     List<String> thinkerIds = const [],
     bool observerMode = false,
-    int maxTurns = 30,
+    int maxTurns = 24,
   }) async {
     final uri = Uri.parse('$wsUrl/api/v1/ws/discussion/$sessionId');
     _channel = WebSocketChannel.connect(uri);

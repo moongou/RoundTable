@@ -87,7 +87,7 @@ class CreateSessionRequest(BaseModel):
     character_ids: list[str] = Field(default_factory=lambda: ["explorer", "skeptic"])
     thinker_ids: list[str] = Field(default_factory=list)  # 额外的思想家角色
     human_names: list[str] = Field(default_factory=lambda: ["豆苗"])
-    max_turns: int = 30
+    max_turns: int = 24
 
 
 class SessionResponse(BaseModel):
@@ -97,7 +97,7 @@ class SessionResponse(BaseModel):
     topic: Topic
     participants: list[Participant]
     status: DiscussionStatus
-    max_turns: int = 30
+    max_turns: int = 24
 
 
 class ChatMessage(BaseModel):

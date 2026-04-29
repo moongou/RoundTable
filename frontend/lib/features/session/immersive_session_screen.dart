@@ -19,6 +19,7 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import 'chat_history_drawer.dart';
 import 'glass_control_bar.dart';
+import 'immersive_session_text_utils.dart';
 import 'session_frontend_commander.dart';
 import 'table_participant_ring.dart';
 
@@ -172,8 +173,48 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool ttsPlaying,
     required bool ttsServiceSpeaking,
     required bool hasQueuedCurrentSpeakerSpeech,
+    required bool hasQueuedSpeech,
   }) {
-    return ttsPlaying || ttsServiceSpeaking || hasQueuedCurrentSpeakerSpeech;
+    return ttsPlaying ||
+        ttsServiceSpeaking ||
+        hasQueuedCurrentSpeakerSpeech ||
+        hasQueuedSpeech;
+  }
+
+  static bool shouldDeferTurnSwitchForSingleMic({
+    required bool speakerChanged,
+    required bool ttsPlaying,
+    required bool ttsServiceSpeaking,
+    required bool hasQueuedSpeech,
+  }) {
+    return speakerChanged &&
+        (ttsPlaying || ttsServiceSpeaking || hasQueuedSpeech);
+  }
+
+  static bool shouldWaitForHumanReviewAfterMainSpeech({
+    required bool ttsPlaying,
+    required bool ttsPumpRunning,
+    required bool ttsServiceSpeaking,
+    required bool browserFallbackSpeaking,
+    required bool hasQueuedSpeech,
+    required bool hasActiveTtsItem,
+    required DateTime? lastActivityAt,
+    required DateTime now,
+    Duration quietPeriod = const Duration(milliseconds: 1600),
+  }) {
+    final fullyIdle = !ttsPlaying &&
+        !ttsPumpRunning &&
+        !ttsServiceSpeaking &&
+        !browserFallbackSpeaking &&
+        !hasQueuedSpeech &&
+        !hasActiveTtsItem;
+    if (!fullyIdle) {
+      return true;
+    }
+    if (lastActivityAt == null) {
+      return false;
+    }
+    return now.difference(lastActivityAt) < quietPeriod;
   }
 
   static bool shouldYieldQueuedSpeechForHumanTurn({
@@ -181,7 +222,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool ttsServiceSpeaking,
     required bool hasQueuedCurrentSpeakerSpeech,
   }) {
-    return !ttsPlaying && !ttsServiceSpeaking && hasQueuedCurrentSpeakerSpeech;
+    return false;
   }
 
   static bool shouldIgnoreRepeatedHumanInputRequest({
@@ -807,13 +848,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   DateTime? _openingReadyShownAt;
   bool _hasRaisedHand = false;
   bool _isPaused = false;
+  DateTime? _discussionStartedAt;
+  DateTime? _discussionPausedAt;
+  Duration _discussionPausedAccumulated = Duration.zero;
+  Duration _discussionElapsed = Duration.zero;
+  Timer? _discussionClockTimer;
   // 需求4：用户发言完毕后，麦克风应立即置灰，直到下轮发言或举手经同意
   bool _micLocked = false;
   // 讨论结束后由后端 LLM 提炼出的金句。
   final List<String> _goldenQuotes = [];
   String _humanReview = '';
   bool _discussionEnded = false;
-  bool _isGeneratingGoldenQuotes = false;
   bool _isGeneratingHumanReview = false;
   bool _humanReviewMuted = false;
   bool _showEndingQuotesScreen = false;
@@ -835,6 +880,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     String playbackSessionId,
     DateTime enqueuedAt,
   })? _activeTtsItem;
+  ({
+    String source,
+    String text,
+    String? voice,
+  })? _pausedResumeTtsItem;
 
   /// Debug-only accessor so static analysis sees a read of the latent field.
   // ignore: unused_element
@@ -843,6 +893,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   String _activeTtsSessionId = '';
   bool _ttsPumpRunning = false;
   bool _humanReviewReadAloudActive = false;
+  DateTime? _lastMainTtsQueuedAt;
+  DateTime? _lastMainTtsCompletedAt;
   int _ttsSpeakerPauseCounter = 0;
   // 错误追踪：如果先收到错误事件，结束时显示错误原因而非"讨论已结束"
   String? _lastErrorMessage;
@@ -1075,7 +1127,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       setState(() {
         _sttPartialText = result.isFinal
             ? chunk
-            : _mergeStreamingDraft(_sttPartialText, chunk);
+            : mergeStreamingDraft(_sttPartialText, chunk);
         if (_sttPartialText.trim().isNotEmpty) {
           _lastNonEmptySttText = _sttPartialText.trim();
         }
@@ -1165,6 +1217,110 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       return '已举手';
     }
     return '旁听席';
+  }
+
+  Duration _computeDiscussionElapsedAt(DateTime now) {
+    final startedAt = _discussionStartedAt;
+    if (startedAt == null) return Duration.zero;
+    var paused = _discussionPausedAccumulated;
+    final pausedAt = _discussionPausedAt;
+    if (pausedAt != null) {
+      paused += now.difference(pausedAt);
+    }
+    final elapsed = now.difference(startedAt) - paused;
+    return elapsed.isNegative ? Duration.zero : elapsed;
+  }
+
+  void _syncDiscussionElapsedNow({bool triggerSetState = false}) {
+    final next = _computeDiscussionElapsedAt(DateTime.now());
+    if (triggerSetState) {
+      if (!mounted) return;
+      setState(() => _discussionElapsed = next);
+      return;
+    }
+    _discussionElapsed = next;
+  }
+
+  void _startDiscussionClockIfNeeded() {
+    if (_discussionStartedAt != null) {
+      _syncDiscussionElapsedNow(triggerSetState: mounted);
+      return;
+    }
+    _discussionStartedAt = DateTime.now();
+    _discussionPausedAt = null;
+    _discussionPausedAccumulated = Duration.zero;
+    _discussionElapsed = Duration.zero;
+    _discussionClockTimer?.cancel();
+    _discussionClockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      _syncDiscussionElapsedNow(triggerSetState: true);
+    });
+  }
+
+  void _pauseDiscussionClock() {
+    if (_discussionStartedAt == null || _discussionPausedAt != null) {
+      return;
+    }
+    _discussionPausedAt = DateTime.now();
+    _syncDiscussionElapsedNow();
+  }
+
+  void _resumeDiscussionClock() {
+    if (_discussionStartedAt == null) {
+      return;
+    }
+    final pausedAt = _discussionPausedAt;
+    if (pausedAt != null) {
+      _discussionPausedAccumulated += DateTime.now().difference(pausedAt);
+      _discussionPausedAt = null;
+    }
+    _syncDiscussionElapsedNow();
+  }
+
+  void _stopDiscussionClock({bool keepElapsed = true}) {
+    if (keepElapsed) {
+      _syncDiscussionElapsedNow();
+    } else {
+      _discussionElapsed = Duration.zero;
+    }
+    _discussionClockTimer?.cancel();
+    _discussionClockTimer = null;
+    if (!keepElapsed) {
+      _discussionStartedAt = null;
+      _discussionPausedAt = null;
+      _discussionPausedAccumulated = Duration.zero;
+    }
+  }
+
+  void _resumeCurrentSubtitleFromStartIfNeeded() {
+    final item = _pausedResumeTtsItem;
+    if (item == null || item.text.trim().isEmpty) {
+      return;
+    }
+    final playbackSessionId = _nextTtsPlaybackSessionId();
+    _ttsQueue.insert(
+      0,
+      (
+        source: item.source,
+        text: item.text,
+        voice: item.voice,
+        playbackSessionId: playbackSessionId,
+        enqueuedAt: DateTime.now(),
+      ),
+    );
+    _lastMainTtsQueuedAt = DateTime.now();
+    _pausedResumeTtsItem = null;
+    _scheduleTtsPumpGuard(delay: const Duration(milliseconds: 120));
+    if (!_ttsPlaying && !_isMyTurn && !_isRecording && !_isPaused) {
+      _playNextTts();
+    }
+  }
+
+  String _formatDiscussionElapsed(Duration elapsed) {
+    final totalSeconds = elapsed.inSeconds < 0 ? 0 : elapsed.inSeconds;
+    final totalMinutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '${totalMinutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -1380,43 +1536,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
   }
 
-  String _mergeStreamingDraft(String current, String incoming) {
-    if (current.isEmpty) return incoming;
-    if (incoming.startsWith(current)) return incoming;
-    if (current.startsWith(incoming)) return current;
-    if (current.endsWith(incoming)) return current;
-    return '$current $incoming';
-  }
-
-  // VIBEVOICE 风格二阶段：流式草稿 + 发言结束后纠正。
-  String _polishTranscript(String raw) {
-    var text = raw.trim();
-    if (text.isEmpty) return '';
-
-    text = text.replaceAll(RegExp(r'\s+'), ' ');
-    text = text.replaceAll(RegExp(r'([，。！？；,.!?;])\1+'), r'$1');
-    text = text.replaceAll(RegExp(r'(嗯|呃|啊|那个|就是)(\s*\1)+'), r'$1');
-
-    final parts = text.split(RegExp(r'[，。！？；,.!?;]+'));
-    final dedup = <String>[];
-    String prev = '';
-    for (final p in parts) {
-      final v = p.trim();
-      if (v.isEmpty || v == prev) continue;
-      dedup.add(v);
-      prev = v;
-    }
-
-    text = dedup.join('，').trim();
-    if (text.isEmpty) return '';
-    if (!RegExp(r'[。！？!?]$').hasMatch(text)) {
-      text = '$text。';
-    }
-    return text;
-  }
-
   Future<String> _refineTranscript(String raw) async {
-    final polished = _polishTranscript(raw);
+    final polished = polishTranscript(raw);
     if (polished.isEmpty) return '';
     return _asrService.refineTranscript(polished);
   }
@@ -1448,26 +1569,37 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
   }
 
-  bool _hasOngoingSpeechPlayback() {
-    return _ttsPlaying || _ttsService.isSpeaking || _isRecording;
-  }
-
   bool get _hasQueuedCurrentSpeakerSpeech {
     return _ttsQueue.isNotEmpty &&
         _currentSpeaker.isNotEmpty &&
         _ttsQueue.first.source == _currentSpeaker;
   }
 
-  bool _shouldYieldQueuedSpeechToHumanTurn() {
-    return ImmersiveSessionScreen.shouldYieldQueuedSpeechForHumanTurn(
-      ttsPlaying: _ttsPlaying,
-      ttsServiceSpeaking: _ttsService.isSpeaking,
-      hasQueuedCurrentSpeakerSpeech: _hasQueuedCurrentSpeakerSpeech,
-    );
-  }
-
   bool _hasBlockingPlaybackForHumanTurn() {
     return _hasCurrentSpeakerSpeechToFinish();
+  }
+
+  bool _canPumpCurrentSpeakerSpeechForPendingHumanTurn() {
+    return _ttsQueue.isNotEmpty &&
+        !_ttsPlaying &&
+        !_ttsService.isSpeaking &&
+        !_isPaused &&
+        !_isMyTurn &&
+        !_isRecording;
+  }
+
+  void _pumpCurrentSpeakerSpeechBeforeHumanTurn() {
+    if (!_canPumpCurrentSpeakerSpeechForPendingHumanTurn()) {
+      return;
+    }
+    _pushPhaseTelemetry(
+      source: 'frontend',
+      phase: 'ai_speaking',
+      reason: 'pending_human_wait_current_speaker_tts',
+      recovery: true,
+      speaker: _ttsQueue.first.source,
+    );
+    _playNextTts();
   }
 
   bool _hasCurrentSpeakerSpeechToFinish() {
@@ -1475,7 +1607,46 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       ttsPlaying: _ttsPlaying,
       ttsServiceSpeaking: _ttsService.isSpeaking,
       hasQueuedCurrentSpeakerSpeech: _hasQueuedCurrentSpeakerSpeech,
+      hasQueuedSpeech: _ttsQueue.isNotEmpty,
     );
+  }
+
+  DateTime? get _lastMainTtsActivityAt {
+    final queuedAt = _lastMainTtsQueuedAt;
+    final completedAt = _lastMainTtsCompletedAt;
+    if (queuedAt == null) return completedAt;
+    if (completedAt == null) return queuedAt;
+    return queuedAt.isAfter(completedAt) ? queuedAt : completedAt;
+  }
+
+  Future<void> _waitForMainTtsToSettleBeforeHumanReview({
+    Duration initialDelay = const Duration(milliseconds: 1400),
+    Duration quietPeriod = const Duration(milliseconds: 1600),
+    Duration timeout = const Duration(seconds: 90),
+  }) async {
+    if (initialDelay > Duration.zero) {
+      await Future<void>.delayed(initialDelay);
+    }
+    final deadline = DateTime.now().add(timeout);
+    while (mounted && DateTime.now().isBefore(deadline)) {
+      final lastActivityAt = _lastMainTtsActivityAt;
+      final shouldWait =
+          ImmersiveSessionScreen.shouldWaitForHumanReviewAfterMainSpeech(
+        ttsPlaying: _ttsPlaying,
+        ttsPumpRunning: _ttsPumpRunning,
+        ttsServiceSpeaking: _ttsService.isSpeaking,
+        browserFallbackSpeaking: _browserFallbackTts?.isSpeaking ?? false,
+        hasQueuedSpeech: _ttsQueue.isNotEmpty,
+        hasActiveTtsItem: _activeTtsItem != null,
+        lastActivityAt: lastActivityAt,
+        now: DateTime.now(),
+        quietPeriod: quietPeriod,
+      );
+      if (!shouldWait) {
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
   }
 
   String _humanTurnWaitingPrompt({bool approved = false}) {
@@ -1496,13 +1667,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       if (!mounted || !_pendingHumanTurn || _isPaused) {
         return;
       }
-      if (_shouldYieldQueuedSpeechToHumanTurn()) {
-        unawaited(_yieldSpeechQueueToNextTurn(
-          nextSpeaker: _pendingHumanSpeaker.isEmpty
-              ? widget.humanName
-              : _pendingHumanSpeaker,
-          isHumanPriority: true,
-        ));
+      if (_canPumpCurrentSpeakerSpeechForPendingHumanTurn()) {
+        _pumpCurrentSpeakerSpeechBeforeHumanTurn();
         _schedulePendingHumanTurnGuard(
           delay: const Duration(milliseconds: 180),
         );
@@ -1532,32 +1698,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       reason: 'defer-human-turn:$speaker',
       includeAsrWarmup: true,
     );
-  }
-
-  Future<void> _yieldSpeechQueueToNextTurn({
-    required String nextSpeaker,
-    required bool isHumanPriority,
-  }) async {
-    final hadActiveSpeech = _ttsPlaying || _ttsService.isSpeaking;
-    final hadQueuedSpeech = _ttsQueue.isNotEmpty;
-    if (!hadActiveSpeech && !hadQueuedSpeech) {
-      return;
-    }
-
-    _ttsPumpGuardTimer?.cancel();
-    _ttsQueue.clear();
-    _activeTtsItem = null;
-    _activeTtsSessionId = '';
-
-    await _stopActiveSpeechPlayback();
-
-    _ttsPlaying = false;
-
-    if (mounted && isHumanPriority) {
-      _showStatusToast('李老师已经点到你了，现在可以直接开始说');
-    } else if (mounted && (hadActiveSpeech || hadQueuedSpeech)) {
-      _showStatusToast('已切换到 $nextSpeaker 发言');
-    }
   }
 
   String _friendlyStateText(String state, String label) {
@@ -1829,46 +1969,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         .toList(growable: false);
   }
 
-  Future<void> _generateGoldenQuotes() async {
-    if (_isGeneratingGoldenQuotes) return;
-    final sourceMessages = _goldenQuoteSourceMessages();
-    if (!ImmersiveSessionScreen.hasGoldenQuoteMaterial(sourceMessages)) {
-      return;
-    }
-
-    setState(() {
-      _isGeneratingGoldenQuotes = true;
-    });
-
-    try {
-      final apiClient = ref.read(apiClientProvider);
-      final quotes = await apiClient.generateGoldenQuotes(
-        topic: widget.topic.title,
-        messages: sourceMessages,
-        maxQuotes: 4,
-      );
-      if (!mounted || quotes.isEmpty) return;
-      setState(() {
-        _goldenQuotes
-          ..clear()
-          ..addAll(quotes);
-        if (_lastErrorMessage == null) {
-          _statusText = _discussionEnded ? '讨论已结束，可手动查看今日金句' : 'AI 已整理出今日金句';
-        }
-      });
-    } catch (error) {
-      if (kDebugMode) {
-        debugPrint('golden quote generation failed: $error');
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isGeneratingGoldenQuotes = false;
-        });
-      }
-    }
-  }
-
   Future<void> _generateHumanReview() async {
     if (_isGeneratingHumanReview) return;
     final sourceMessages = _goldenQuoteSourceMessages();
@@ -1894,6 +1994,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       );
       final normalized = review.trim();
       if (!mounted || normalized.isEmpty) return;
+      await _waitForMainTtsToSettleBeforeHumanReview(
+        initialDelay: Duration.zero,
+      );
+      if (!mounted || _lastErrorMessage != null) return;
       setState(() {
         _humanReview = normalized;
         _humanReviewMuted = false;
@@ -2390,13 +2494,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   void _tryActivatePendingHumanTurn() {
     if (!_pendingHumanTurn) return;
-    if (_shouldYieldQueuedSpeechToHumanTurn()) {
-      unawaited(_yieldSpeechQueueToNextTurn(
-        nextSpeaker: _pendingHumanSpeaker.isEmpty
-            ? widget.humanName
-            : _pendingHumanSpeaker,
-        isHumanPriority: true,
-      ));
+    if (_canPumpCurrentSpeakerSpeechForPendingHumanTurn()) {
+      _pumpCurrentSpeakerSpeechBeforeHumanTurn();
       return;
     }
     if (_hasBlockingPlaybackForHumanTurn()) return;
@@ -2404,39 +2503,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _activateHumanTurnNow(speaker: _pendingHumanSpeaker);
   }
 
-  String _friendlyError(String raw) {
-    final s = raw.trim();
-    // 空消息或默认"未知错误" → 静默忽略，不打扰用户
-    if (s.isEmpty || s == '未知错误') {
-      return '';
-    }
-    // ASGI 内部消息/连接关闭后的发送尝试 → 静默忽略
-    if (s.contains("Unexpected ASGI message") || s.contains("websocket.send")) {
-      return '';
-    }
-    // WebSocket 解析失败（前端产生的包装错误） → 静默忽略
-    if (s.contains('WebSocket 事件解析失败')) {
-      return '';
-    }
-    // 讨论流程中的队列/输入通道问题 → 友好提示
-    if (s.contains('输入队列不存在') || s.contains('Failed to get user input')) {
-      return '用户输入通道暂时不可用，系统已自动跳过本轮并继续讨论。';
-    }
-    if (s.contains('timeout') || s.contains('超时')) {
-      return '等待输入超时，系统已自动进入下一位发言。';
-    }
-    // 讨论出现异常 → 简洁提示（避免展示长堆栈）
-    if (s.contains('讨论出现异常')) {
-      return '讨论过程出现短暂异常，系统正在自动恢复。';
-    }
-    // 流程停滞恢复通知 → 忽略（不是真正错误）
-    if (s.contains('自动恢复调度') || s.contains('自动跳过并继续')) {
-      return '';
-    }
-    return s;
-  }
-
   Future<void> _startDiscussion() async {
+    _stopDiscussionClock(keepElapsed: false);
     setState(() {
       _statusText = '创建讨论会话...';
       _openingCueState = _OpeningCueState.preparing;
@@ -2461,7 +2529,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
       final sessionId = sessionData['session_id'] as String;
       final wsUrl = apiClient.getWebSocketUrl(sessionId);
-      final maxTurns = (sessionData['max_turns'] as num?)?.toInt() ?? 30;
+      final maxTurns = (sessionData['max_turns'] as num?)?.toInt() ?? 24;
       final seededParticipants =
           ImmersiveSessionScreen.extractParticipantNamesFromSessionPayload(
         sessionData['participants'],
@@ -2828,16 +2896,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
           if (isHuman &&
               speaker == humanName &&
-              _shouldYieldQueuedSpeechToHumanTurn()) {
-            await _yieldSpeechQueueToNextTurn(
-              nextSpeaker: speaker,
-              isHumanPriority: true,
-            );
-          }
-
-          if (isHuman &&
-              speaker == humanName &&
               _hasCurrentSpeakerSpeechToFinish()) {
+            _pumpCurrentSpeakerSpeechBeforeHumanTurn();
             _commander.onHumanInputRequested(
               speaker: widget.humanName,
               hasOngoingSpeechPlayback: true,
@@ -2850,12 +2910,25 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             return;
           }
 
-          if (speaker != _currentSpeaker &&
-              (_hasOngoingSpeechPlayback() || _ttsQueue.isNotEmpty)) {
-            await _yieldSpeechQueueToNextTurn(
-              nextSpeaker: speaker,
-              isHumanPriority: isHuman && speaker == humanName,
+          if (!(isHuman && speaker == humanName) &&
+              ImmersiveSessionScreen.shouldDeferTurnSwitchForSingleMic(
+                speakerChanged: speaker != _currentSpeaker,
+                ttsPlaying: _ttsPlaying,
+                ttsServiceSpeaking: _ttsService.isSpeaking,
+                hasQueuedSpeech: _ttsQueue.isNotEmpty,
+              )) {
+            _pumpCurrentSpeakerSpeechBeforeHumanTurn();
+            setState(() {
+              _statusText = '上一位还在发言，马上切到 $speaker';
+              _isThinking = true;
+              _thinkingController.repeat();
+            });
+            _prepareUpcomingPipeline(
+              reason: 'turn-change-single-mic-wait:$speaker',
+              includeAsrWarmup: !isHuman,
             );
+            _buildParticipants();
+            return;
           }
 
           if (isHuman && speaker == humanName && (_isMyTurn || _isRecording)) {
@@ -3127,12 +3200,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           break;
         }
         var shouldWaitForCurrentSpeech = _hasCurrentSpeakerSpeechToFinish();
-        if (shouldWaitForCurrentSpeech &&
-            _shouldYieldQueuedSpeechToHumanTurn()) {
-          await _yieldSpeechQueueToNextTurn(
-            nextSpeaker: requestedHumanSpeaker,
-            isHumanPriority: true,
-          );
+        if (shouldWaitForCurrentSpeech) {
+          _pumpCurrentSpeakerSpeechBeforeHumanTurn();
           shouldWaitForCurrentSpeech = _hasCurrentSpeakerSpeechToFinish();
         }
         final command = _commander.onHumanInputRequested(
@@ -3155,7 +3224,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _clearAwaitingAiResponseAfterHumanSubmit();
         final data = event.data;
         final errMsg = data?['message'] ?? data?['original_error'] ?? 'AI 服务错误';
-        final friendly = _friendlyError(errMsg.toString());
+        final friendly = friendlyErrorMessage(errMsg.toString());
         if (friendly.isEmpty) {
           break;
         }
@@ -3169,7 +3238,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _clearAwaitingAiResponseAfterHumanSubmit();
         final data = event.data;
         final errMsg = data?['message'] ?? data?['original_error'] ?? '未知错误';
-        final friendly = _friendlyError(errMsg.toString());
+        final friendly = friendlyErrorMessage(errMsg.toString());
         if (friendly.isEmpty) {
           break;
         }
@@ -3181,9 +3250,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         break;
       case WsEventType.ended:
         _clearAwaitingAiResponseAfterHumanSubmit(resetSpeechTurnLatch: true);
+        _stopDiscussionClock();
         final endedWithError = _lastErrorMessage != null;
-        final shouldGenerateGoldenQuotes = !endedWithError &&
-            ImmersiveSessionScreen.hasGoldenQuoteMaterial(_messages);
         final shouldGenerateHumanReview = !endedWithError &&
             ImmersiveSessionScreen.hasHumanReviewMaterial(
               _messages,
@@ -3192,13 +3260,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         setState(() {
           _statusText = endedWithError
               ? '会话已中断: ${_lastErrorMessage!}'
-              : (shouldGenerateGoldenQuotes && shouldGenerateHumanReview)
-                  ? '讨论已结束，AI 正在整理金句，李老师也在给你写会后点评'
-                  : shouldGenerateHumanReview
-                      ? '讨论已结束，李老师正在给你写会后点评'
-                      : shouldGenerateGoldenQuotes
-                          ? '讨论已结束，AI 正在整理金句，完成后可从右上角手动打开'
-                          : '讨论已结束';
+              : shouldGenerateHumanReview
+                  ? '讨论已结束，李老师正在给你写会后点评'
+                  : '讨论已结束';
           _isMyTurn = false;
           _glowController.stop();
           _goldenQuotes.clear();
@@ -3207,22 +3271,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           _discussionEnded = true;
           _showEndingQuotesScreen = false;
         });
-        if (shouldGenerateGoldenQuotes) {
-          unawaited(_generateGoldenQuotes());
-        }
         if (shouldGenerateHumanReview) {
           // 等老师把"讨论结束语"完整播完后再弹出点评卡。
-          // 通过轮询 TTS 队列与 isSpeaking 来确保不会与老师的最后一句重叠。
+          // 通过稳定空闲窗口确保不会与老师的最后一句重叠。
           unawaited(() async {
-            // 给后端的最后一段 TTS 一点入队时间。
-            await Future.delayed(const Duration(milliseconds: 800));
-            final deadline = DateTime.now().add(const Duration(seconds: 45));
-            while (mounted && DateTime.now().isBefore(deadline)) {
-              final stillTalking =
-                  _ttsPlaying || _ttsService.isSpeaking || _ttsQueue.isNotEmpty;
-              if (!stillTalking) break;
-              await Future.delayed(const Duration(milliseconds: 250));
-            }
+            await _waitForMainTtsToSettleBeforeHumanReview();
             if (!mounted) return;
             if (_lastErrorMessage != null) return;
             // 老师讲完后再清掉中间字幕，准备弹出全屏点评。
@@ -3245,13 +3298,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             _completedHumanTurnSpeaker = '';
           }
           var shouldWaitForCurrentSpeech = _hasCurrentSpeakerSpeechToFinish();
-          if (mineApproved &&
-              shouldWaitForCurrentSpeech &&
-              _shouldYieldQueuedSpeechToHumanTurn()) {
-            await _yieldSpeechQueueToNextTurn(
-              nextSpeaker: widget.humanName,
-              isHumanPriority: true,
-            );
+          if (mineApproved && shouldWaitForCurrentSpeech) {
+            _pumpCurrentSpeakerSpeechBeforeHumanTurn();
             shouldWaitForCurrentSpeech = _hasCurrentSpeakerSpeechToFinish();
           }
           final shouldMergeApprovedInterrupt = mineApproved &&
@@ -3339,6 +3387,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
     _recordingControlledByHoldCtrl = startedFromHoldCtrl;
     _hasStartedSpeechThisTurn = true;
+    _startDiscussionClockIfNeeded();
     setState(() {
       _isRecording = true;
       _centerSpeaker = widget.humanName;
@@ -3474,10 +3523,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       try {
         refined = await _refineTranscript(rawText).timeout(
           const Duration(milliseconds: 1600),
-          onTimeout: () => _polishTranscript(rawText),
+          onTimeout: () => polishTranscript(rawText),
         );
       } catch (_) {
-        refined = _polishTranscript(rawText);
+        refined = polishTranscript(rawText);
       }
     }
     if (!mounted) return;
@@ -3731,10 +3780,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   /// Add text to the TTS queue and start playback if not already playing.
   void _enqueueTts(
       {required String source, required String text, String? voice}) {
-    // 需求8：暂停期间直接丢弃所有 TTS 请求，恢复后从新消息开始播放
+    // 暂停期间直接丢弃新增 TTS 请求；恢复时仅重读暂停前的当前字幕。
     if (_isPaused) return;
     final speechText = _stripStageDirectionsForSpeech(text);
     if (speechText.isEmpty) return;
+    _startDiscussionClockIfNeeded();
     final playbackSessionId = _nextTtsPlaybackSessionId();
     _ttsQueue.add((
       source: source,
@@ -3743,6 +3793,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       playbackSessionId: playbackSessionId,
       enqueuedAt: DateTime.now(),
     ));
+    _lastMainTtsQueuedAt = DateTime.now();
     if (_openingCueState == _OpeningCueState.preparing && mounted) {
       setState(() {
         _openingCueState = _OpeningCueState.ready;
@@ -3934,6 +3985,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _activeTtsItem = null;
         _activeTtsSessionId = '';
         _ttsPlaying = false;
+        _lastMainTtsCompletedAt = DateTime.now();
         if (mounted) {
           setState(() {
             _statusText =
@@ -3959,6 +4011,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       }
       _activeTtsItem = null;
       _activeTtsSessionId = '';
+      _lastMainTtsCompletedAt = DateTime.now();
       // After speak() resolves, record current prefetch hit rate and play next.
       _pushSeriesSample(_prefetchHitRateSeries, _prefetchHitRatePercent);
       if (!mounted) return;
@@ -4022,8 +4075,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     if (_isPaused) {
       setState(() {
         _isPaused = false;
-        _statusText = _isMyTurn ? _readyToSpeakStatusText() : '讨论继续中……';
+        _statusText = _pausedResumeTtsItem != null
+            ? '讨论继续中，正在从头重读当前字幕……'
+            : (_isMyTurn ? _readyToSpeakStatusText() : '讨论继续中……');
       });
+      _resumeDiscussionClock();
       if (_isMyTurn) {
         _glowController.repeat(reverse: true);
         _keyboardFocusNode.requestFocus();
@@ -4032,12 +4088,22 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _thinkingController.repeat();
       }
       _wsClient.sendResume();
+      _resumeCurrentSubtitleFromStartIfNeeded();
     } else {
+      final item = _activeTtsItem;
+      _pausedResumeTtsItem = (item != null && item.text.trim().isNotEmpty)
+          ? (
+              source: item.source,
+              text: item.text,
+              voice: item.voice,
+            )
+          : null;
       setState(() {
         _isPaused = true;
         _statusText = '讨论已暂停';
         _isThinking = false;
       });
+      _pauseDiscussionClock();
       _commander.markHumanTurnCompleted();
       _cancelPendingHumanTurnGuard();
       _cancelTurnCountdown();
@@ -4057,7 +4123,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _awaitingAsrFirstPacket = false;
       _sttPartialText = '';
       _lastNonEmptySttText = '';
-      // 清空 TTS 队列，停止当前播放，避免暂停后继续播放
+      // 暂停时清空后续队列；恢复后仅从当前片段起点重新播放，避免续播错位。
       _ttsQueue.clear();
       _activeTtsItem = null;
       _activeTtsSessionId = '';
@@ -4111,6 +4177,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _humanResponseWatchdogTimer?.cancel();
     _deferredAutoSkipTimer?.cancel();
     _autoMicStartTimer?.cancel();
+    _discussionClockTimer?.cancel();
     _statusToastTimer?.cancel();
     _statusToastEntry?.remove();
     _ctrlHeld = false;
@@ -4156,27 +4223,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     );
   }
 
-  double _averageOf(List<double> values) {
-    if (values.isEmpty) return 0;
-    var total = 0.0;
-    for (final v in values) {
-      total += v;
-    }
-    return total / values.length;
-  }
-
-  String _formatTtsTraceValue(String? value, {String fallback = '—'}) {
-    final normalized = (value ?? '').trim();
-    return normalized.isEmpty ? fallback : normalized;
-  }
-
   String _buildLatestTtsTraceSummary() {
     final trace = _ttsPerf.lastResponseInfo;
     if (trace == null) {
       return '最近一次 /voice/tts：暂无播放记录';
     }
-    final provider = _formatTtsTraceValue(trace.provider);
-    final usedVoice = _formatTtsTraceValue(trace.usedVoice);
+    final provider = formatTtsTraceValue(trace.provider);
+    final usedVoice = formatTtsTraceValue(trace.usedVoice);
     final attempts = trace.attempts?.toString() ?? '—';
     final elapsed = trace.elapsedMs != null
         ? '${trace.elapsedMs!.toStringAsFixed(1)} ms'
@@ -4196,12 +4249,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         ? List<double>.from(src)
         : src.sublist(src.length - recentCount);
 
-    final startupBase = _averageOf(head(_ttsStartupSeries));
-    final startupNow = _averageOf(tail(_ttsStartupSeries));
-    final asrBase = _averageOf(head(_asrFirstPacketSeries));
-    final asrNow = _averageOf(tail(_asrFirstPacketSeries));
-    final hitBase = _averageOf(head(_prefetchHitRateSeries));
-    final hitNow = _averageOf(tail(_prefetchHitRateSeries));
+    final startupBase = averageOf(head(_ttsStartupSeries));
+    final startupNow = averageOf(tail(_ttsStartupSeries));
+    final asrBase = averageOf(head(_asrFirstPacketSeries));
+    final asrNow = averageOf(tail(_asrFirstPacketSeries));
+    final hitBase = averageOf(head(_prefetchHitRateSeries));
+    final hitNow = averageOf(tail(_prefetchHitRateSeries));
 
     String delta(double before, double after, {bool lowerIsBetter = true}) {
       if (before == 0) return 'N/A';
@@ -4519,12 +4572,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         children: [
                           _PerfTraceChip(
                             label: 'Provider',
-                            value: _formatTtsTraceValue(trace.provider),
+                            value: formatTtsTraceValue(trace.provider),
                             accent: const Color(0xFF80DEEA),
                           ),
                           _PerfTraceChip(
                             label: 'Voice',
-                            value: _formatTtsTraceValue(trace.usedVoice),
+                            value: formatTtsTraceValue(trace.usedVoice),
                             accent: const Color(0xFFFFD54F),
                           ),
                           _PerfTraceChip(
@@ -4543,7 +4596,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '请求 ${_formatTtsTraceValue(trace.requestedVoice)}  →  实际 ${_formatTtsTraceValue(trace.usedVoice)}  ·  ${trace.fromPrefetchCache ? '预取命中' : '实时回源'}${trace.contentType != null && trace.contentType!.isNotEmpty ? '  ·  ${trace.contentType}' : ''}',
+                        '请求 ${formatTtsTraceValue(trace.requestedVoice)}  →  实际 ${formatTtsTraceValue(trace.usedVoice)}  ·  ${trace.fromPrefetchCache ? '预取命中' : '实时回源'}${trace.contentType != null && trace.contentType!.isNotEmpty ? '  ·  ${trace.contentType}' : ''}',
                         style: TextStyle(
                           color: Colors.white.withValues(alpha: 0.72),
                           fontSize: 10,
@@ -4831,6 +4884,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final line = _stripStageDirectionsForSpeech(review).trim();
     if (line.isEmpty) return;
 
+    await _waitForMainTtsToSettleBeforeHumanReview(
+      initialDelay: Duration.zero,
+    );
+    if (!mounted || _humanReviewReadAloudActive || _humanReviewMuted) return;
+
     _humanReviewReadAloudActive = true;
     final teacherVoice = _resolveSpeakerVoice(
       ImmersiveSessionScreen.teacherDisplayName,
@@ -4873,91 +4931,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     }
     _showStatusToast('已恢复老师点评朗读');
     unawaited(_readAloudHumanReview(_humanReview));
-  }
-
-  Future<void> _showGoldenQuotesDialog(BuildContext context) async {
-    if (_goldenQuotes.isEmpty) return;
-    await showDialog<void>(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.72),
-      builder: (ctx) {
-        return Dialog(
-          backgroundColor: const Color(0xFF111A24),
-          insetPadding:
-              const EdgeInsets.symmetric(horizontal: 48, vertical: 56),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(28),
-            side: BorderSide(
-              color: const Color(0xFFF4D38B).withValues(alpha: 0.32),
-            ),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(28, 24, 28, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.format_quote_rounded,
-                        color: Color(0xFFF4D38B), size: 22),
-                    const SizedBox(width: 8),
-                    Text(
-                      '今日金句',
-                      style: GoogleFonts.notoSerifSc(
-                        color: const Color(0xFFFFE8B5),
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1.2,
-                      ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      icon: const Icon(Icons.close_rounded,
-                          color: Colors.white70, size: 22),
-                      onPressed: () => Navigator.of(ctx).pop(),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Flexible(
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        for (final quote in _goldenQuotes)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 14),
-                            child: Text(
-                              '“$quote”',
-                              style: GoogleFonts.notoSerifSc(
-                                color: Colors.white.withValues(alpha: 0.92),
-                                fontSize: 16,
-                                height: 1.7,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  void _openEndingQuotesScreen() {
-    if (_showEndingQuotesScreen && _mountEndingQuotesOverlay) {
-      return;
-    }
-    setState(() {
-      _showEndingQuotesScreen = true;
-      _mountEndingQuotesOverlay = true;
-    });
-    unawaited(_endingQuotesTransitionController.forward(from: 0.0));
   }
 
   void _exitEndingQuotesToHome() {
@@ -5641,6 +5614,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                           isPaused: _isPaused,
                           onToggle: _onTogglePause,
                         ),
+                        const SizedBox(width: 6),
+                        _DiscussionClockChip(
+                          timeText:
+                              _formatDiscussionElapsed(_discussionElapsed),
+                          isPaused: _isPaused,
+                          started: _discussionStartedAt != null,
+                        ),
                         const Spacer(),
                         IconButton(
                           icon: Icon(
@@ -5681,25 +5661,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                           padding: EdgeInsets.zero,
                           constraints:
                               const BoxConstraints(minWidth: 36, minHeight: 36),
-                        ),
-                        const SizedBox(width: 8),
-                        _TopRectButton(
-                          icon: Icons.auto_awesome,
-                          label: _goldenQuotes.isNotEmpty ? '金句' : '整理中',
-                          width: 126,
-                          enabled: _goldenQuotes.isNotEmpty,
-                          onTap: _goldenQuotes.isNotEmpty
-                              ? _openEndingQuotesScreen
-                              : null,
-                          backgroundColor: _goldenQuotes.isNotEmpty
-                              ? const Color(0xFF6E4B1F).withValues(alpha: 0.72)
-                              : Colors.white.withValues(alpha: 0.04),
-                          borderColor: _goldenQuotes.isNotEmpty
-                              ? AppColors.amberGold.withValues(alpha: 0.65)
-                              : Colors.white.withValues(alpha: 0.14),
-                          foregroundColor: _goldenQuotes.isNotEmpty
-                              ? AppColors.amberGold
-                              : AppColors.warmGray,
                         ),
                       ],
                     ),
@@ -5794,10 +5755,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                       isLoading: _isGeneratingHumanReview,
                       isMuted: _humanReviewMuted,
                       onToggleMute: _toggleHumanReviewMute,
-                      hasGoldenQuotes: _goldenQuotes.isNotEmpty,
-                      onShowGoldenQuotes: _goldenQuotes.isEmpty
-                          ? null
-                          : () => _showGoldenQuotesDialog(context),
+                      onExit: _exitEndingQuotesToHome,
                     ),
                   ),
               ],
@@ -6180,6 +6138,71 @@ class _SparklinePainter extends CustomPainter {
   }
 }
 
+class _DiscussionClockChip extends StatelessWidget {
+  final String timeText;
+  final bool isPaused;
+  final bool started;
+
+  const _DiscussionClockChip({
+    required this.timeText,
+    required this.isPaused,
+    required this.started,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = isPaused ? AppColors.amberGold : const Color(0xFF7CE0FF);
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      width: 136,
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 9),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            const Color(0xFF0E1629).withValues(alpha: 0.95),
+            const Color(0xFF1B2847).withValues(alpha: 0.78),
+          ],
+        ),
+        border: Border.all(color: accent.withValues(alpha: 0.72), width: 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: accent.withValues(alpha: isPaused ? 0.14 : 0.22),
+            blurRadius: 12,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(
+            started ? Icons.timer_outlined : Icons.timer,
+            size: 16,
+            color: accent,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              started ? timeText : '00:00',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.orbitron(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+                letterSpacing: 1.1,
+                height: 1,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ─── 暂停按钮 ──────────────────────────────────────────────────────────────────
 /// Compact pause/resume button for the top-left of the session screen (m).
 class _PauseButton extends StatelessWidget {
@@ -6242,53 +6265,41 @@ class _TopRectButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback? onTap;
-  final bool enabled;
-  final double width;
-  final Color? backgroundColor;
-  final Color? borderColor;
-  final Color? foregroundColor;
 
   const _TopRectButton({
     required this.icon,
     required this.label,
     this.onTap,
-    this.enabled = true,
-    this.width = 120,
-    this.backgroundColor,
-    this.borderColor,
-    this.foregroundColor,
   });
 
   @override
   Widget build(BuildContext context) {
-    final resolvedForeground =
-        foregroundColor ?? (enabled ? AppColors.warmWhite : AppColors.warmGray);
     return IgnorePointer(
-      ignoring: !enabled || onTap == null,
+      ignoring: onTap == null,
       child: GestureDetector(
         onTap: onTap,
         child: AnimatedOpacity(
           duration: const Duration(milliseconds: 180),
-          opacity: enabled ? 1.0 : 0.55,
+          opacity: onTap == null ? 0.55 : 1.0,
           child: Container(
-            width: width,
+            width: 120,
             height: 48,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
-              color: backgroundColor ?? Colors.white.withValues(alpha: 0.08),
+              color: Colors.white.withValues(alpha: 0.08),
               border: Border.all(
-                color: borderColor ?? Colors.white.withValues(alpha: 0.25),
+                color: Colors.white.withValues(alpha: 0.25),
               ),
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, color: resolvedForeground, size: 20),
+                Icon(icon, color: AppColors.warmWhite, size: 20),
                 const SizedBox(width: 6),
                 Text(
                   label,
                   style: TextStyle(
-                    color: resolvedForeground,
+                    color: AppColors.warmWhite,
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
                   ),
@@ -6796,16 +6807,14 @@ class _PostDiscussionReviewOverlay extends StatelessWidget {
   final bool isLoading;
   final bool isMuted;
   final VoidCallback onToggleMute;
-  final bool hasGoldenQuotes;
-  final VoidCallback? onShowGoldenQuotes;
+  final VoidCallback onExit;
 
   const _PostDiscussionReviewOverlay({
     required this.review,
     required this.isLoading,
     required this.isMuted,
     required this.onToggleMute,
-    required this.hasGoldenQuotes,
-    required this.onShowGoldenQuotes,
+    required this.onExit,
   });
 
   @override
@@ -6947,32 +6956,13 @@ class _PostDiscussionReviewOverlay extends StatelessWidget {
                   const SizedBox(height: 18),
                   Row(
                     children: [
-                      if (onShowGoldenQuotes != null)
-                        FilledButton.icon(
-                          onPressed: onShowGoldenQuotes,
-                          icon:
-                              const Icon(Icons.format_quote_rounded, size: 18),
-                          label: const Text('查看金句'),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFFF4D38B),
-                            foregroundColor: const Color(0xFF1B2D40),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 22, vertical: 14),
-                            textStyle: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.0,
-                            ),
-                          ),
-                        )
-                      else
-                        Text(
-                          hasGoldenQuotes ? '' : '本次讨论暂未生成金句',
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.5),
-                            fontSize: 13,
-                          ),
+                      Text(
+                        isLoading ? '点评完成后可退场' : '点评已完成',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.5),
+                          fontSize: 13,
                         ),
+                      ),
                       const Spacer(),
                       if (isLoading)
                         const SizedBox(
@@ -6981,6 +6971,22 @@ class _PostDiscussionReviewOverlay extends StatelessWidget {
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
                             color: Color(0xFFF4D38B),
+                          ),
+                        ),
+                      if (!isLoading)
+                        FilledButton.icon(
+                          onPressed: onExit,
+                          icon: const Icon(Icons.logout_rounded, size: 18),
+                          label: const Text('退场'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFF4D38B),
+                            foregroundColor: const Color(0xFF1B2D40),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 24, vertical: 14),
+                            textStyle: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
                     ],

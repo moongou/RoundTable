@@ -17,6 +17,7 @@ const BACKEND_DIR = path.join(ROOT, 'backend');
 const FRONTEND_DIR = path.join(ROOT, 'frontend');
 const MEETING_HISTORY_DIR = path.join(BACKEND_DIR, 'runtime', 'meeting_history');
 const MEETING_HISTORY_RETENTION_LIMIT = 10;
+const MEETING_RUNNING_STALE_TIMEOUT_SECONDS = 10 * 60;
 
 // ── 进程管理 ──────────────────────────────────────────────
 const processes = {
@@ -306,6 +307,40 @@ function readJsonFileIfExists(filePath, fallbackValue) {
   }
 }
 
+function parseIsoDate(value) {
+  var raw = String(value || '').trim();
+  if (!raw) return null;
+  var parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
+function normalizeMeetingHistorySummary(summary) {
+  if (!summary || typeof summary !== 'object') return {};
+  var normalized = Object.assign({}, summary);
+  var status = String(normalized.status || '').trim().toLowerCase();
+  if (status !== 'running') return normalized;
+
+  var marker = parseIsoDate(
+    normalized.updated_at || normalized.ended_at || normalized.started_at
+  );
+  var isStale = true;
+  if (marker) {
+    var ageSeconds = (Date.now() - marker.getTime()) / 1000;
+    isStale = ageSeconds > MEETING_RUNNING_STALE_TIMEOUT_SECONDS;
+  }
+  if (!isStale) return normalized;
+
+  normalized.status = 'disconnected';
+  if (!normalized.finish_reason) {
+    normalized.finish_reason = 'stale_running_session';
+  }
+  if (!normalized.ended_at) {
+    normalized.ended_at = normalized.updated_at || new Date().toISOString();
+  }
+  return normalized;
+}
+
 function buildMeetingRecordingAudioUrl(sessionId, recordingId) {
   return '/api/meeting-history/' + encodeURIComponent(sessionId) + '/recordings/' + encodeURIComponent(recordingId) + '/audio';
 }
@@ -327,7 +362,7 @@ function collectMeetingHistories() {
       const summaryPath = path.join(MEETING_HISTORY_DIR, entry.name, 'summary.json');
       if (!fs.existsSync(summaryPath)) return null;
       try {
-        return readJsonFile(summaryPath);
+        return normalizeMeetingHistorySummary(readJsonFile(summaryPath));
       } catch (e) {
         return {
           session_id: entry.name,
@@ -392,7 +427,7 @@ function readMeetingHistory(sessionId) {
     err.code = 'ENOENT';
     throw err;
   }
-  const summary = readJsonFile(summaryPath);
+  const summary = normalizeMeetingHistorySummary(readJsonFile(summaryPath));
   const events = fs.existsSync(eventsPath)
     ? fs.readFileSync(eventsPath, 'utf8')
         .split('\n')

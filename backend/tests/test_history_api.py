@@ -265,6 +265,57 @@ def test_export_meeting_script_rejects_unsupported_format(
     assert response.json()["detail"] == "unsupported_export_format"
 
 
+def test_export_meeting_script_marks_stale_running_session_as_disconnected(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(meeting_history_module, "MEETING_HISTORY_DIR", tmp_path)
+
+    session_dir = tmp_path / "stale-running-session"
+    session_dir.mkdir(parents=True)
+    updated_at = "2026-04-26T12:00:00+00:00"
+    (session_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "session_id": "stale-running-session",
+                "safe_session_id": "stale-running-session",
+                "status": "running",
+                "started_at": "2026-04-26T11:55:00+00:00",
+                "updated_at": updated_at,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "script.json").write_text(
+        json.dumps(
+            {
+                "session_id": "stale-running-session",
+                "safe_session_id": "stale-running-session",
+                "updated_at": updated_at,
+                "topic": {"title": "陈旧运行态测试"},
+                "participants": ["李老师"],
+                "line_count": 0,
+                "lines": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with _make_test_client() as client:
+        response = client.get(
+            "/api/v1/history/sessions/stale-running-session/script/export?format=json"
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session"]["status"] == "disconnected"
+    assert payload["session"]["ended_at"] == updated_at
+
+
 def test_export_meeting_script_package_respects_selected_contents(
     tmp_path,
     monkeypatch,

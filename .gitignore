@@ -68,6 +68,7 @@ frontend/android/app/google-services.json
 frontend/ios/Runner.xcworkspace/
 frontend/ios/Runner.xcodeproj/
 frontend/pubspec.lock
+backend/static/.frontend_source.sha256
 
 ### Playwright MCP ###
 .playwright-mcp/

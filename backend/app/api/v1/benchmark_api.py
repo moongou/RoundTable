@@ -18,8 +18,9 @@ from dataclasses import asdict
 from io import BytesIO
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.v1.admin_guard import require_management_token
 from app.api.v1.config_api import _semantic_voice_probe
 from app.config import (
     LOCAL_SERVICE_DEFAULTS,
@@ -422,7 +423,11 @@ async def _benchmark_one_llm(provider_id: str, rounds: int) -> dict:
 
 
 @router.post("/tts")
-async def benchmark_tts(rounds: int = 3, services: list[str] | None = None):
+async def benchmark_tts(
+    rounds: int = 3,
+    services: list[str] | None = None,
+    _auth: None = Depends(require_management_token),
+):
     """基准测试所有或指定的 TTS 服务。跳过未配置/不可用的服务。"""
     target_services = services or ["chattts", "edge_tts", "vibevoice", "fireredtts", "openvoice", "cosyvoice"]
     results = await asyncio.gather(
@@ -440,7 +445,11 @@ async def benchmark_tts(rounds: int = 3, services: list[str] | None = None):
 
 
 @router.post("/asr")
-async def benchmark_asr(rounds: int = 3, services: list[str] | None = None):
+async def benchmark_asr(
+    rounds: int = 3,
+    services: list[str] | None = None,
+    _auth: None = Depends(require_management_token),
+):
     """基准测试所有或指定的 ASR 服务。"""
     target_services = services or ["browser", "capswriter", "vosk", "funasr", "openai_whisper"]
     results = await asyncio.gather(
@@ -460,7 +469,11 @@ async def benchmark_asr(rounds: int = 3, services: list[str] | None = None):
 
 
 @router.post("/llm")
-async def benchmark_llm(rounds: int = 2, providers: list[str] | None = None):
+async def benchmark_llm(
+    rounds: int = 2,
+    providers: list[str] | None = None,
+    _auth: None = Depends(require_management_token),
+):
     """基准测试 LLM 提供商响应延迟。默认仅测试当前启用供应商。"""
     if providers:
         target = list(
@@ -487,7 +500,10 @@ async def benchmark_llm(rounds: int = 2, providers: list[str] | None = None):
 
 
 @router.get("/hardware")
-async def get_hardware_info(apply_tuning: bool = True):
+async def get_hardware_info(
+    apply_tuning: bool = True,
+    _auth: None = Depends(require_management_token),
+):
     """获取硬件检测结果，并可选应用运行时优化参数。"""
     from app.core.hardware import apply_runtime_tuning, detect_hardware, get_runtime_tuning
     profile = detect_hardware()
@@ -508,7 +524,9 @@ async def get_hardware_info(apply_tuning: bool = True):
 
 
 @router.post("/hardware/optimize")
-async def optimize_hardware_runtime():
+async def optimize_hardware_runtime(
+    _auth: None = Depends(require_management_token),
+):
     """按当前硬件重新应用运行时优化参数。"""
     from app.core.hardware import apply_runtime_tuning, detect_hardware
 
@@ -524,7 +542,12 @@ async def optimize_hardware_runtime():
 
 
 @router.post("/voice/test")
-async def test_voice_service(service_id: str, service_type: str, text: str = _TEST_TEXT_SHORT):
+async def test_voice_service(
+    service_id: str,
+    service_type: str,
+    text: str = _TEST_TEXT_SHORT,
+    _auth: None = Depends(require_management_token),
+):
     """独立测试单个语音服务（设置页面用）。
 
     Args:
@@ -588,7 +611,11 @@ async def test_voice_service(service_id: str, service_type: str, text: str = _TE
 
 
 @router.post("/voice/deep-test")
-async def deep_test_voice_service(service_id: str, service_type: str):
+async def deep_test_voice_service(
+    service_id: str,
+    service_type: str,
+    _auth: None = Depends(require_management_token),
+):
     """深度测试语音服务，返回可人工确认的示例结果。"""
     if service_type == "asr":
         sample_text = "今天我们讨论的是如何培养批判性思维。"

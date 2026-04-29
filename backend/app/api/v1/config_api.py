@@ -15,9 +15,10 @@ from urllib.parse import urlparse
 
 import httpx
 import websockets
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from websockets.exceptions import InvalidStatus
 
+from app.api.v1.admin_guard import require_management_token
 from app.config import (
     ASR_PROVIDERS,
     LOCAL_SERVICE_DEFAULTS,
@@ -834,7 +835,10 @@ async def validate_current_config():
 
 
 @router.post("/update")
-async def update_config(updates: dict):
+async def update_config(
+    updates: dict,
+    _auth: None = Depends(require_management_token),
+):
     """运行时更新配置（不持久化到 .env 文件）。"""
     try:
         normalized_updates = _normalize_config_updates(updates)
@@ -850,7 +854,10 @@ async def update_config(updates: dict):
 
 
 @router.post("/save")
-async def save_config_to_env(updates: dict):
+async def save_config_to_env(
+    updates: dict,
+    _auth: None = Depends(require_management_token),
+):
     """将配置持久化写入 .env 文件（同时更新运行时）。"""
     try:
         normalized_updates = _normalize_config_updates(updates)
@@ -890,7 +897,9 @@ async def save_config_to_env(updates: dict):
 
 
 @router.get("/profiles")
-async def list_config_profiles():
+async def list_config_profiles(
+    _auth: None = Depends(require_management_token),
+):
     """列出已保存的配置集。"""
     if not CONFIG_PROFILES_DIR.exists():
         return {"profiles": []}
@@ -912,7 +921,10 @@ async def list_config_profiles():
 
 
 @router.post("/profiles")
-async def save_config_profile(body: dict):
+async def save_config_profile(
+    body: dict,
+    _auth: None = Depends(require_management_token),
+):
     """保存当前完整配置为一个可复用的配置集。"""
     profile_name = str(body.get("name", "")).strip()
     if not profile_name:
@@ -945,7 +957,10 @@ async def save_config_profile(body: dict):
 
 
 @router.post("/profiles/{profile_id}/load")
-async def load_config_profile(profile_id: str):
+async def load_config_profile(
+    profile_id: str,
+    _auth: None = Depends(require_management_token),
+):
     """载入已保存的配置集，并立即应用到当前运行时。"""
     try:
         payload = _read_config_profile(profile_id)
@@ -974,7 +989,10 @@ async def load_config_profile(profile_id: str):
 
 
 @router.delete("/profiles/{profile_id}")
-async def delete_config_profile(profile_id: str):
+async def delete_config_profile(
+    profile_id: str,
+    _auth: None = Depends(require_management_token),
+):
     """删除一个已保存的配置集。"""
     profile_path = _config_profile_path(profile_id)
     if not profile_path.exists():
@@ -984,7 +1002,10 @@ async def delete_config_profile(profile_id: str):
 
 
 @router.post("/test-provider")
-async def test_provider(body: dict):
+async def test_provider(
+    body: dict,
+    _auth: None = Depends(require_management_token),
+):
     """测试 LLM 提供商连接，并尝试获取可用模型列表。
 
     Body:
@@ -1154,7 +1175,10 @@ async def test_provider(body: dict):
 
 
 @router.post("/test-voice-service")
-async def test_voice_service(body: dict):
+async def test_voice_service(
+    body: dict,
+    _auth: None = Depends(require_management_token),
+):
     """测试语音服务连接，尝试获取可用音色/模型列表。
 
     Body:
@@ -1293,7 +1317,9 @@ async def test_voice_service(body: dict):
 
 
 @router.get("/web-search")
-async def get_web_search_config():
+async def get_web_search_config(
+    _auth: None = Depends(require_management_token),
+):
     """获取网络搜索配置。"""
     key = settings.tavily_api_key
     return {
@@ -1307,7 +1333,10 @@ async def get_web_search_config():
 
 
 @router.post("/test-web-search")
-async def test_web_search(body: dict):
+async def test_web_search(
+    body: dict,
+    _auth: None = Depends(require_management_token),
+):
     """测试 Tavily 网络搜索 API 连接。"""
     api_key = body.get("api_key", "").strip() or settings.tavily_api_key
     if not api_key:
