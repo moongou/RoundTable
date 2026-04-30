@@ -111,12 +111,40 @@ void main() {
       );
     });
 
-    test('ignores unauthorized human input request reasons', () {
+    test('accepts legacy normal human input request reason', () {
       final commander = SessionFrontendCommander();
 
       final cmd = commander.onHumanInputRequested(
         speaker: '豆苗',
         requestReason: 'normal',
+        hasOngoingSpeechPlayback: false,
+      );
+
+      expect(cmd, HumanTurnCommand.activateNow);
+      expect(commander.pendingHumanTurn, isFalse);
+      expect(commander.handApprovedToSpeak, isTrue);
+    });
+
+    test('normalizes request reason before authorization', () {
+      final commander = SessionFrontendCommander();
+
+      final cmd = commander.onHumanInputRequested(
+        speaker: '豆苗',
+        requestReason: '  NORMAL  ',
+        hasOngoingSpeechPlayback: false,
+      );
+
+      expect(cmd, HumanTurnCommand.activateNow);
+      expect(commander.pendingHumanTurn, isFalse);
+      expect(commander.handApprovedToSpeak, isTrue);
+    });
+
+    test('ignores truly unauthorized human input request reasons', () {
+      final commander = SessionFrontendCommander();
+
+      final cmd = commander.onHumanInputRequested(
+        speaker: '豆苗',
+        requestReason: 'unknown_reason',
         hasOngoingSpeechPlayback: false,
       );
 

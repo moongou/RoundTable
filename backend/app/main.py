@@ -103,7 +103,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="RoundTable",
     description="圆桌思辨讨论平台 - 为小学生提供AI引导的思辨训练场",
-    version="1.0.2",
+    version="1.0.7",
     lifespan=lifespan,
 )
 

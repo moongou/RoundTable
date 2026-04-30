@@ -1893,13 +1893,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
   String _readyToSpeakStatusText() {
     final hotkey = _micHotkeyLabel;
+    final teacherCue = '李老师：${widget.humanName}，请来谈谈这个话题吧。';
     if (_autoOpenMic) {
-      return '轮到你了：麦克风会自动开启，也可按 $hotkey 控制';
+      return '$teacherCue 麦克风会自动开启，也可按 $hotkey 控制';
     }
     if (_isPushToTalk) {
-      return '轮到你了：按住 $hotkey 或点击“讲话”开始';
+      return '$teacherCue 按住 $hotkey 或点击“讲话”开始';
     }
-    return '轮到你了：按 $hotkey 或点击“讲话”开始/结束';
+    return '$teacherCue 按 $hotkey 或点击“讲话”开始/结束';
   }
 
   void _cancelAutoMicStart() {
@@ -1907,8 +1908,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _autoMicStartTimer = null;
   }
 
-  void _scheduleAutoMicStart(
-      {Duration delay = const Duration(milliseconds: 260)}) {
+  void _scheduleAutoMicStart({Duration delay = Duration.zero}) {
     _cancelAutoMicStart();
     if (!_autoOpenMic || _isPaused || _isRecording || _micLocked) {
       return;
@@ -3465,7 +3465,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         if (command == HumanTurnCommand.defer) {
           final waitingPrompt = shouldWaitForCurrentSpeech
               ? _humanTurnWaitingPrompt()
-              : '主持人正在把发言权切给你，请稍候一下';
+              : '李老师正在把发言权交给你，请稍候一下';
           _deferHumanTurnUntilCurrentSpeechEnds(
             speaker: requestedHumanSpeaker,
             prompt: waitingPrompt,
@@ -6872,10 +6872,11 @@ class _RightActionColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasObserverSeat = observerSeat != null;
-    final spacing = hasObserverSeat ? 10.0 : 12.0;
+    final spacing = hasObserverSeat ? 10.0 : 14.0;
     final observerHeight = hasObserverSeat ? 92.0 : 0.0;
-    final btnHeight =
-        ((totalHeight - observerHeight - spacing * 3) / 3).clamp(48.0, 120.0);
+    final gapCount = hasObserverSeat ? 3.0 : 2.0;
+    final btnHeight = ((totalHeight - observerHeight - spacing * gapCount) / 3)
+        .clamp(48.0, 120.0);
     return SizedBox(
       height: totalHeight,
       child: Column(
@@ -6889,6 +6890,7 @@ class _RightActionColumn extends StatelessWidget {
             onEnd: onEnd,
             size: btnHeight,
           ),
+          SizedBox(height: spacing),
           _SkipButton(onTap: showSkip ? onSkip : null, size: btnHeight),
           SizedBox(height: spacing),
           _FloatingRaiseHandButton(

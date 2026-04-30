@@ -8,6 +8,8 @@ const Set<String> _authorizedHumanRequestReasons = <String>{
   'moderator_designated_human',
   'participant_designated_human',
   'interrupt',
+  // 兼容历史后端/灰度路径：未标注细分原因时会回落为 normal。
+  'normal',
 };
 
 /// Minimal frontend commander that only orchestrates:
@@ -46,7 +48,8 @@ class SessionFrontendCommander {
     required String requestReason,
     required bool hasOngoingSpeechPlayback,
   }) {
-    if (!_authorizedHumanRequestReasons.contains(requestReason)) {
+    final normalizedReason = requestReason.trim().toLowerCase();
+    if (!_authorizedHumanRequestReasons.contains(normalizedReason)) {
       _pendingHumanTurn = false;
       _pendingHumanSpeaker = '';
       _pendingSince = null;

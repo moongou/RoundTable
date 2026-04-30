@@ -368,7 +368,7 @@ class ApiClient {
     return List<Map<String, dynamic>>.from(data);
   }
 
-  /// 根据话题获取推荐思想家（1-3 名）
+  /// 根据话题获取推荐思想家（最多 10 名）
   Future<List<Map<String, dynamic>>> recommendThinkers({
     String? title,
     String? description,
@@ -376,7 +376,7 @@ class ApiClient {
     List<String>? tags,
     List<String>? guideQuestions,
     List<String>? excludeIds,
-    int limit = 3,
+    int limit = 10,
   }) async {
     final response = await _dio.post(
       '/api/v1/thinkers/recommend',

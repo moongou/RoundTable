@@ -300,6 +300,28 @@ class FloorManager:
                 logger.debug("team resume raised after human wait", exc_info=True)
             self._resume_gate.set()
 
+    def _moderator_opening_has_context(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", "", text or "")
+        if not normalized:
+            return False
+
+        # 至少具备“来源/定义/背景争议/问题界定”中的任一要素，才算开场信息充分。
+        context_markers = (
+            r"来源|来自|生活里|现实中|课堂上|新闻里",
+            r"定义|是指|意思是|所谓|我们要讨论的是|核心问题",
+            r"背景|争议|分歧|矛盾|基本情况|该不该|要不要|值不值得|为什么|是什么|会不会|能不能",
+        )
+        return any(re.search(pattern, normalized) for pattern in context_markers)
+
+    def _build_moderator_opening_baseline(self) -> str:
+        focus = self._topic_focus_label()
+        if focus:
+            return (
+                f"今天这个话题来自生活里常见的真实讨论：{focus}，"
+                "我们先把基本情况和核心争议说清楚，再请大家发言。"
+            )
+        return "今天这个问题来自大家日常会遇到的真实讨论，我们先把基本情况和核心争议说清楚，再请大家发言。"
+
     def _sanitize_opening_reference(self, source: str, content: str) -> str:
         """首轮发言兜底规整：避免开场阶段出现不当引用。"""
         text = (content or "").strip()
@@ -323,7 +345,9 @@ class FloorManager:
                 text,
             ).strip()
             if not text:
-                text = "同学们，我们先一起梳理一下这个问题的背景，再逐一发表观点。"
+                text = self._build_moderator_opening_baseline()
+            elif not self._moderator_opening_has_context(text):
+                text = self._build_moderator_opening_baseline()
             return text
 
         if (source in self.ai_names or source in self.human_names) and is_first_turn:
@@ -497,7 +521,10 @@ class FloorManager:
             return pending_reason
         if self._is_authorized_human_request_reason(normalized_reason):
             return normalized_reason
-        if self._is_authorized_human_request_reason(pending_reason):
+        if (
+            normalized_reason in {"speaker_selected_human", "human_input_requested_waiting"}
+            and self._is_authorized_human_request_reason(pending_reason)
+        ):
             return pending_reason
         return "normal"
 

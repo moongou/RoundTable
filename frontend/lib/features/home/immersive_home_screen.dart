@@ -1758,7 +1758,7 @@ class _FreeTopicInputState extends ConsumerState<_FreeTopicInput> {
             title: title,
             description: detail,
             category: 'spark',
-            limit: 3,
+            limit: 10,
           );
     } catch (_) {
       // 静默失败：仅做预热，不阻塞用户。
@@ -3834,7 +3834,7 @@ class _AmbientOrbPainter extends CustomPainter {
 
 // ─── Thinker Recommendations ─────────────────────────────────────────────────
 /// 当用户选定话题（或填写自由话题）后，调用后端推荐 API，
-/// 在思想家栏下方展示 1-3 名最契合的思想家。点击即等同于在主列表中选择。
+/// 在思想家栏下方展示最多 10 名最契合的思想家。点击即等同于在主列表中选择。
 class _ThinkerRecommendations extends ConsumerStatefulWidget {
   final Topic? selectedTopic;
   final bool isFreeTopic;
@@ -3946,7 +3946,7 @@ class _ThinkerRecommendationsState
         category: category,
         tags: tags,
         guideQuestions: guideQuestions,
-        limit: 3,
+        limit: 10,
       );
       if (!mounted || mySeq != _requestSeq) return;
       setState(() {

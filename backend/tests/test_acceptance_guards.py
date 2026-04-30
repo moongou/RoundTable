@@ -2522,6 +2522,28 @@ async def test_floor_manager_marks_moderator_designated_human_request_reason() -
 
 
 @pytest.mark.asyncio
+async def test_floor_manager_enforces_opening_basic_context_for_moderator() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager._current_topic = '要不要给小学生布置周末作业？'
+
+    result = await floor_manager._process_event(
+        TextMessage(source='moderator', content='同学们好，我们开始吧。')
+    )
+
+    assert result is not None
+    assert result['event_type'] == 'message'
+    content = result['data']['content']
+    assert '来自生活里常见的真实讨论' in content
+    assert '基本情况' in content
+    assert '核心争议' in content
+
+
+@pytest.mark.asyncio
 async def test_floor_manager_forces_budget_human_invite_after_brief_moderator_bridge() -> None:
     emitted_messages: list[tuple[str, str, str]] = []
 
@@ -2618,6 +2640,34 @@ async def test_floor_manager_allows_first_human_handoff_from_participant_after_w
 
     request_event = await floor_manager._process_event(
         TextMessage(source='explorer', content='请豆苗同学也说说你的理由。')
+    )
+
+    assert request_event is not None
+    assert request_event['event_type'] == 'human_input_requested'
+    assert request_event['data']['reason'] == 'participant_designated_human'
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_allows_thinker_designated_human_with_explicit_handoff() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[
+            SimpleNamespace(name='moderator'),
+            SimpleNamespace(name='explorer'),
+            SimpleNamespace(name='socrates'),
+        ],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+        thinker_agent_names=['socrates'],
+    )
+    floor_manager.set_display_name_map(
+        {'moderator': '老师', 'explorer': '小探', 'socrates': '苏格拉底', '豆苗': '豆苗'}
+    )
+    floor_manager._speaker_message_count['explorer'] = 1
+    floor_manager._speaker_message_count['socrates'] = 1
+
+    request_event = await floor_manager._process_event(
+        TextMessage(source='socrates', content='请豆苗同学发言。')
     )
 
     assert request_event is not None
@@ -3268,6 +3318,26 @@ async def test_floor_manager_ignores_duplicate_waiting_request_without_authorize
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_does_not_inherit_pending_authorization_for_non_waiting_reason() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+    floor_manager.current_speaker = '豆苗'
+    floor_manager._pending_human_input_reason = 'participant_designated_human'
+
+    result = await floor_manager._make_human_input_requested_event(
+        '豆苗',
+        reason='normal',
+    )
+
+    assert result is None
+    assert floor_manager.state != FloorState.HUMAN_TURN_WAITING
 
 
 @pytest.mark.asyncio
