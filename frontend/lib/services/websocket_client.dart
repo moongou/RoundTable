@@ -64,6 +64,7 @@ class DiscussionWebSocket {
   final StreamController<WsEvent> _eventController =
       StreamController<WsEvent>.broadcast();
   bool _connected = false;
+  int _interruptRequestSeq = 0;
 
   /// 事件流
   Stream<WsEvent> get events => _eventController.stream;
@@ -226,12 +227,17 @@ class DiscussionWebSocket {
   }
 
   /// 发送打断请求（举手）
-  void sendInterrupt({required String speaker}) {
+  void sendInterrupt({required String speaker, String? requestId}) {
     if (!_connected || _channel == null) return;
+
+    final resolvedRequestId = (requestId != null && requestId.isNotEmpty)
+        ? requestId
+        : 'int-${DateTime.now().microsecondsSinceEpoch}-${++_interruptRequestSeq}';
 
     _channel!.sink.add(jsonEncode({
       'type': 'interrupt',
       'speaker': speaker,
+      'request_id': resolvedRequestId,
     }));
   }
 

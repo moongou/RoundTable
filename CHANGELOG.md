@@ -5,6 +5,35 @@
 
 ---
 
+## v1.0.6 - 2026-04-30
+
+### Bug 修复
+
+- 修复 FloorManager 在 continuation 过程中对 AutoGen 终止计数重置的问题：新增本地消息预算上限（`nominal_max_turns * 2 + 8`），避免单轮讨论异常拉长到失控。
+- 修复 human turn 恢复链路：human-turn stream 提前结束后会自动重启 continuation stream，避免讨论停滞。
+- 修复通用流式卡顿恢复：对 `__anext__` 增加超时保护，超时后触发恢复重启，减少 live 讨论中断。
+- 修复 `pause/resume` 清理协程未真正执行的问题，确保 team control 在异常路径也能被正确收口。
+
+### 验证
+
+- `backend/tests/test_acceptance_guards.py` 关键守卫用例通过（包含 `general_stall`、`human_turn_recovery`、`pause_and_resume`）。
+- 5 轮 live 质量审计完成，全部满足 `human_speech_count >= 5` 门槛。
+
+## v1.0.5 - 2026-04-30
+
+### Bug 修复
+
+- 修复主持人对刚发完角色再次使用“请X发言”造成的重复点名空转，避免 designation 循环继续放大老师话轮占比。
+- 收紧真人麦克风授权链：前后端统一只在老师明确点名、同学明确交棒或真人举手获准时打开麦克风，减少未授权 human_input_requested 和误开麦。
+- 调整真人调度预算与主持人提示词，统一把 10 分钟讨论的真人发言目标收敛到 5 到 8 次，并缩短真人再次被邀请前的等待间隔。
+- 优化真人发言后的老师接话体验：前端新增老师接话热身提示，降低真人提交后老师尚未开口时的等待落差。
+- live 质量审计脚本在本地 Ollama 超时或 HTTP 异常时会自动回退 deterministic human reply，避免 10 轮审计被单次代理超时整批打断。
+
+### 验证
+
+- 后端守卫测试与前端 human turn commander 定向测试通过。
+- Flutter Web 构建产物已同步部署到 backend/static，并随版本号一并更新。
+
 ## v1.0.4 - 2026-04-29
 
 ### Bug 修复

@@ -508,6 +508,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             human_hand_raise_notifier=note_human_hand_raise,
             human_queue_scope=session_id,
             thinker_agent_names=[a.name for a in thinker_agents],
+            nominal_max_turns=max_turns,
         )
 
         # 设置 display name 映射（需求4：用于指定发言者解析）
@@ -582,7 +583,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 },
             )
 
-        async def on_interrupt(interrupter, current_speaker, approved_by):
+        async def on_interrupt(interrupter, current_speaker, approved_by, request_id):
             await send_event(
                 "interrupt",
                 {
@@ -590,6 +591,36 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     "interrupted_speaker": agent_display_map.get(current_speaker, current_speaker),
                     "approved": True,
                     "approved_by": approved_by,
+                    "request_id": str(request_id or ""),
+                },
+            )
+
+        async def on_human_input_requested(data):
+            payload = dict(data or {})
+            speaker = (payload.get("speaker") or "").strip()
+            request_reason = (payload.get("reason") or "normal").strip().lower()
+            display_speaker = speaker
+            if speaker:
+                display_speaker = agent_display_map.get(speaker, speaker)
+                payload["agent_speaker"] = speaker
+                payload["speaker"] = display_speaker
+            if pending_human_request_ts is not None and display_speaker:
+                pending_human_request_ts[display_speaker] = asyncio.get_running_loop().time()
+            if pending_human_request_id is not None and display_speaker:
+                request_id = str(payload.get("request_id") or "").strip()
+                if request_id:
+                    pending_human_request_id[display_speaker] = request_id
+            await send_event("human_input_requested", payload)
+            await send_event(
+                "phase_telemetry",
+                {
+                    "source": "backend",
+                    "phase": "human_turn_waiting",
+                    "reason": f"human_input_requested_{request_reason}",
+                    "recovery": request_reason in {"moderator_designated_human", "watchdog"},
+                    "speaker": display_speaker,
+                    "agent_speaker": speaker,
+                    "session_id": session_id,
                 },
             )
 
@@ -601,6 +632,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         floor_manager.on_turn_change(on_turn_change)
         floor_manager.on_state_change(on_state_change)
         floor_manager.on_interrupt(on_interrupt)
+        floor_manager.on_human_input_requested(on_human_input_requested)
         floor_manager.on_error(on_error)
 
         # 通知客户端讨论开始
@@ -703,7 +735,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     elif msg_type == "interrupt":
                         # 打断请求 - 通知主持人并切换状态
                         speaker = normalize_display_name(msg.get("speaker", ""))
-                        await floor_manager.request_interrupt(speaker)
+                        request_id = str(msg.get("request_id", "") or "").strip()
+                        await floor_manager.request_interrupt(speaker, request_id=request_id)
                     elif msg_type == "push_to_talk_start":
                         # PTT 开始 - 标记用户开始发言
                         speaker = normalize_display_name(msg.get("speaker", ""))

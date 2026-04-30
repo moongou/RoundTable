@@ -868,6 +868,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool _mountEndingQuotesOverlay = false;
   bool _quickFeedbackVisible = false;
   String _quickFeedbackText = '';
+  bool _teacherReplyWarmupVisible = false;
   bool _awaitingTeacherFeedbackMetric = false;
   DateTime? _pendingTeacherReplySeenAt;
   int? _pendingTeacherReplyEventSeq;
@@ -972,6 +973,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   OverlayEntry? _statusToastEntry;
   Timer? _statusToastTimer;
   Timer? _quickFeedbackTimer;
+  Timer? _teacherReplyWarmupTimer;
   bool _disposed = false;
   int _bgTaskRunning = 0;
   final List<Future<void> Function()> _bgTaskQueue = [];
@@ -2447,6 +2449,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }
 
   void _clearPendingTeacherFeedbackMetric() {
+    _dismissTeacherReplyWaitingUi(clearText: true);
     _awaitingTeacherFeedbackMetric = false;
     _pendingTeacherReplySeenAt = null;
     _pendingTeacherReplyEventSeq = null;
@@ -2459,12 +2462,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     }
     _pendingTeacherReplySeenAt = DateTime.now();
     _pendingTeacherReplyEventSeq = eventSeq;
+    _promoteImmediateFeedbackToTeacherWarmup();
   }
 
   bool _isMeaningfulImmediateFeedbackText(String text) {
-    final compact = text
-        .replaceAll(RegExp(r'[\s\p{P}\p{S}]', unicode: true), '')
-        .trim();
+    final compact =
+        text.replaceAll(RegExp(r'[\s\p{P}\p{S}]', unicode: true), '').trim();
     if (compact.isEmpty || compact == '跳过') {
       return false;
     }
@@ -2485,13 +2488,29 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         variants.length];
   }
 
+  String _teacherWarmupDots() {
+    final dotCount = (_candleController.value * 3).floor() + 1;
+    return '·' * dotCount;
+  }
+
+  List<double> _teacherWarmupSignalHeights() {
+    final phase = _candleController.value * pi * 2;
+    return <double>[
+      7 + (sin(phase) + 1) * 5,
+      7 + (sin(phase + 1.35) + 1) * 5,
+      7 + (sin(phase + 2.7) + 1) * 5,
+    ];
+  }
+
   void _showImmediateFeedbackOverlay(String submitText) {
     final overlayText = _buildImmediateFeedbackText(submitText);
+    _teacherReplyWarmupTimer?.cancel();
     _quickFeedbackTimer?.cancel();
     if (mounted) {
       setState(() {
         _quickFeedbackText = overlayText;
         _quickFeedbackVisible = true;
+        _teacherReplyWarmupVisible = false;
       });
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2510,11 +2529,43 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _pendingFeedbackOverlayMetricAt = null;
       }
     });
-    _quickFeedbackTimer = Timer(const Duration(milliseconds: 1800), () {
+    _quickFeedbackTimer = Timer(const Duration(milliseconds: 2600), () {
       if (!mounted) return;
       setState(() {
         _quickFeedbackVisible = false;
       });
+    });
+  }
+
+  void _promoteImmediateFeedbackToTeacherWarmup() {
+    _quickFeedbackTimer?.cancel();
+    _teacherReplyWarmupTimer?.cancel();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _quickFeedbackText = '老师接上了，马上开口';
+      _quickFeedbackVisible = true;
+      _teacherReplyWarmupVisible = true;
+    });
+    _teacherReplyWarmupTimer = Timer(const Duration(seconds: 6), () {
+      if (!mounted) return;
+      _dismissTeacherReplyWaitingUi(clearText: false);
+    });
+  }
+
+  void _dismissTeacherReplyWaitingUi({bool clearText = false}) {
+    _quickFeedbackTimer?.cancel();
+    _teacherReplyWarmupTimer?.cancel();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _quickFeedbackVisible = false;
+      _teacherReplyWarmupVisible = false;
+      if (clearText) {
+        _quickFeedbackText = '';
+      }
     });
   }
 
@@ -3090,10 +3141,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               speaker == humanName &&
               _hasCurrentSpeakerSpeechToFinish()) {
             _pumpCurrentSpeakerSpeechBeforeHumanTurn();
-            _commander.onHumanInputRequested(
-              speaker: widget.humanName,
-              hasOngoingSpeechPlayback: true,
-            );
             _deferHumanTurnUntilCurrentSpeechEnds(
               speaker: speaker,
               prompt: _humanTurnWaitingPrompt(),
@@ -3390,6 +3437,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
         final requestedHumanSpeaker =
             requestedSpeaker.isEmpty ? widget.humanName : requestedSpeaker;
+        final requestReason =
+            ((event.data?['reason'] ?? '') as Object).toString().trim();
         if (ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
           requestedSpeaker: requestedHumanSpeaker,
           humanName: widget.humanName,
@@ -3410,6 +3459,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
         final command = _commander.onHumanInputRequested(
           speaker: requestedHumanSpeaker,
+          requestReason: requestReason,
           hasOngoingSpeechPlayback: shouldWaitForCurrentSpeech,
         );
         if (command == HumanTurnCommand.defer) {
@@ -3770,6 +3820,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _pendingTeacherReplySeenAt = null;
     _pendingTeacherReplyEventSeq = null;
     _ttsFirstAudioPendingBySession.clear();
+    _teacherReplyWarmupVisible = false;
     if (_isMeaningfulImmediateFeedbackText(submitText)) {
       _pendingFeedbackOverlayMetricAt = DateTime.now();
       _showImmediateFeedbackOverlay(submitText);
@@ -4014,6 +4065,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         replySeenAt: _pendingTeacherReplySeenAt!,
         eventSeq: _pendingTeacherReplyEventSeq ?? eventSeq,
       );
+      _teacherReplyWarmupVisible = true;
       _pendingTeacherReplySeenAt = null;
       _pendingTeacherReplyEventSeq = null;
     }
@@ -4111,9 +4163,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       final item = _ttsQueue.removeAt(0);
       _activeTtsItem = item;
       _activeTtsSessionId = item.playbackSessionId;
-        final ttsFirstAudioMetric =
+      final ttsFirstAudioMetric =
           _ttsFirstAudioPendingBySession.remove(item.playbackSessionId);
-        var ttsFirstAudioMetricReported = false;
+      var ttsFirstAudioMetricReported = false;
       final startupWaitMs =
           DateTime.now().difference(item.enqueuedAt).inMilliseconds;
       _ttsStartupSamples += 1;
@@ -4186,33 +4238,32 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         Object? lastErr;
         for (var attempt = 0; attempt < 2 && !played; attempt++) {
           try {
-            await _ttsService
-                .speak(
-                  item.text,
-                  voice: item.voice,
-                  rate: speed,
-                  onStart: () {
-                    if (!ttsFirstAudioMetricReported &&
-                        ttsFirstAudioMetric != null) {
-                      ttsFirstAudioMetricReported = true;
-                      _awaitingTeacherFeedbackMetric = false;
-                      _reportClientMetric(
-                        name: 'tts_first_audio_delay_ms',
-                        valueMs: DateTime.now()
-                            .difference(ttsFirstAudioMetric.replySeenAt)
-                            .inMilliseconds,
-                        speaker: item.source,
-                        phase: 'teacher_feedback',
-                        eventSeq: ttsFirstAudioMetric.eventSeq,
-                        detail: 'teacher_first_audio',
-                      );
-                    }
-                    activateSubtitleAtSpeechStart(
-                      playbackStarted: true,
-                    );
-                  },
-                )
-                .timeout(timeout);
+            await _ttsService.speak(
+              item.text,
+              voice: item.voice,
+              rate: speed,
+              onStart: () {
+                _dismissTeacherReplyWaitingUi(clearText: true);
+                if (!ttsFirstAudioMetricReported &&
+                    ttsFirstAudioMetric != null) {
+                  ttsFirstAudioMetricReported = true;
+                  _awaitingTeacherFeedbackMetric = false;
+                  _reportClientMetric(
+                    name: 'tts_first_audio_delay_ms',
+                    valueMs: DateTime.now()
+                        .difference(ttsFirstAudioMetric.replySeenAt)
+                        .inMilliseconds,
+                    speaker: item.source,
+                    phase: 'teacher_feedback',
+                    eventSeq: ttsFirstAudioMetric.eventSeq,
+                    detail: 'teacher_first_audio',
+                  );
+                }
+                activateSubtitleAtSpeechStart(
+                  playbackStarted: true,
+                );
+              },
+            ).timeout(timeout);
             played = true;
           } catch (e) {
             lastErr = e;
@@ -4425,6 +4476,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     _statusToastTimer?.cancel();
     _statusToastEntry?.remove();
     _quickFeedbackTimer?.cancel();
+    _teacherReplyWarmupTimer?.cancel();
     _ctrlHeld = false;
     _awaitingAsrFirstPacket = false;
     HardwareKeyboard.instance.removeHandler(_onHardwareKey);
@@ -5717,60 +5769,216 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                       offset: _quickFeedbackVisible
                           ? Offset.zero
                           : const Offset(-0.08, 0),
-                      child: AnimatedOpacity(
-                        duration: const Duration(milliseconds: 180),
-                        opacity: _quickFeedbackVisible ? 1.0 : 0.0,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 12,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xD9111720),
-                            borderRadius: BorderRadius.circular(18),
-                            border: Border.all(
-                              color: const Color(0xFF5DE2C2)
-                                  .withValues(alpha: 0.35),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.16),
-                                blurRadius: 18,
-                                offset: const Offset(0, 8),
+                      child: AnimatedBuilder(
+                        animation: _candleController,
+                        builder: (context, _) {
+                          final pulse = 0.72 + _candleController.value * 0.28;
+                          final warmupColor = _teacherReplyWarmupVisible
+                              ? const Color(0xFFFFC36D)
+                              : const Color(0xFF5DE2C2);
+                          return AnimatedOpacity(
+                            duration: const Duration(milliseconds: 180),
+                            opacity: _quickFeedbackVisible ? 1.0 : 0.0,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
                               ),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Container(
-                                width: 8,
-                                height: 8,
-                                margin: const EdgeInsets.only(top: 5),
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFF5DE2C2),
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  _quickFeedbackText,
-                                  style: GoogleFonts.notoSansSc(
-                                    color: const Color(0xFFF2F7F7),
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w600,
-                                    height: 1.4,
+                              decoration: BoxDecoration(
+                                color: const Color(0xD9111720),
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(
+                                  color: warmupColor.withValues(
+                                    alpha: _teacherReplyWarmupVisible
+                                        ? 0.32 + 0.2 * pulse
+                                        : 0.35,
                                   ),
-                                  maxLines: 3,
-                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.16),
+                                    blurRadius: 18,
+                                    offset: const Offset(0, 8),
+                                  ),
+                                ],
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    width: 8,
+                                    height: 8,
+                                    margin: const EdgeInsets.only(top: 5),
+                                    decoration: BoxDecoration(
+                                      color: warmupColor.withValues(
+                                        alpha: _teacherReplyWarmupVisible
+                                            ? 0.65 + 0.35 * pulse
+                                            : 1,
+                                      ),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          _teacherReplyWarmupVisible
+                                              ? '回应准备'
+                                              : '即时反馈',
+                                          style: GoogleFonts.notoSansSc(
+                                            color: _teacherReplyWarmupVisible
+                                                ? const Color(0xFFFFD9A3)
+                                                : const Color(0xFF97F0DE),
+                                            fontSize: 10.5,
+                                            fontWeight: FontWeight.w700,
+                                            letterSpacing: 0.6,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Text(
+                                          _quickFeedbackText,
+                                          style: GoogleFonts.notoSansSc(
+                                            color: const Color(0xFFF2F7F7),
+                                            fontSize: 12.5,
+                                            fontWeight: FontWeight.w600,
+                                            height: 1.4,
+                                          ),
+                                          maxLines: 3,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+
+              if (_teacherReplyWarmupVisible)
+                Positioned(
+                  top: MediaQuery.of(context).padding.top + size.height * 0.14,
+                  left: tableCenterX - 112,
+                  width: 224,
+                  child: IgnorePointer(
+                    child: Center(
+                      child: AnimatedBuilder(
+                        animation: _candleController,
+                        builder: (context, _) {
+                          final pulse = 0.78 + _candleController.value * 0.22;
+                          final signalHeights = _teacherWarmupSignalHeights();
+                          return Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 9,
+                            ),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  const Color(0xE31D1724),
+                                  const Color(0xD91A1620),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(18),
+                              border: Border.all(
+                                color: const Color(0xFFFFC36D)
+                                    .withValues(alpha: 0.35 + 0.28 * pulse),
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(0xFFFFC36D)
+                                      .withValues(alpha: 0.1 + 0.08 * pulse),
+                                  blurRadius: 20,
+                                  spreadRadius: 1.5,
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: List.generate(3, (index) {
+                                    return Container(
+                                      width: 3,
+                                      height: signalHeights[index],
+                                      margin: EdgeInsets.only(
+                                        right: index == 2 ? 0 : 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFFFC97A)
+                                            .withValues(
+                                                alpha: 0.6 + 0.35 * pulse),
+                                        borderRadius: BorderRadius.circular(3),
+                                      ),
+                                    );
+                                  }),
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  '李老师正在接话${_teacherWarmupDots()}',
+                                  textAlign: TextAlign.center,
+                                  style: GoogleFonts.notoSansSc(
+                                    color: const Color(0xFFFFD9A3),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 0.35,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+
+              if (_teacherReplyWarmupVisible)
+                Positioned(
+                  top: MediaQuery.of(context).padding.top + size.height * 0.19,
+                  left: tableCenterX - 100,
+                  width: 200,
+                  child: IgnorePointer(
+                    child: AnimatedBuilder(
+                      animation: _candleController,
+                      builder: (context, _) {
+                        final activeWidth = 56 + _candleController.value * 124;
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: Container(
+                            height: 3,
+                            color: const Color(0x33FFC36D),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: Container(
+                                width: activeWidth,
+                                decoration: BoxDecoration(
+                                  gradient: const LinearGradient(
+                                    colors: [
+                                      Color(0x66FFC36D),
+                                      Color(0xFFFFC36D),
+                                      Color(0x66FFC36D),
+                                    ],
+                                  ),
+                                  borderRadius: BorderRadius.circular(999),
                                 ),
                               ),
-                            ],
+                            ),
                           ),
-                        ),
-                      ),
+                        );
+                      },
                     ),
                   ),
                 ),
