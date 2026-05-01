@@ -204,6 +204,10 @@ class FloorManager:
         self._pending_human_input_reason = "normal"
         self._human_turn_idle_notice_sent = False
 
+        # Selector stall recovery: track consecutive LLM selector failures
+        self._consecutive_selector_stalls = 0
+        self._max_consecutive_selector_stalls = 2
+
         # 暂停状态
         self._paused = False
         self._resume_gate = asyncio.Event()
@@ -344,9 +348,10 @@ class FloorManager:
                 "",
                 text,
             ).strip()
+            # Clean up residual fragments and rejoin
+            text = re.sub(r"\s{2,}", " ", text).strip()
+            text = re.sub(r"^[，,:：、；;]+\s*", "", text)
             if not text:
-                text = self._build_moderator_opening_baseline()
-            elif not self._moderator_opening_has_context(text):
                 text = self._build_moderator_opening_baseline()
             return text
 
@@ -435,6 +440,158 @@ class FloorManager:
             if name in self.human_names:
                 return name
         return sorted(self.human_names)[0] if self.human_names else ""
+
+    def _build_initial_task(self, topic: str) -> str:
+        """Build a strong initial task string that enforces topic opening.
+
+        Includes explicit opening requirements to ensure the moderator introduces
+        the topic properly before any discussion begins.
+        """
+        topic_text = (topic or "").strip()
+        # Extract topic title and story for context
+        topic_title = ""
+        topic_story = ""
+        for line in topic_text.splitlines():
+            line = line.strip()
+            if not topic_title and line:
+                topic_title = line
+            if line and len(line) > 30:
+                topic_story = line
+                break
+
+        parts = [topic_text]
+
+        # Add explicit opening instruction
+        opening_instruction = (
+            "\n\n⚠️ 【开场指令 - 最高优先级，必须遵守】\n"
+            "作为主持人李老师，你的第一轮开场发言必须包含以下三个部分：\n"
+            "1. 自我介绍和欢迎（一句话即可）\n"
+            "2. 介绍本场讨论话题的来源和背景（这个话题从哪来的、为什么值得讨论）\n"
+            "3. 用小学生能理解的语言解释话题中的核心概念（如果有生僻词，用生活例子解释）\n\n"
+            "开场示例格式：'同学们好！我是李老师。今天我们来聊聊[话题]。这个话题来自[来源/生活场景]，"
+            "核心问题是[问题定义]。简单来说，[概念]就是[生活化解释]。'\n\n"
+            "开场必须覆盖话题的核心背景信息。如果话题资料里有故事或数据，必须在开场中引用。"
+            "开场结束后再点名第一位同学发言。严禁跳过话题介绍直接点名。"
+        )
+        parts.append(opening_instruction)
+        return "\n".join(parts)
+
+    def _validate_moderator_opening(self, content: str) -> bool:
+        """Check if the moderator's opening message contains adequate topic introduction.
+
+        Returns True if the opening is adequate, False if deficient.
+        """
+        text = (content or "").strip()
+        if not text:
+            return False
+
+        # Must be more than just greeting + name introduction
+        if len(text) < 30:
+            return False
+
+        # Check for topic keyword presence
+        topic = (self._current_topic or "").strip()
+        if topic:
+            # Extract key terms from topic (first line usually has the title)
+            topic_first_line = topic.splitlines()[0].strip() if topic.splitlines() else topic
+            key_terms = re.findall(r"[一-鿿]{2,}", topic_first_line)
+            # At least one key term should appear in the opening
+            term_match = any(term in text for term in key_terms if len(term) >= 3)
+            if not term_match and len(key_terms) > 0:
+                logger.warning(
+                    "[FloorManager] 主持人开场未提及话题关键词: terms=%s",
+                    key_terms[:3],
+                )
+                return False
+
+        # Check for topic introduction markers
+        intro_markers = [
+            "讨论", "话题", "聊聊", "谈谈", "问题",
+            "今天", "主题", "背景", "来自", "来源",
+        ]
+        has_intro_marker = any(marker in text for marker in intro_markers)
+        if not has_intro_marker:
+            logger.warning("[FloorManager] 主持人开场缺少话题引导标记")
+            return False
+
+        return True
+
+    def _build_topic_context_note(self) -> str:
+        """Build a system note providing topic context when moderator opening is deficient."""
+        topic = (self._current_topic or "").strip()
+        if not topic:
+            return ""
+
+        # Extract topic title (first non-empty line)
+        lines = [l.strip() for l in topic.splitlines() if l.strip()]
+        if not lines:
+            return ""
+
+        topic_title = lines[0] if len(lines[0]) < 30 else lines[0][:30]
+
+        # Extract story/background (longer lines later in the topic text)
+        story_lines = [l for l in lines[1:] if len(l) > 30]
+        story_preview = ""
+        if story_lines:
+            story_preview = story_lines[0][:150]
+            if len(story_lines[0]) > 150:
+                story_preview += "…"
+
+        parts = [f"📋 本场话题：{topic_title}"]
+        if story_preview:
+            parts.append(f"📖 背景资料：{story_preview}")
+
+        return "\n".join(parts)
+        """Deterministic fallback when LLM selector stalls.
+
+        Returns the best next speaker without calling any LLM.
+        Priority: human (if below target) > unspoken > least-recent non-moderator > human > moderator.
+        """
+        spoken = {name for name, count in self._speaker_message_count.items() if count > 0}
+        total_spoken = len(spoken)
+        # If nobody has spoken yet, moderator must go first
+        if total_spoken == 0:
+            return "moderator"
+
+        human_agent = self._preferred_human_agent_name()
+
+        # Priority 1: human if below minimum target (5) and not just spoke
+        if human_agent and self.human_names:
+            if self._human_turn_count() < 5:
+                last_agent = self._last_substantive_agent_speaker()
+                if last_agent != human_agent:
+                    return human_agent
+
+        # Priority 2: unspoken non-moderator participants
+        unspoken = [n for n in self.all_names if n != "moderator" and n not in spoken]
+        if unspoken:
+            thinkers_unspoken = [n for n in unspoken if n in self.thinker_names]
+            if thinkers_unspoken:
+                return thinkers_unspoken[0]
+            return unspoken[0]
+
+        # Priority 3: least-recent non-human, non-moderator speaker
+        for display_name in reversed(self._recent_display_speakers):
+            agent_name = self._display_name_to_agent.get(display_name, display_name)
+            if agent_name not in self.human_names and agent_name != "moderator":
+                return agent_name
+
+        # Priority 4: human (even if above target)
+        if human_agent and self.human_names:
+            last_agent = self._last_substantive_agent_speaker()
+            if last_agent != human_agent:
+                return human_agent
+
+        # Priority 5: moderator
+        return "moderator"
+
+    def _select_fallback_and_designate(self) -> Optional[str]:
+        """Select smart fallback speaker and set as designated. Returns the chosen speaker."""
+        speaker = self._smart_fallback_speaker()
+        if speaker:
+            self._set_designated_speaker(speaker)
+            logger.info("[FloorManager] Smart fallback: designated speaker=%s", speaker)
+        return speaker
 
     def _has_human_spoken(self) -> bool:
         return any(self._speaker_message_count.get(name, 0) > 0 for name in self.human_names)
@@ -605,11 +762,29 @@ class FloorManager:
         target_agent = self._preferred_human_agent_name()
         if not target_agent:
             return False
-        if self._human_turn_count() >= 5:
+
+        human_count = self._human_turn_count()
+        if human_count >= 5:
             return False
+
+        # First human turn: invite after 2 non-human warm-up turns
         if self._speaker_message_count.get(target_agent, 0) <= 0:
             return self._non_human_turn_count_before_first_human() >= 2
-        return self._non_human_turns_since_last_human() >= 1
+
+        # Even distribution: calculate adaptive gap based on remaining budget
+        # Remaining human turns needed vs remaining total turns
+        total_non_mod = sum(
+            1 for name, count in self._speaker_message_count.items()
+            if name != "moderator" and name not in self.human_names and count > 0
+        )
+        remaining_human = 5 - human_count
+        # Estimate remaining turns based on nominal max
+        estimated_remaining = max(1, self._nominal_max_turns - total_non_mod - human_count)
+        # Desired gap: evenly space remaining human turns across remaining discussion
+        desired_gap = max(2, estimated_remaining // max(1, remaining_human + 1))
+
+        current_gap = self._non_human_turns_since_last_human()
+        return current_gap >= desired_gap
 
     def _force_first_human_stream_segment(self, source: str, segment: str) -> str:
         return segment
@@ -1135,7 +1310,102 @@ class FloorManager:
             return ""
         text = self._sanitize_opening_reference(source, text)
         text = self._sanitize_grounded_quote_attribution(text)
-        return self._sanitize_reference_attribution(source, text)
+        text = self._sanitize_reference_attribution(source, text)
+        if source == "moderator":
+            text = self._validate_moderator_references(text)
+        return text
+
+    def _validate_moderator_references(self, content: str) -> str:
+        """Validate moderator references against actual speaker history.
+
+        Detects and fixes:
+        - Praising/quoting someone who hasn't spoken yet
+        - Referencing content that doesn't exist in any speaker's messages
+        - Attributing specific quotes or metaphors to the wrong person
+        """
+        if not content or not self._recent_turn_summaries:
+            return content
+
+        text = content
+        spoken_displays = {
+            self._agent_to_display_name.get(name, name)
+            for name, count in self._speaker_message_count.items()
+            if count > 0
+        }
+
+        # Pattern 1: "X同学，你说得Y" / "X，你讲得Y" — but X hasn't spoken
+        praise_patterns = [
+            re.compile(
+                rf"({re.escape(display)})(?:同学|先生)?[，,：:\s]*(?:你|您)(?:说|讲|问|这个|那段|刚才)(?:得|的|的这段话)\S{{0,40}}(?:真好|太棒|很棒|太好了|很对|很到位|太精彩|真精彩|很深刻|很形象|问得好|问得太好)"
+            )
+            for display in self._display_name_to_agent.keys()
+            if display and display not in spoken_displays
+        ]
+        for pattern in praise_patterns:
+            if pattern.search(text):
+                logger.warning(
+                    "[FloorManager] 主持人引用了未发言者，替换为通用表达: %s",
+                    text[:80],
+                )
+                text = pattern.sub("刚才有同学提到一个有意思的点", text)
+                break
+
+        # Pattern 2: "X用Y比喻/形容" — check if Y exists in X's actual messages
+        metaphor_pattern = re.compile(
+            r"(?:^|[。！？!?；;])\s*([^\s，,]{2,8})(?:同学|先生)?[用拿][了]?\s*(\S{1,12})\s*(?:比喻|形容|例子|对比|类比|说法)",
+        )
+        for match in metaphor_pattern.finditer(text):
+            ref_name = match.group(1)
+            ref_metaphor = match.group(2)
+            agent_name = self._display_name_to_agent.get(ref_name, ref_name)
+            if agent_name in self.human_names and self._speaker_message_count.get(agent_name, 0) <= 0:
+                logger.warning(
+                    "[FloorManager] 主持人引用未发言真人的比喻，移除: name=%s metaphor=%s",
+                    ref_name,
+                    ref_metaphor,
+                )
+                text = text.replace(match.group(0), "")
+                continue
+            # Check if this metaphor/keyword exists in any recent summary
+            found = any(
+                ref_metaphor in summary
+                for speaker, summary in self._recent_turn_summaries
+            )
+            if not found:
+                logger.warning(
+                    "[FloorManager] 主持人引用不存在的内容: name=%s content=%s",
+                    ref_name,
+                    ref_metaphor,
+                )
+                text = text.replace(match.group(0), "刚才有同学提到一个有意思的比喻")
+
+        # Pattern 3: "刚才X说Y" / "X提到Y" — check X is the actual last speaker
+        last_attribution = re.compile(
+            r"(?:刚才|刚刚|前面|上一位)\s*([^\s，,]{2,8})(?:同学|先生)?[说提到讲到指出问道]\S{0,30}",
+        )
+        match = last_attribution.search(text)
+        if match:
+            ref_name = match.group(1)
+            last_actual_speaker = ""
+            if self._recent_display_speakers:
+                last_actual_speaker = self._recent_display_speakers[-1]
+            if ref_name and last_actual_speaker and ref_name != last_actual_speaker:
+                agent_name = self._display_name_to_agent.get(ref_name, ref_name)
+                if agent_name in self.human_names and self._speaker_message_count.get(agent_name, 0) <= 0:
+                    logger.warning(
+                        "[FloorManager] 张冠李戴：主持人说'%s说Y'但%s未发言，实际发言者是%s",
+                        ref_name,
+                        ref_name,
+                        last_actual_speaker,
+                    )
+                    text = re.sub(
+                        rf"刚才\s*{re.escape(ref_name)}(?:同学|先生)?[说提到讲到指出问道]",
+                        f"刚才{last_actual_speaker}同学",
+                        text,
+                        count=1,
+                    )
+
+        return text
 
     def _topic_focus_label(self) -> str:
         topic = (self._current_topic or "").strip()
@@ -1799,21 +2069,33 @@ class FloorManager:
                     self._touch_progress("watchdog_human_wait_notice")
                 continue
 
-            # Non-human hard stalls: publish a diagnostic system message for observability.
+            # Non-human hard stalls: use smart fallback to force progress.
             if idle_sec >= self._general_stall_timeout_sec:
                 if now - self._last_watchdog_action_ts < 12.0:
                     continue
                 self._last_watchdog_action_ts = now
+                self._consecutive_selector_stalls += 1
                 logger.warning(
-                    "[FloorManager] general stall detected state=%s idle=%.1fs",
+                    "[FloorManager] general stall detected state=%s idle=%.1fs stalls=%d",
                     self.state,
                     idle_sec,
+                    self._consecutive_selector_stalls,
                 )
-                await self._emit_message(
-                    "系统",
-                    "检测到流程停滞，系统正在自动恢复调度。",
-                    "system",
-                )
+                if self._consecutive_selector_stalls >= self._max_consecutive_selector_stalls:
+                    fallback = self._select_fallback_and_designate()
+                    msg = (
+                        f"检测到流程持续停滞，系统已指定 {self._agent_to_display_name.get(fallback, fallback)} 继续发言。"
+                        if fallback
+                        else "检测到流程停滞，系统正在自动恢复调度。"
+                    )
+                    await self._emit_message("系统", msg, "system")
+                    self._consecutive_selector_stalls = 0
+                else:
+                    await self._emit_message(
+                        "系统",
+                        "检测到流程停滞，系统正在自动恢复调度。",
+                        "system",
+                    )
                 self._touch_progress("watchdog_general_notice")
 
     async def run(self, topic: str) -> AsyncGenerator[dict, None]:
@@ -1846,9 +2128,10 @@ class FloorManager:
         saw_events_after_human_turn_recovery = False
         _local_msg_count = 0
         _local_budget_cap = self._nominal_max_turns * 2 + 8
+        self._consecutive_selector_stalls = 0
 
         try:
-            next_task: Optional[str] = topic
+            next_task: Optional[str] = self._build_initial_task(topic)
 
             while True:
                 stream = self.team.run_stream(task=next_task)
@@ -1869,20 +2152,36 @@ class FloorManager:
                             continue
                         now = time.monotonic()
                         self._last_watchdog_action_ts = now
+                        self._consecutive_selector_stalls += 1
                         logger.warning(
-                            "[FloorManager] team stream stalled while waiting for next event; restarting continuation state=%s",
+                            "[FloorManager] team stream stalled while waiting for next event; restarting continuation state=%s stalls=%d",
                             self.state,
+                            self._consecutive_selector_stalls,
                         )
-                        await self._emit_message(
-                            "系统",
-                            "检测到流程停滞，系统正在自动恢复调度。",
-                            "system",
-                        )
+                        # Smart fallback: after consecutive stalls, designate next speaker deterministically
+                        if self._consecutive_selector_stalls >= self._max_consecutive_selector_stalls:
+                            fallback = self._select_fallback_and_designate()
+                            msg = (
+                                f"检测到流程持续停滞，系统已指定 {self._agent_to_display_name.get(fallback, fallback)} 继续发言。"
+                                if fallback
+                                else "检测到流程停滞，系统正在自动恢复调度。"
+                            )
+                            await self._emit_message("系统", msg, "system")
+                            self._consecutive_selector_stalls = 0
+                        else:
+                            await self._emit_message(
+                                "系统",
+                                "检测到流程停滞，系统正在自动恢复调度。",
+                                "system",
+                            )
                         self._touch_progress("run_stream_timeout_recovery")
                         restart_after_general_stall = True
                         break
                     except StopAsyncIteration:
                         break
+
+                    # Reset stall counter on successful event
+                    self._consecutive_selector_stalls = 0
 
                     if recovered_human_turn_stream_end:
                         saw_events_after_human_turn_recovery = True
@@ -2219,7 +2518,21 @@ class FloorManager:
                 )
                 is_final_closing = False
 
-            # 点名解析应尽量基于原始语义，先于安全改写尝试。
+            # Validate moderator opening quality on first substantive message
+            if (
+                source == "moderator"
+                and not is_final_closing
+                and self._speaker_message_count.get("moderator", 0) == 0
+                and not is_non_substantive_turn(content)
+            ):
+                if not self._validate_moderator_opening(content):
+                    logger.warning(
+                        "[FloorManager] 主持人开场不合格，将通过后续系统消息提示"
+                    )
+                    # Inject topic context as system note so students have context
+                    topic_intro = self._build_topic_context_note()
+                    if topic_intro:
+                        await self._emit_message("系统", topic_intro, "system")
             designated_pre_filter: Optional[str] = None
             display_source = self._agent_to_display_name.get(source, source)
             all_display_names = list(self._display_name_to_agent.keys())

@@ -286,12 +286,12 @@ def create_discussion_team(
     preferred_human_turn_target = 0
     human_turn_min_target = 0
     human_turn_soft_cap = 0
-    first_human_invite_after_turns = 2
+    base_first_human_invite_after_turns = 2
     forced_first_human_after_turns = 3
-    human_reinvite_gap = 2
+    base_human_reinvite_gap = 3  # Minimum gap between human turns for even distribution
     moderator_soft_cap_ratio = 0.30
     if humans:
-        human_turn_min_target = min(5, max(2, round(nominal_max_turns / 5)))
+        human_turn_min_target = 5
         human_turn_soft_cap = max(human_turn_min_target, min(8, round(nominal_max_turns / 3)))
         preferred_human_turn_target = max(
             human_turn_min_target,
@@ -454,12 +454,24 @@ def create_discussion_team(
         human_cooldown = 2
         since_human = turns_since_last_human()
         human_within_soft_cap = human_turn_count < effective_human_turn_soft_cap
+
+        # Adaptive gap for even distribution: space human turns across the discussion
+        remaining_human_budget = max(1, effective_preferred_human_turn_target - human_turn_count)
+        estimated_remaining_turns = max(1, nominal_max_turns - len(participant_msgs))
+        adaptive_gap = max(
+            base_human_reinvite_gap,
+            min(5, estimated_remaining_turns // max(1, remaining_human_budget + 1)),
+        )
+        # Hand raising: reduce gap when user is actively engaged
+        if engagement_level >= 1:
+            adaptive_gap = max(2, adaptive_gap - engagement_level)
+
         human_reinvite_due = (
             bool(human_name_set)
             and has_human_spoken
             and human_within_soft_cap
             and human_turn_count < effective_preferred_human_turn_target
-            and since_human >= human_reinvite_gap
+            and since_human >= adaptive_gap
         )
 
         # ── 优先级2：用户刚发言后，优先允许同伴自然接话，老师不必每次都立即点评 ──
