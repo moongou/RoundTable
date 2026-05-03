@@ -367,6 +367,8 @@ async function proxyBackendJson(res, requestOptions) {
 
 let backendAdminSessionToken = '';
 let backendAdminSessionExpireAt = 0;
+let backendManagementToken = '';
+let backendManagementTokenLoadedAt = 0;
 
 function parseBackendJson(raw) {
   if (!raw) return {};
@@ -375,6 +377,53 @@ function parseBackendJson(raw) {
   } catch (_) {
     return {};
   }
+}
+
+function loadBackendManagementToken(forceRefresh) {
+  const now = Date.now();
+  if (!forceRefresh && backendManagementToken && now - backendManagementTokenLoadedAt < 60 * 1000) {
+    return backendManagementToken;
+  }
+
+  let token = String(process.env.MANAGEMENT_API_TOKEN || '').trim();
+  if (!token) {
+    try {
+      const envPath = path.join(BACKEND_DIR, '.env');
+      if (fs.existsSync(envPath)) {
+        const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+        for (const line of lines) {
+          const trimmed = String(line || '').trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const idx = trimmed.indexOf('=');
+          if (idx <= 0) continue;
+          const key = trimmed.slice(0, idx).trim();
+          if (key !== 'MANAGEMENT_API_TOKEN') continue;
+          token = trimmed.slice(idx + 1).trim().replace(/^['\"]|['\"]$/g, '');
+          break;
+        }
+      }
+    } catch (_) {
+      token = '';
+    }
+  }
+
+  backendManagementToken = token;
+  backendManagementTokenLoadedAt = now;
+  return backendManagementToken;
+}
+
+async function requestBackendAdminViaManagementToken(method, reqPath, baseHeaders, body) {
+  let token = loadBackendManagementToken(false);
+  if (!token) {
+    token = loadBackendManagementToken(true);
+  }
+  if (!token) {
+    return null;
+  }
+  return requestBackend(method, reqPath, {
+    headers: Object.assign({}, baseHeaders, { 'X-Admin-Token': token }),
+    body: body || '',
+  });
 }
 
 async function ensureBackendAdminSession(forceRefresh) {
@@ -411,18 +460,27 @@ async function proxyBackendAdminJson(res, requestOptions) {
   const reqPath = opts.path || '/';
   const baseHeaders = Object.assign({}, opts.headers || {});
 
-  let token = await ensureBackendAdminSession(false);
-  let upstream = await requestBackend(method, reqPath, {
-    headers: Object.assign({}, baseHeaders, { Authorization: 'Bearer ' + token }),
-    body: opts.body || '',
-  });
+  let upstream = await requestBackendAdminViaManagementToken(
+    method,
+    reqPath,
+    baseHeaders,
+    opts.body || '',
+  );
 
-  if (upstream.statusCode === 401) {
-    token = await ensureBackendAdminSession(true);
+  if (!upstream || upstream.statusCode === 401 || upstream.statusCode === 403) {
+    let token = await ensureBackendAdminSession(false);
     upstream = await requestBackend(method, reqPath, {
       headers: Object.assign({}, baseHeaders, { Authorization: 'Bearer ' + token }),
       body: opts.body || '',
     });
+
+    if (upstream.statusCode === 401) {
+      token = await ensureBackendAdminSession(true);
+      upstream = await requestBackend(method, reqPath, {
+        headers: Object.assign({}, baseHeaders, { Authorization: 'Bearer ' + token }),
+        body: opts.body || '',
+      });
+    }
   }
 
   res.writeHead(upstream.statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -481,7 +539,7 @@ function normalizeMeetingHistorySummary(summary) {
 }
 
 function buildMeetingRecordingAudioUrl(sessionId, recordingId) {
-  return '/api/meeting-history/' + encodeURIComponent(sessionId) + '/recordings/' + encodeURIComponent(recordingId) + '/audio';
+  return 'api/meeting-history/' + encodeURIComponent(sessionId) + '/recordings/' + encodeURIComponent(recordingId) + '/audio';
 }
 
 function enrichMeetingRecording(sessionId, recording) {
@@ -971,8 +1029,21 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="footer">RoundTable Dev Panel · 使用 <kbd>Ctrl+C</kbd> 停止面板</div>
 <script>
 var MEETING_HISTORY_RETENTION_LIMIT = ${MEETING_HISTORY_RETENTION_LIMIT};
+function panelApiPath(pathname) {
+  var suffix = String(pathname || '/');
+  if (!suffix.startsWith('/')) suffix = '/' + suffix;
+  var currentPath = window.location.pathname || '/';
+  if (currentPath === '/ops' || currentPath.startsWith('/ops/')) {
+    if (suffix === '/ops' || suffix.startsWith('/ops/')) return suffix;
+    return '/ops' + suffix;
+  }
+  return suffix;
+}
+function panelFetch(pathname, options) {
+  return fetch(panelApiPath(pathname), options || {});
+}
 function ctrl(svc, action) {
-  fetch('/api/' + action + '/' + svc, {method:'POST'})
+  panelFetch('/api/' + action + '/' + svc, {method:'POST'})
     .then(function(r){return r.json()}).then(function(d){
       console.log(d);
       if (!d.ok && d.msg) showToast(d.msg);
@@ -986,7 +1057,7 @@ function showToast(msg) {
   setTimeout(function(){ t.remove(); }, 3000);
 }
 var box = document.getElementById('log-backend');
-var es = new EventSource('/log/backend');
+var es = new EventSource(panelApiPath('/log/backend'));
 es.onmessage = function(e) {
   var d = JSON.parse(e.data);
   var div = document.createElement('div');
@@ -1019,7 +1090,7 @@ function updateFlutterStatus(s) {
   document.getElementById('flutter-status-detail').className = 'val' + (ok ? ' ok' : ' warn');
   document.getElementById('flutter-status-detail').textContent = ok ? '✓ 通过当前后端入口正常提供服务' : s.embedded ? '⚠ 后端未启动，无法访问' : '⚠ 请先构建前端';
 }
-fetch('/api/status').then(function(r){return r.json()}).then(function(d) {
+panelFetch('/api/status').then(function(r){return r.json()}).then(function(d) {
   updateBackendStatus(d.backend);
   updateFlutterStatus(d.flutter);
 });
@@ -1027,7 +1098,7 @@ function refreshHealth() {
   var grid = document.getElementById('health-grid');
   grid.innerHTML = '<div class="health-empty">检查中…</div>';
   document.getElementById('health-summary').textContent = '检查中…';
-  fetch('/api/health')
+  panelFetch('/api/health')
     .then(function(r){return r.json()})
     .then(renderHealth)
     .catch(function(err) {
@@ -1137,7 +1208,7 @@ function proxyAdminFetch(path, opts) {
       }
     }
   }
-  return fetch(path, Object.assign({}, options, { headers: headers }))
+  return panelFetch(path, Object.assign({}, options, { headers: headers }))
     .then(function(r) {
       return r.text().then(function(text) {
         var payload = {};
@@ -1999,7 +2070,7 @@ function openMeetingHistory(sessionId, preserveFilters) {
   }
   var detailEl = document.getElementById('history-detail');
   detailEl.innerHTML = '<div class="history-empty">正在加载完整时间线…</div>';
-  fetch('/api/meeting-history/' + encodeURIComponent(sessionId))
+  panelFetch('/api/meeting-history/' + encodeURIComponent(sessionId))
     .then(function(r) {
       if (!r.ok) throw new Error('history_detail_failed');
       return r.json();
@@ -2007,7 +2078,7 @@ function openMeetingHistory(sessionId, preserveFilters) {
     .then(function(data) {
       currentMeetingHistoryRecord = data;
       renderMeetingHistoryDetail(data);
-      return fetch('/api/meeting-history');
+      return panelFetch('/api/meeting-history');
     })
     .then(function(r) { return r.json(); })
     .then(renderMeetingHistoryList)
@@ -2020,7 +2091,7 @@ function deleteActiveMeetingHistory() {
   if (!activeMeetingHistoryId) return;
   var sessionId = activeMeetingHistoryId;
   if (!window.confirm('删除后无法恢复，确认删除当前会议记录？')) return;
-  fetch('/api/meeting-history/' + encodeURIComponent(sessionId), { method: 'DELETE' })
+  panelFetch('/api/meeting-history/' + encodeURIComponent(sessionId), { method: 'DELETE' })
     .then(function(r) {
       return r.json().then(function(data) {
         if (!r.ok || !data.ok) throw new Error((data && data.msg) || (data && data.error) || 'history_delete_failed');
@@ -2040,7 +2111,7 @@ function deleteActiveMeetingHistory() {
 }
 
 function pruneMeetingHistory() {
-  fetch('/api/meeting-history/prune', { method: 'POST' })
+  panelFetch('/api/meeting-history/prune', { method: 'POST' })
     .then(function(r) {
       return r.json().then(function(data) {
         if (!r.ok || !data.ok) throw new Error((data && data.error) || 'history_prune_failed');
@@ -2063,7 +2134,7 @@ function refreshMeetingHistory() {
   listEl.innerHTML = '<div class="history-empty">正在读取会议历史…</div>';
   document.getElementById('history-summary').textContent = '加载中…';
   syncMeetingHistoryActions();
-  return fetch('/api/meeting-history')
+  return panelFetch('/api/meeting-history')
     .then(function(r) {
       if (!r.ok) throw new Error('history_list_failed');
       return r.json();

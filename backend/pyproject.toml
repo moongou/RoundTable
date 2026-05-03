@@ -1,6 +1,6 @@
 [project]
 name = "roundtable"
-version = "1.0.9"
+version = "1.0.10"
 description = "圆桌思辨讨论平台 - 为小学生提供AI引导的思辨训练场"
 requires-python = ">=3.11"
 dependencies = [

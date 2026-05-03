@@ -56,8 +56,12 @@ async def require_management_token(
     if (x_admin_token or "").strip() == expected_token:
         return
 
-    # 本地开发允许同源或回环请求免 token，避免阻断本机调试流程。
-    if settings.debug and (_is_loopback_request(request) or _is_same_origin_request(request)):
+    # 本机回环请求免 token，避免阻断 localhost 调试流程。
+    if _is_loopback_request(request):
+        return
+
+    # debug 模式下继续允许同源请求免 token。
+    if settings.debug and _is_same_origin_request(request):
         return
 
     raise HTTPException(

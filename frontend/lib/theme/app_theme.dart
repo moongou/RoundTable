@@ -5,6 +5,22 @@ import 'app_colors.dart';
 
 class AppTheme {
   static const _primaryColor = Color(0xFFFFB74D);
+  static const List<String> cjkFontFallback = <String>[
+    'Noto Sans SC',
+    'Noto Sans CJK SC',
+    'Source Han Sans SC',
+    'PingFang SC',
+    'Hiragino Sans GB',
+    'Microsoft YaHei',
+    'WenQuanYi Micro Hei',
+    'sans-serif',
+  ];
+
+  static TextTheme _textThemeWithCjkFallback(Brightness brightness) {
+    final base = ThemeData(brightness: brightness).textTheme;
+    return base.apply(fontFamilyFallback: cjkFontFallback);
+  }
+
   static final _darkColorScheme = ColorScheme.fromSeed(
           seedColor: _primaryColor, brightness: Brightness.dark)
       .copyWith(
@@ -16,7 +32,7 @@ class AppTheme {
     useMaterial3: true,
     colorSchemeSeed: _primaryColor,
     brightness: Brightness.light,
-    textTheme: GoogleFonts.notoSansScTextTheme(),
+    textTheme: _textThemeWithCjkFallback(Brightness.light),
     appBarTheme: const AppBarTheme(
       centerTitle: true,
       elevation: 0,
@@ -43,9 +59,7 @@ class AppTheme {
   static final darkTheme = ThemeData(
     useMaterial3: true,
     brightness: Brightness.dark,
-    textTheme: GoogleFonts.notoSansScTextTheme(
-      ThemeData(brightness: Brightness.dark).textTheme,
-    ),
+    textTheme: _textThemeWithCjkFallback(Brightness.dark),
     appBarTheme: const AppBarTheme(
       centerTitle: true,
       elevation: 0,

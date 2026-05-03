@@ -6076,6 +6076,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                                   fontSize: subtitleFontSize,
                                   fontWeight: FontWeight.bold,
                                   height: subtitleLineHeight,
+                                  fontFamilyFallback: AppTheme.cjkFontFallback,
                                   // 需求5：去掉黑色背景与大范围黑影，仅保留极细描边保持可读
                                   shadows: [
                                     Shadow(
@@ -6092,6 +6093,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                                   color: Colors.white,
                                   fontSize: subtitleFontSize,
                                   height: subtitleLineHeight,
+                                  fontFamilyFallback: AppTheme.cjkFontFallback,
                                   shadows: [
                                     Shadow(
                                         color: Colors.black

@@ -1,6 +1,6 @@
 {
-  "version": "1.0.9",
-  "versionCode": 9,
+  "version": "1.0.10",
+  "versionCode": 10,
   "minAPIVersion": 11,
   "targetAPIVersion": 11,
   "description": "中央版本号——更新项目版本时只需修改此文件和 backend/pyproject.toml、frontend/pubspec.yaml"

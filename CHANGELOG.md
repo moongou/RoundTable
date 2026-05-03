@@ -7,6 +7,25 @@
 
 ---
 
+## v1.0.10 - 2026-05-03
+
+### Bug 修复
+
+- 修复云端 `/ops/` 开发面板的接口路径前缀问题：面板请求统一兼容 `/ops` 反向代理，解决“启动后端按钮无响应”和部分日志/历史接口取数失败。
+- 修复开发面板统计自动鉴权链路：新增管理令牌回退访问，避免仅依赖固定管理员账号导致“统计加载失败”。
+- 修复本机 `localhost:8001` 下语音配置无法保存：管理接口鉴权放开 loopback 请求，ASR/TTS 本地 provider 可正常切换并即时生效。
+
+### 体验优化
+
+- 优化字幕字体稳定性：关闭 Google Fonts 运行时拉取，补充 CJK 字体回退链，降低字幕首帧偶发乱码/字形闪烁。
+- 字幕关键文本样式显式使用 CJK fallback，提升不同系统字体环境下的一致性。
+
+### 验证
+
+- 后端测试：`backend/.venv/bin/python -m pytest backend/tests -q`（195 passed）。
+- 前端测试：`flutter test --no-pub`（85 passed）。
+- 云端验收：`/ops/api/status`、`/ops/api/admin/stats`、`/ops/api/start/backend` 令牌访问返回 200。
+
 ## v1.0.9 - 2026-05-03
 
 ### 新增功能
