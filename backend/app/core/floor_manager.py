@@ -205,6 +205,7 @@ class FloorManager:
         self._human_turn_started_mono = 0.0
         self._last_human_input_requested_speaker = ""
         self._human_input_request_seq = 0
+        self._last_human_input_request_id = ""
         self._pending_human_input_reason = "normal"
         self._human_turn_idle_notice_sent = False
 
@@ -1999,6 +2000,7 @@ class FloorManager:
         self._pause_team_for_human_input()
         self._human_input_request_seq += 1
         request_id = f"hr-{self._human_input_request_seq}"
+        self._last_human_input_request_id = request_id
         return {
             "event_type": "human_input_requested",
             "data": {
@@ -2038,6 +2040,27 @@ class FloorManager:
         """注册真人输入请求回调。callback(data)"""
         self._on_human_input_requested = callback
         return self
+
+    def pending_human_input_request_snapshot(self) -> Optional[dict[str, str]]:
+        """返回当前待处理的人类输入请求，用于暂停恢复后的前端状态重同步。"""
+        if self.state not in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
+            return None
+        speaker = self._normalize_agent_name(
+            self.current_speaker or self._last_human_input_requested_speaker
+        )
+        if not speaker or speaker not in self.human_names:
+            return None
+        reason = self._resolve_human_input_request_reason("human_input_requested_waiting")
+        request_id = (
+            self._last_human_input_request_id
+            or f"hr-{max(self._human_input_request_seq, 1)}"
+        ).strip()
+        return {
+            "speaker": speaker,
+            "reason": reason,
+            "request_id": request_id,
+            "state": self.state.value,
+        }
 
     def set_display_name_map(self, agent_to_display: dict[str, str]) -> None:
         """设置 agent name → display name 映射，用于指定发言者解析。"""
@@ -2264,6 +2287,14 @@ class FloorManager:
                                 else "检测到流程停滞，系统正在自动恢复调度。"
                             )
                             await self._emit_message("系统", msg, "system")
+                            if fallback and fallback in self.human_names:
+                                human_request = await self._make_human_input_requested_event(
+                                    fallback,
+                                    reason="moderator_designated_human",
+                                    clear_designation=False,
+                                )
+                                if human_request is not None:
+                                    yield human_request
                             self._consecutive_selector_stalls = 0
                         else:
                             await self._emit_message(
@@ -2330,6 +2361,7 @@ class FloorManager:
                         )
 
                     self._last_human_input_requested_speaker = ""
+                    self._last_human_input_request_id = ""
                     self._pending_human_input_reason = "normal"
                     self._set_designated_speaker(None)
                     self._resume_team_after_human_input()
@@ -2452,6 +2484,7 @@ class FloorManager:
                 await self._set_state(FloorState.AI_SPEAKING, reason="speaker_selected_ai")
             if not is_human:
                 self._last_human_input_requested_speaker = ""
+                self._last_human_input_request_id = ""
             if speaker == "moderator":
                 self._moderator_stream_sentence_emitted = 0
 
@@ -2559,6 +2592,7 @@ class FloorManager:
             if source in self.human_names:
                 self._pending_submitted_human_inputs.pop(source, None)
                 self._last_human_input_requested_speaker = ""
+                self._last_human_input_request_id = ""
                 await self._set_state(FloorState.HUMAN_SPEAKING, reason="human_message_received")
 
             if self._enforce_expected_ai_speaker(source):
@@ -2788,6 +2822,7 @@ class FloorManager:
                 self._first_human_handoff_streamed = False
                 self._moderator_stream_sentence_emitted = 0
             if source in self.human_names:
+                self._last_human_input_request_id = ""
                 await self._set_state(FloorState.SELECTING_SPEAKER, reason="human_message_complete")
             return {
                 "event_type": "message",

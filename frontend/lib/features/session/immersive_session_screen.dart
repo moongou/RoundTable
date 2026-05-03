@@ -4413,6 +4413,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       }
       _wsClient.sendResume();
       _resumeCurrentSubtitleFromStartIfNeeded();
+      if (_pendingHumanTurn) {
+        _schedulePendingHumanTurnGuard(
+          delay: const Duration(milliseconds: 140),
+        );
+        _tryActivatePendingHumanTurn();
+      }
     } else {
       final item = _activeTtsItem;
       _pausedResumeTtsItem = (item != null && item.text.trim().isNotEmpty)
@@ -4428,7 +4434,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _isThinking = false;
       });
       _pauseDiscussionClock();
-      _commander.markHumanTurnCompleted();
       _cancelPendingHumanTurnGuard();
       _cancelTurnCountdown();
       _cancelMaxSpeechTimer();

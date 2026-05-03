@@ -828,6 +828,28 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         if floor_manager is not None:
                             floor_manager.set_paused(False)
                             await send_event("system", {"message": "讨论已恢复"})
+                            pending_request = floor_manager.pending_human_input_request_snapshot()
+                            if pending_request is not None:
+                                data = dict(pending_request)
+                                speaker = (data.get("speaker") or "").strip()
+                                display_speaker = speaker
+                                if speaker:
+                                    display_speaker = agent_display_map.get(speaker, speaker)
+                                    data["agent_speaker"] = speaker
+                                    data["speaker"] = display_speaker
+                                await send_event("human_input_requested", data)
+                                request_reason = (data.get("reason") or "normal").strip().lower()
+                                await send_phase_telemetry(
+                                    {
+                                        "source": "backend",
+                                        "phase": "human_turn_waiting",
+                                        "reason": f"resume_human_input_resync_{request_reason}",
+                                        "recovery": True,
+                                        "speaker": display_speaker,
+                                        "agent_speaker": speaker,
+                                        "session_id": session_id,
+                                    }
+                                )
 
             except WebSocketDisconnect:
                 ws_closed = True

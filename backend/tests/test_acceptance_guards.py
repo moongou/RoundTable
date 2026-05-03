@@ -343,6 +343,48 @@ async def test_floor_manager_executes_async_team_pause_and_resume_controls() -> 
     assert team.resumed is True
 
 
+def test_floor_manager_pending_human_input_request_snapshot_returns_waiting_request() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+
+    floor_manager.state = FloorState.HUMAN_TURN_WAITING
+    floor_manager.current_speaker = '豆苗'
+    floor_manager._last_human_input_requested_speaker = '豆苗'
+    floor_manager._pending_human_input_reason = 'interrupt'
+    floor_manager._human_input_request_seq = 7
+    floor_manager._last_human_input_request_id = 'hr-7'
+
+    snapshot = floor_manager.pending_human_input_request_snapshot()
+
+    assert snapshot == {
+        'speaker': '豆苗',
+        'reason': 'interrupt',
+        'request_id': 'hr-7',
+        'state': FloorState.HUMAN_TURN_WAITING.value,
+    }
+
+
+def test_floor_manager_pending_human_input_request_snapshot_returns_none_for_non_waiting_state() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+
+    floor_manager.state = FloorState.AI_SPEAKING
+    floor_manager.current_speaker = '豆苗'
+    floor_manager._last_human_input_requested_speaker = '豆苗'
+
+    snapshot = floor_manager.pending_human_input_request_snapshot()
+
+    assert snapshot is None
+
+
 def test_sanitize_all_references_rewrites_first_turn_and_self_reference() -> None:
     floor_manager = FloorManager(
         team=_TeamStub(),
@@ -2363,6 +2405,8 @@ async def test_floor_manager_restarts_team_stream_after_general_stall() -> None:
     events = []
     async for event in floor_manager.run('测试话题'):
         events.append(event)
+        if event['event_type'] == 'human_input_requested':
+            await floor_manager.submit_human_input('豆苗', '我先接一句。')
 
     assert any(
         source == '系统'
@@ -2370,10 +2414,49 @@ async def test_floor_manager_restarts_team_stream_after_general_stall() -> None:
         and ('自动恢复调度' in content or '系统已指定' in content)
         for source, content, msg_type in emitted_messages
     )
+    assert team.run_calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_stall_recovery_designated_human_emits_input_request() -> None:
+    emitted_messages: list[tuple[str, str, str]] = []
+
+    async def _on_message(source: str, content: str, msg_type: str) -> None:
+        emitted_messages.append((source, content, msg_type))
+
+    team = _StallingThenContinuingTeamStub(
+        [],
+        [TextMessage(source='moderator', content='收到，继续讨论。')],
+    )
+    floor_manager = FloorManager(
+        team=team,
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='skeptic')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map({'moderator': '老师', 'skeptic': '小疑', '豆苗': '豆苗'})
+    floor_manager.on_message(_on_message)
+    floor_manager._general_stall_timeout_sec = 0.01
+    # Pre-seed prior turns so smart fallback prioritizes human invitation over moderator opening.
+    floor_manager._speaker_message_count['moderator'] = 1
+    floor_manager._speaker_message_count['skeptic'] = 1
+
+    events = []
+    async for event in floor_manager.run('测试话题'):
+        events.append(event)
+        if event['event_type'] == 'human_input_requested':
+            await floor_manager.submit_human_input('豆苗', '我来接着说。')
+
     assert any(
-        event['event_type'] == 'message'
-        and event['data']['source'] == 'moderator'
-        and event['data']['content'] == '恢复后继续。'
+        source == '系统'
+        and msg_type == 'system'
+        and '系统已指定' in content
+        for source, content, msg_type in emitted_messages
+    )
+    assert any(
+        event['event_type'] == 'human_input_requested'
+        and event['data']['speaker'] == '豆苗'
+        and event['data']['reason'] == 'moderator_designated_human'
         for event in events
     )
     assert team.run_calls >= 2
