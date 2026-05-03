@@ -18,9 +18,16 @@ from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
 from app.core.floor_manager import FloorManager
+from app.store import user_store
+from autogen_core.models import UserMessage
 from app.core.llm_errors import describe_model_error
 from app.core.llm_factory import create_character_client, create_moderator_client
 from app.core.meeting_history import MeetingHistoryStore
+from app.core.user_review import (
+    build_user_review_prompt,
+    has_enough_user_review_material,
+    parse_user_review_response,
+)
 from app.core.rolling_summary_memory import HumanResponseGuidanceMemory, RollingSummaryMemory
 from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker, thinker_label
@@ -272,12 +279,24 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         config_msg = await websocket.receive_text()
         config = json.loads(config_msg)
 
+        _session_start_time: float | None = None
+        _session_user_id: int | None = None
+        try:
+            raw_uid = config.get("user_id")
+            if raw_uid is not None:
+                _session_user_id = int(raw_uid)
+                _session_start_time = asyncio.get_running_loop().time()
+                user_store.increment_session(_session_user_id)
+                user_store.record_event(_session_user_id, "session_start", f"session_id={session_id}")
+        except (ValueError, TypeError):
+            logger.debug("Invalid user_id in websocket config: %s", raw_uid)
+
         topic_id = (config.get("topic_id") or "").strip()
         free_topic = (config.get("free_topic") or "").strip()
         free_topic_detail = (config.get("free_topic_detail") or "").strip()
         character_ids = config.get("character_ids", ["explorer", "skeptic"])
         thinker_ids = config.get("thinker_ids", [])
-        human_names = config.get("human_names", ["豆苗"])
+        human_names = config.get("human_names", ["同学"])
         max_turns = max(1, int(config.get("max_turns") or settings.max_turns))
         # 需求16：旁听模式——用户只观看讨论，每次轮到用户时系统自动跳过
         observer_mode = bool(config.get("observer_mode", False))
@@ -358,6 +377,19 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 await send_event("error", {"message": f"思想家 '{tid}' 不存在"})
                 await websocket.close()
                 return
+
+        # 最多 8 个虚拟角色（不含主持人李老师）
+        non_moderator_chars = [c for c in character_ids if c != "moderator"]
+        virtual_count = len(non_moderator_chars) + len(thinker_ids)
+        if virtual_count > 8:
+            await send_event(
+                "error",
+                {
+                    "message": f"虚拟角色最多 8 人（当前选择了 {virtual_count} 人），请减少选择"
+                },
+            )
+            await websocket.close()
+            return
 
         # 确保至少有一个角色参与
         if not character_ids and not thinker_ids:
@@ -656,6 +688,10 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 session_id=session_id,
                 pending_human_request_ts=pending_human_request_ts,
                 pending_human_request_id=pending_human_request_id,
+                history_store=history_store,
+                moderator_client=moderator_client,
+                human_name=human_names[0] if human_names else "",
+                topic_title=topic.title,
             )
         )
 
@@ -722,6 +758,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         content = (msg.get("content", "") or "").strip()
                         if not content:
                             content = "（跳过）"
+                        if _session_user_id is not None and content != "（跳过）":
+                            user_store.add_speech_count(_session_user_id)
                         await floor_manager.submit_human_input(speaker, content)
                     elif msg_type == "designate_speaker":
                         # 用户通过 UI 指定下一位发言者
@@ -856,6 +894,15 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             pass
     finally:
         ws_closed = True
+        # Track session duration for logged-in users
+        if _session_user_id is not None and _session_start_time is not None:
+            try:
+                session_ms = int((asyncio.get_running_loop().time() - _session_start_time) * 1000)
+                if session_ms > 0:
+                    user_store.add_online_time(_session_user_id, session_ms)
+                    user_store.record_event(_session_user_id, "session_end", f"duration_ms={session_ms}")
+            except Exception:
+                logger.debug("Failed to track session duration", exc_info=True)
         if floor_manager is not None:
             # 连接关闭后停止 FloorManager 对外回调，避免 finally 阶段继续尝试 websocket.send。
             floor_manager._on_message = None
@@ -899,12 +946,48 @@ async def _run_discussion(
     session_id: str = "",
     pending_human_request_ts: dict[str, float] | None = None,
     pending_human_request_id: dict[str, str] | None = None,
+    *,
+    history_store: MeetingHistoryStore | None = None,
+    moderator_client=None,
+    human_name: str = "",
+    topic_title: str = "",
 ):
     """运行讨论并推送事件。"""
     async for event in floor_manager.run(topic):
         # 事件已经通过回调推送，这里只处理特殊事件
         if event["event_type"] == "ended":
-            await send_event("ended", event.get("data", {}))
+            data = dict(event.get("data", {}))
+
+            # --- Mandatory user review ---
+            if history_store is not None and moderator_client is not None and human_name:
+                try:
+                    messages = await history_store.get_review_messages()
+                    if has_enough_user_review_material(messages, human_name=human_name):
+                        prompt = build_user_review_prompt(
+                            topic_title, human_name, messages
+                        )
+                        response = await moderator_client.create(
+                            [UserMessage(content=prompt, source="user")]
+                        )
+                        raw_content = (
+                            response.content
+                            if isinstance(response.content, str)
+                            else str(response.content)
+                        )
+                        review = parse_user_review_response(raw_content)
+                        if review:
+                            data["user_review"] = review
+                            logger.info(
+                                "User review generated for session=%s human=%s (%d chars)",
+                                session_id, human_name, len(review),
+                            )
+                except Exception:
+                    logger.debug(
+                        "User review generation failed for session=%s",
+                        session_id, exc_info=True,
+                    )
+
+            await send_event("ended", data)
             return "completed"
         elif event["event_type"] in ("error", "api_error"):
             await send_event(event["event_type"], event.get("data", {}))

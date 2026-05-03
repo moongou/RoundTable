@@ -1,7 +1,7 @@
 name: roundtable
 description: 圆桌思辨 - 小学生AI引导思辨讨论平台
 publish_to: 'none'
-version: 1.0.7
+version: 1.0.9
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -15,6 +15,7 @@ dependencies:
   # 网络
   dio: ^5.7.0
   web_socket_channel: ^3.0.0
+  web: ^1.2.1
   # LiveKit (Phase 2 语音集成)
   livekit_client: ^2.3.0
   # UI

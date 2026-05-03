@@ -371,6 +371,13 @@ def test_sanitize_all_references_rewrites_first_turn_and_self_reference() -> Non
     )
     assert '小探说得对' not in self_reference
 
+    explicit_self_reference = floor_manager._sanitize_all_references(
+        'explorer',
+        '我非常认可自己刚才讲过的观点。',
+    )
+    assert '自己刚才讲过的观点' not in explicit_self_reference
+    assert '我非常认可自己' not in explicit_self_reference
+
 
 def test_sanitize_all_references_removes_unspoken_direct_quote() -> None:
     floor_manager = FloorManager(
@@ -1075,8 +1082,9 @@ async def test_floor_manager_drops_meta_reasoning_stream_segments() -> None:
     assert stream_event is None
     assert message_event is not None
     assert message_event['event_type'] == 'message'
-    assert message_event['data']['content'] == '同学们，我们先一起梳理一下这个问题。'
-    assert message_event['data']['tts_text'] == '同学们，我们先一起梳理一下这个问题。'
+    assert '基本情况和核心争议' in message_event['data']['content']
+    assert '用户现在需要我扮演老师' not in message_event['data']['content']
+    assert message_event['data']['tts_text'] == message_event['data']['content']
 
 
 @pytest.mark.asyncio
@@ -1574,6 +1582,40 @@ async def test_floor_manager_strips_system_trigger_prefix_from_stream_segments()
     assert result['data']['tts_segments'] == ['（指着窗台的蚂蚁）我悄悄观察过蚂蚁搬家搬家。']
 
 
+@pytest.mark.asyncio
+async def test_floor_manager_caps_non_human_ai_turn_to_roughly_forty_seconds() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+    long_content = (
+        '第一句我想先讲一个很长很长的生活例子，说明这个问题为什么值得讨论。'
+        '第二句我再补充一个观察，让大家看到另一种可能性。'
+        '第三句我把自己的理由说清楚。'
+        '第四句我还想继续展开更多细节。'
+        '第五句这些细节其实已经超过一轮发言该有的长度。'
+    )
+
+    result = await floor_manager._process_event(
+        TextMessage(source='explorer', content=long_content)
+    )
+
+    assert result is not None
+    assert result['event_type'] == 'message'
+    content = result['data']['content']
+    assert len(content) <= floor_manager._NON_HUMAN_AI_MAX_CHARS + 1
+    assert '第四句' not in content
+
+
 def test_turn_scheduler_prefers_ai_after_moderator_opening() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
@@ -1606,13 +1648,14 @@ def test_turn_scheduler_prefers_ai_after_moderator_opening() -> None:
 
 
 @pytest.mark.asyncio
-async def test_floor_manager_does_not_force_first_human_invitation_without_explicit_authorization() -> None:
+async def test_floor_manager_forces_first_human_invitation_after_two_warmup_turns() -> None:
+    emitted_messages: list[tuple[str, str, str]] = []
+
+    async def _on_message(source: str, content: str, msg_type: str) -> None:
+        emitted_messages.append((source, content, msg_type))
+
     floor_manager = FloorManager(
-        team=_StreamingTeamStub(
-            [
-                TextMessage(source='moderator', content='这个角度很有意思，我们继续往下听。'),
-            ]
-        ),
+        team=_TeamStub(),
         ai_agents=[
             SimpleNamespace(name='moderator'),
             SimpleNamespace(name='explorer'),
@@ -1629,13 +1672,18 @@ async def test_floor_manager_does_not_force_first_human_invitation_without_expli
             '豆苗': '豆苗',
         }
     )
+    floor_manager.on_message(_on_message)
     floor_manager._speaker_message_count.update({'moderator': 1, 'explorer': 1, 'skeptic': 1})
+    floor_manager._recent_display_speakers = ['老师', '小探', '小疑']
 
-    events = [event async for event in floor_manager.run('测试话题')]
+    result = await floor_manager._process_event(
+        TextMessage(source='moderator', content='这个角度很有意思，我们继续往下听。')
+    )
 
-    assert events[0]['event_type'] == 'message'
-    assert '麦克风交给豆苗' not in events[0]['data']['content']
-    assert '豆苗同学，你怎么看' not in events[0]['data']['content']
+    assert result is not None
+    assert result['event_type'] == 'human_input_requested'
+    assert result['data']['reason'] == 'moderator_designated_human'
+    assert any('麦克风交给豆苗' in content for _source, content, _type in emitted_messages)
 
 
 @pytest.mark.asyncio
@@ -2011,7 +2059,7 @@ def test_turn_scheduler_prefers_moderator_when_entering_closing_window() -> None
     assert selector(thread) == 'moderator'
 
 
-def test_turn_scheduler_prefers_moderator_for_second_closing_inquiry() -> None:
+def test_turn_scheduler_delays_second_closing_before_human_budget() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
 
@@ -2047,7 +2095,7 @@ def test_turn_scheduler_prefers_moderator_for_second_closing_inquiry() -> None:
         SimpleNamespace(source='explorer', content='那就像会移动的桥。'),
     ]
 
-    assert selector(thread) == 'moderator'
+    assert selector(thread) == 'skeptic'
 
 
 def test_turn_scheduler_honors_moderator_non_human_invite_before_human_budget() -> None:
@@ -2317,7 +2365,9 @@ async def test_floor_manager_restarts_team_stream_after_general_stall() -> None:
         events.append(event)
 
     assert any(
-        source == '系统' and msg_type == 'system' and '自动恢复调度' in content
+        source == '系统'
+        and msg_type == 'system'
+        and ('自动恢复调度' in content or '系统已指定' in content)
         for source, content, msg_type in emitted_messages
     )
     assert any(
@@ -2600,7 +2650,7 @@ async def test_floor_manager_routes_regular_participant_handoff_back_to_moderato
 
 
 @pytest.mark.asyncio
-async def test_floor_manager_allows_recent_human_follow_up_from_participant() -> None:
+async def test_floor_manager_blocks_immediate_participant_handoff_back_to_recent_human() -> None:
     floor_manager = FloorManager(
         team=_TeamStub(),
         ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
@@ -2616,8 +2666,7 @@ async def test_floor_manager_allows_recent_human_follow_up_from_participant() ->
     )
 
     assert request_event is not None
-    assert request_event['event_type'] == 'human_input_requested'
-    assert request_event['data']['reason'] == 'participant_designated_human'
+    assert request_event['event_type'] == 'message'
 
 
 @pytest.mark.asyncio
@@ -2839,8 +2888,8 @@ def test_turn_scheduler_runs_five_simulated_discussions_without_unsolicited_huma
         assert selector(thread) == '豆苗'
         thread.append(SimpleNamespace(source='豆苗', content='我觉得要看会不会影响别人，也要给摊主机会。'))
         next_after_human = selector(thread)
-        assert next_after_human not in {'moderator', '豆苗'}
-        thread.append(SimpleNamespace(source=next_after_human, content='我同意要同时看秩序和生活需要。'))
+        assert next_after_human == 'moderator'
+        thread.append(SimpleNamespace(source=next_after_human, content='豆苗这个平衡点说得清楚，我们接着听听同学回应。'))
 
         thread.append(SimpleNamespace(source='moderator', content='豆苗同学，听了补充以后，你想不想再修正一下？'))
         assert selector(thread) == '豆苗'
@@ -2882,7 +2931,7 @@ def test_turn_scheduler_waits_for_two_non_human_turns_before_first_human_invite(
     assert selector(thread) == 'pavlov'
 
 
-def test_turn_scheduler_routes_post_human_turn_to_unspoken_non_human_before_moderator() -> None:
+def test_turn_scheduler_routes_first_post_human_turn_to_moderator_feedback() -> None:
     def _agent(name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, description=name)
 
@@ -2909,7 +2958,7 @@ def test_turn_scheduler_routes_post_human_turn_to_unspoken_non_human_before_mode
         SimpleNamespace(source='豆苗', content='我觉得先让更多同学开口，会更公平。'),
     ]
 
-    assert selector(thread) == 'socrates'
+    assert selector(thread) == 'moderator'
 
 
 def test_turn_scheduler_stops_proactively_inviting_human_after_soft_cap() -> None:
@@ -2954,7 +3003,7 @@ def test_turn_scheduler_stops_proactively_inviting_human_after_soft_cap() -> Non
         SimpleNamespace(source='explorer', content='那接下来可以比较不同年龄段。'),
     ]
 
-    assert selector(thread) == 'moderator'
+    assert selector(thread) == 'pavlov'
 
 
 def test_turn_scheduler_stops_reinviting_human_after_compact_target() -> None:
@@ -3009,7 +3058,7 @@ def test_turn_scheduler_stops_reinviting_human_after_compact_target() -> None:
         SimpleNamespace(source='explorer', content='老师和家长可以轮流看。'),
     ]
 
-    assert selector(thread) == 'moderator'
+    assert selector(thread) == 'skeptic'
 
 
 def test_turn_scheduler_relaxes_human_soft_cap_after_two_hand_raises() -> None:
@@ -3379,14 +3428,13 @@ async def test_floor_manager_marks_interrupt_origin_on_human_input_requested() -
     await floor_manager.request_interrupt('豆苗')
     floor_manager.current_speaker = '豆苗'
 
-    result = await floor_manager._process_event(
+    duplicate_result = await floor_manager._process_event(
         UserInputRequestedEvent(request_id='req-interrupt', source='豆苗')
     )
 
-    assert result is not None
-    assert result['event_type'] == 'human_input_requested'
-    assert result['data']['speaker'] == '豆苗'
-    assert result['data']['reason'] == 'interrupt'
+    assert duplicate_result is None
+    assert floor_manager.state == FloorState.HUMAN_TURN_WAITING
+    assert floor_manager.current_speaker == '豆苗'
 
 
 @pytest.mark.asyncio
@@ -3491,17 +3539,17 @@ async def test_floor_manager_keeps_explicit_non_human_invite_before_first_human(
     assert designated_updates == ['explorer']
 
 
-def test_floor_manager_first_human_invite_no_longer_uses_time_limit_fallback() -> None:
+def test_floor_manager_first_human_invite_uses_two_minute_limit_fallback() -> None:
     floor_manager = FloorManager(
         team=_TeamStub(),
         ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
         human_agents=[SimpleNamespace(name='豆苗')],
         safety_filter=_SafetyFilterStub(),
     )
-    floor_manager._discussion_started_mono = time.monotonic() - 170.0
+    floor_manager._discussion_started_mono = time.monotonic() - 121.0
     floor_manager.state = FloorState.AI_SPEAKING
 
-    assert floor_manager._should_force_first_human_invite() is False
+    assert floor_manager._should_force_first_human_invite() is True
 
 
 @pytest.mark.asyncio

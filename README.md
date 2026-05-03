@@ -91,6 +91,23 @@ cd /path/to/RoundTable
 node devpanel.js
 ```
 
+- 面板地址：`http://localhost:8888`
+- 应用地址：`http://localhost:8001`
+- `localhost:8888` 已合并用户统计能力（与 `/admin` 同源数据：总用户、活跃用户、累计场次、用户详情与删除）。
+
+ECS 上的同构能力：
+
+- `deploy/deploy_aliyun.sh` 会创建 `roundtable-devpanel` systemd 服务（监听服务器本机 `127.0.0.1:8888`）。
+- 可通过 SSH 隧道访问云上开发面板：`ssh -L 8888:127.0.0.1:8888 root@<ECS_IP>`
+
+浏览器侧烟测清单：
+
+- [docs/web-smoke-checklist.md](docs/web-smoke-checklist.md)
+
+运维面板使用方法：
+
+- [docs/ops-panel-usage.md](docs/ops-panel-usage.md)
+
 ## 当前实现重点
 
 - 历史详情页可查看完整剧本，并联动真人录音回放。

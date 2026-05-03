@@ -56,6 +56,15 @@ class OpenAITTSProvider(TTSProvider):
                 json=payload,
                 headers=headers,
             )
+            if response.is_error:
+                logger.error(
+                    "TTS API error %s: %s | payload model=%s voice=%s text_len=%d",
+                    response.status_code,
+                    response.text[:500],
+                    self.model,
+                    voice or self.default_voice,
+                    len(text),
+                )
             response.raise_for_status()
             return response.content
 

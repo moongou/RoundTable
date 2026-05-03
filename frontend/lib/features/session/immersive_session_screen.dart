@@ -46,6 +46,11 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   static const String _edgeThinkerVoice = 'zh-CN-YunzeNeural';
   static const String _openVoiceTeacherProfile = 'ov:teacher_li';
   static const String _openVoiceThinkerProfile = 'ov:thinker_elder';
+  static const String _siliconflowModel = 'FunAudioLLM/CosyVoice2-0.5B';
+  static const String _siliconflowTeacherVoice = '$_siliconflowModel:anna';
+  static const String _siliconflowThinkerVoice = '$_siliconflowModel:benjamin';
+  static const String _siliconflowEmpathVoice = '$_siliconflowModel:diana';
+  static const String _siliconflowDefaultVoice = '$_siliconflowModel:alex';
   static const Set<String> _ttsSentenceEndings = <String>{
     '。',
     '！',
@@ -256,8 +261,13 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool pendingHumanTurn,
     required bool handApprovedToSpeak,
     required bool hasRaisedHand,
+    String completedSpeaker = '',
   }) {
-    return hasRaisedHand || isMyTurn || pendingHumanTurn || handApprovedToSpeak;
+    return completedSpeaker.trim().isNotEmpty ||
+        hasRaisedHand ||
+        isMyTurn ||
+        pendingHumanTurn ||
+        handApprovedToSpeak;
   }
 
   static bool shouldResetCompletedHumanTurnOnIncomingSpeech({
@@ -495,6 +505,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   final List<String> thinkerIds;
   final String humanName;
   final bool observerMode;
+  final int? userId;
 
   const ImmersiveSessionScreen({
     super.key,
@@ -503,6 +514,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     this.thinkerIds = const [],
     required this.humanName,
     this.observerMode = false,
+    this.userId,
   });
 
   @override
@@ -661,23 +673,37 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   }) {
     final normalized = _canonicalSpeakerName(speaker);
     final useOpenVoice = ttsProvider == 'openvoice';
+    final useSiliconflow = ttsProvider == 'siliconflow_tts';
 
     if (isTeacherSpeaker(normalized)) {
-      return useOpenVoice ? _openVoiceTeacherProfile : _edgeTeacherVoice;
+      if (useOpenVoice) return _openVoiceTeacherProfile;
+      if (useSiliconflow) return _siliconflowTeacherVoice;
+      return _edgeTeacherVoice;
     }
 
-    final studentVoice = useOpenVoice
-        ? _openVoiceStudentProfiles[normalized]
-        : _edgeStudentVoices[normalized];
-    if (studentVoice != null) {
-      return studentVoice;
+    if (isStudentSpeaker(normalized)) {
+      if (useOpenVoice) {
+        return _openVoiceStudentProfiles[normalized] ??
+            _openVoiceTeacherProfile;
+      }
+      if (useSiliconflow) {
+        if (normalized == '小爱' || normalized == 'empath') {
+          return _siliconflowEmpathVoice;
+        }
+        return _siliconflowDefaultVoice;
+      }
+      return _edgeStudentVoices[normalized] ?? _edgeTeacherVoice;
     }
 
     if (isThinker || isThinkerSpeaker(normalized)) {
-      return useOpenVoice ? _openVoiceThinkerProfile : _edgeThinkerVoice;
+      if (useOpenVoice) return _openVoiceThinkerProfile;
+      if (useSiliconflow) return _siliconflowThinkerVoice;
+      return _edgeThinkerVoice;
     }
 
-    return useOpenVoice ? _openVoiceTeacherProfile : _edgeTeacherVoice;
+    if (useOpenVoice) return _openVoiceTeacherProfile;
+    if (useSiliconflow) return _siliconflowDefaultVoice;
+    return _edgeTeacherVoice;
   }
 
   static double fixedSpeechRateForSpeaker(
@@ -2772,6 +2798,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         humanNames: humanNames,
         maxTurns: maxTurns,
         observerMode: widget.observerMode,
+        userId: widget.userId,
       );
 
       setState(() {
@@ -3111,7 +3138,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               resetSpeechTurnLatch: true,
             );
           }
-          _completedHumanTurnSpeaker = '';
+          if (isHuman && speaker == humanName) {
+            _completedHumanTurnSpeaker = '';
+          }
           if (isHuman &&
               speaker == humanName &&
               (_isCompletingHumanTurn || _isFinalizingSpeech)) {
@@ -4437,6 +4466,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       pendingHumanTurn: _pendingHumanTurn,
       handApprovedToSpeak: _handApprovedToSpeak,
       hasRaisedHand: _hasRaisedHand,
+      completedSpeaker: _completedHumanTurnSpeaker,
     )) {
       if (_isMyTurn || _pendingHumanTurn || _handApprovedToSpeak) {
         _showStatusToast('老师已经把这一轮发言留给你了，不需要重复举手');
@@ -5387,6 +5417,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           pendingHumanTurn: _pendingHumanTurn,
           handApprovedToSpeak: _handApprovedToSpeak,
           hasRaisedHand: _hasRaisedHand,
+          completedSpeaker: _completedHumanTurnSpeaker,
         );
     final showHumanTurnPromptCue =
         ImmersiveSessionScreen.shouldShowHumanTurnPromptCue(

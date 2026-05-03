@@ -348,7 +348,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       }
       setState(() => _expandedVoiceService = p.isCloud ? p.id : null);
       ref.invalidate(currentConfigProvider);
-      _snack('已切换到 ${p.name}');
+      final isLocalOffline = !p.isCloud && p.id != 'disabled' && !p.available;
+      if (isLocalOffline) {
+        _snack('已切换到 ${p.name}。本地服务当前离线，配置已保存，待服务启动后自动生效。');
+      } else {
+        _snack('已切换到 ${p.name}');
+      }
     } catch (e) {
       _snackErr('切换失败: $e');
     }
@@ -2397,7 +2402,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       'openvoice': 'tts_voice',
       'cosyvoice': 'cosyvoice_voice',
       'openai_tts': 'openai_tts_voice',
-      'siliconflow_tts': 'siliconflow_tts_voice',
     };
 
     if (url.isNotEmpty && urlMap.containsKey(providerId)) {
@@ -3591,9 +3595,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       {required bool isAsr}) {
     final active = p.id == activeId;
     final hasRequiredApiKey = !p.needsApiKey || p.hasApiKey;
+    final isLocalProvider = !p.isCloud && p.id != 'disabled';
     final isOperational =
         p.id != 'disabled' && p.available && hasRequiredApiKey;
-    final selectable = p.id == 'disabled' || isOperational || active;
+    final selectable =
+        p.id == 'disabled' || isOperational || active || isLocalProvider;
     final availColor =
         isOperational ? const Color(0xFF4CAF50) : AppColors.warmWhite;
     final availTip = p.id == 'disabled'
@@ -3602,7 +3608,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             ? '缺少 API Key，当前不可用'
             : isOperational
                 ? '功能正常'
-                : '服务不可用或未启动';
+                : isLocalProvider
+                    ? '服务当前离线，允许先选中并保存，服务启动后即可生效'
+                    : '服务不可用或未启动';
     String subtitleText() {
       if (p.id == 'disabled') {
         return '纯文本模式，不再调用语音能力。';

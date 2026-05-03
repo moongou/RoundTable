@@ -12,6 +12,7 @@ import '../../painters/round_table_painter.dart';
 import '../../services/speech_service.dart';
 import '../../services/saved_topics_store.dart';
 import '../../state/settings_provider.dart';
+import '../auth/auth_provider.dart';
 import '../../utils/open_external_url_stub.dart'
     if (dart.library.html) '../../utils/open_external_url_web.dart';
 import '../session/immersive_session_screen.dart';
@@ -42,6 +43,14 @@ const _kTextPrimary = Color(0xFFEEEEFF);
 const _kTextSecondary = Color(0xFF8888AA);
 const _kSparkCategoryId = 'spark';
 const _kSparkCategoryName = '火花';
+
+enum _AccountMenuAction {
+  profile,
+  loginDetail,
+  medals,
+  billing,
+  logout,
+}
 
 class FreeTopicDraftValue {
   final String title;
@@ -221,6 +230,25 @@ String resolvePreferredHomeAsrProviderId({
   return preferred?.id ?? normalizedPreferred;
 }
 
+String formatHomeAccountPhoneLabel(String phone) {
+  final safePhone = phone.trim().isEmpty ? '未登录' : phone.trim();
+  return '登录 $safePhone';
+}
+
+String formatHomeAccountNicknameLabel(String nickname) {
+  final safeNickname = nickname.trim().isEmpty ? '同学' : nickname.trim();
+  return '($safeNickname)';
+}
+
+String formatHomeSeatBadgeTitle({
+  required String humanName,
+  required bool observerMode,
+}) {
+  if (observerMode) return '旁听席';
+  final safeName = humanName.trim().isEmpty ? '同学' : humanName.trim();
+  return '${safeName}的席位';
+}
+
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 class ImmersiveHomeScreen extends ConsumerStatefulWidget {
   const ImmersiveHomeScreen({super.key});
@@ -243,13 +271,35 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
   String? _selectedCategory;
   final Set<String> _selectedCharacterIds = {};
   final Set<String> _selectedThinkerIds = {};
-  final TextEditingController _nameController =
-      TextEditingController(text: '豆苗');
+
+  int? get _currentUserId {
+    final authState = ref.read(authStateProvider);
+    final user = authState.user;
+    if (user == null) return null;
+    return user['id'] as int?;
+  }
+
   final TextEditingController _freeTopicController = TextEditingController();
   FreeTopicDraftValue _freeTopicDraft = const FreeTopicDraftValue();
   bool _isFreeTopicMode = false;
   // 需求16：旁听模式开关
   bool _isObserverMode = false;
+
+  String _resolveNickname(Map<String, dynamic>? user) {
+    final raw = (user?['display_name'] ?? '').toString().trim();
+    if (raw.isNotEmpty) return raw;
+    return '同学';
+  }
+
+  String _resolvePhone(Map<String, dynamic>? user) {
+    return (user?['username'] ?? '').toString().trim();
+  }
+
+  String _discussionHumanName() {
+    final user = ref.read(authStateProvider).user;
+    final name = _resolveNickname(user).trim();
+    return name.isEmpty ? '同学' : name;
+  }
 
   late AnimationController _pulseCtrl;
   late AnimationController _entranceCtrl;
@@ -282,7 +332,6 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     _pulseCtrl.dispose();
     _entranceCtrl.dispose();
     _orbCtrl.dispose();
-    _nameController.dispose();
     _freeTopicController.dispose();
     super.dispose();
   }
@@ -336,7 +385,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 
   void _openDevPanel(BuildContext context) {
     final host = Uri.base.host;
-    openExternalUrl('http://$host:8888');
+    openExternalUrl('https://$host/admin.html');
   }
 
   void _showHomeSnack(String message, {bool error = false}) {
@@ -347,6 +396,266 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
         backgroundColor: error ? Colors.redAccent : null,
       ),
     );
+  }
+
+  String _formatProfileDate(dynamic value) {
+    final text = (value ?? '').toString().trim();
+    if (text.isEmpty) return '暂无记录';
+    final parsed = DateTime.tryParse(text);
+    if (parsed == null) return text;
+    final local = parsed.toLocal();
+    final two = (int n) => n.toString().padLeft(2, '0');
+    return '${local.year}-${two(local.month)}-${two(local.day)} '
+        '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+  }
+
+  String _formatOnlineMs(dynamic value) {
+    final ms = int.tryParse((value ?? '0').toString()) ?? 0;
+    if (ms <= 0) return '0 分钟';
+    final minutes = ms ~/ 60000;
+    if (minutes < 60) return '$minutes 分钟';
+    final hours = minutes ~/ 60;
+    final remainMinutes = minutes % 60;
+    return '${hours}小时${remainMinutes}分钟';
+  }
+
+  Future<void> _handleAccountMenuAction(_AccountMenuAction action) async {
+    switch (action) {
+      case _AccountMenuAction.profile:
+        await _showProfileManagerDialog();
+        return;
+      case _AccountMenuAction.loginDetail:
+        await _showLoginDetailDialog();
+        return;
+      case _AccountMenuAction.medals:
+        await _showMedalsDialog();
+        return;
+      case _AccountMenuAction.billing:
+        await _showBillingDialog();
+        return;
+      case _AccountMenuAction.logout:
+        await _logoutFromAccountMenu();
+        return;
+    }
+  }
+
+  Future<void> _showProfileManagerDialog() async {
+    final user = ref.read(authStateProvider).user;
+    if (user == null) return;
+
+    final phone = _resolvePhone(user);
+    final nicknameCtrl = TextEditingController(text: _resolveNickname(user));
+    String? localError;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: _kSurface,
+              title:
+                  const Text('个人信息管理', style: TextStyle(color: _kTextPrimary)),
+              content: SizedBox(
+                width: 480,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('登录手机号：$phone',
+                        style: const TextStyle(
+                            color: _kTextSecondary, fontSize: 13)),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: nicknameCtrl,
+                      maxLength: 32,
+                      decoration: const InputDecoration(
+                        labelText: '昵称（讨论中的称呼）',
+                        counterText: '',
+                        prefixIcon: Icon(Icons.badge_outlined),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      '保存后立即生效，新开启的讨论会自动使用该昵称。',
+                      style: TextStyle(color: _kTextSecondary, fontSize: 12),
+                    ),
+                    if (localError != null) ...[
+                      const SizedBox(height: 10),
+                      Text(localError!,
+                          style: const TextStyle(
+                              color: Colors.redAccent, fontSize: 12)),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('取消',
+                      style: TextStyle(color: _kTextSecondary)),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    final nextNickname = nicknameCtrl.text.trim();
+                    if (nextNickname.length < 2) {
+                      setDialogState(() {
+                        localError = '昵称至少 2 个字符';
+                      });
+                      return;
+                    }
+                    final ok = await ref
+                        .read(authStateProvider.notifier)
+                        .updateNickname(nextNickname);
+                    if (!mounted) return;
+                    if (ok) {
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop();
+                      }
+                      _showHomeSnack('昵称已更新：$nextNickname');
+                    } else {
+                      final err = ref.read(authStateProvider).error ?? '昵称保存失败';
+                      setDialogState(() {
+                        localError = err;
+                      });
+                    }
+                  },
+                  child: const Text('保存昵称'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    nicknameCtrl.dispose();
+  }
+
+  Future<void> _showLoginDetailDialog() async {
+    final payload =
+        await ref.read(authStateProvider.notifier).loadProfileOverview();
+    final user = ref.read(authStateProvider).user;
+    if (!mounted || user == null) return;
+
+    final loginDetailRaw = payload?['login_detail'];
+    final loginDetail = loginDetailRaw is Map
+        ? Map<String, dynamic>.from(loginDetailRaw)
+        : <String, dynamic>{
+            'created_at': user['created_at'],
+            'last_login': user['last_login'],
+            'session_count': user['session_count'] ?? 0,
+            'total_speech_count': user['total_speech_count'] ?? 0,
+            'total_online_ms': user['total_online_ms'] ?? 0,
+          };
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: _kSurface,
+        title: const Text('登录详情', style: TextStyle(color: _kTextPrimary)),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('手机号：${_resolvePhone(user)}',
+                  style: const TextStyle(color: _kTextPrimary)),
+              const SizedBox(height: 8),
+              Text('昵称：${_resolveNickname(user)}',
+                  style: const TextStyle(color: _kTextPrimary)),
+              const Divider(color: _kBorder, height: 22),
+              Text('注册时间：${_formatProfileDate(loginDetail['created_at'])}',
+                  style: const TextStyle(color: _kTextSecondary)),
+              const SizedBox(height: 6),
+              Text('最近登录：${_formatProfileDate(loginDetail['last_login'])}',
+                  style: const TextStyle(color: _kTextSecondary)),
+              const SizedBox(height: 6),
+              Text('累计讨论场次：${loginDetail['session_count'] ?? 0}',
+                  style: const TextStyle(color: _kTextSecondary)),
+              const SizedBox(height: 6),
+              Text('累计发言次数：${loginDetail['total_speech_count'] ?? 0}',
+                  style: const TextStyle(color: _kTextSecondary)),
+              const SizedBox(height: 6),
+              Text('累计在线时长：${_formatOnlineMs(loginDetail['total_online_ms'])}',
+                  style: const TextStyle(color: _kTextSecondary)),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭', style: TextStyle(color: _kNeonGold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showMedalsDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: _kSurface,
+        title: const Text('获得勋章', style: TextStyle(color: _kTextPrimary)),
+        content: const Text(
+          '勋章体系将在后续版本开放。\n\n当前先保留入口，后续会支持按发言质量、持续参与和思辨深度发放勋章。',
+          style: TextStyle(color: _kTextSecondary, height: 1.6),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('知道了', style: TextStyle(color: _kNeonGold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showBillingDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: _kSurface,
+        title: const Text('账单费用', style: TextStyle(color: _kTextPrimary)),
+        content: const Text(
+          '账单系统暂未启用。\n\n当前版本保留该菜单，后续可在这里查看套餐、用量和费用明细。',
+          style: TextStyle(color: _kTextSecondary, height: 1.6),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('知道了', style: TextStyle(color: _kNeonGold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _logoutFromAccountMenu() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: _kSurface,
+        title: const Text('退出登录', style: TextStyle(color: _kTextPrimary)),
+        content: const Text('确定退出当前账号吗？退出后需要重新登录手机号与密码。',
+            style: TextStyle(color: _kTextSecondary)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消', style: TextStyle(color: _kTextSecondary)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('退出登录'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    await ref.read(authStateProvider.notifier).logout();
+    _showHomeSnack('已退出登录');
   }
 
   Future<void> _openLoadConfigDialog() async {
@@ -538,6 +847,38 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     });
   }
 
+  void _toggleCharacter(String id) {
+    if (_selectedCharacterIds.contains(id)) {
+      setState(() => _selectedCharacterIds.remove(id));
+      return;
+    }
+    final virtualCount =
+        _selectedCharacterIds.length + _selectedThinkerIds.length;
+    if (virtualCount >= 8) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('虚拟角色最多 8 人（含思想家），请勿超过')),
+      );
+      return;
+    }
+    setState(() => _selectedCharacterIds.add(id));
+  }
+
+  void _toggleThinker(String id) {
+    if (_selectedThinkerIds.contains(id)) {
+      setState(() => _selectedThinkerIds.remove(id));
+      return;
+    }
+    final virtualCount =
+        _selectedCharacterIds.length + _selectedThinkerIds.length;
+    if (virtualCount >= 8) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('虚拟角色最多 8 人（含思想家），请勿超过')),
+      );
+      return;
+    }
+    setState(() => _selectedThinkerIds.add(id));
+  }
+
   Future<void> _startDiscussion() async {
     // 确定话题：预设 or 自由话题
     final Topic effectiveTopic;
@@ -566,9 +907,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     final asrProvider =
         local?.asrProvider ?? ImmersiveSessionScreen.defaultAsrProvider;
     final serverUrl = local?.serverUrl ?? 'http://localhost:8001';
-    final humanName = _nameController.text.trim().isEmpty
-        ? '豆苗'
-        : _nameController.text.trim();
+    final humanName = _discussionHumanName();
     if (!_isObserverMode && asrProvider == 'browser') {
       final asr = createAsrService('browser', serverUrl: serverUrl);
       try {
@@ -595,6 +934,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
           thinkerIds: _selectedThinkerIds.toList(),
           humanName: humanName,
           observerMode: _isObserverMode,
+          userId: _currentUserId,
         ),
         transitionsBuilder: (_, a1, a2, child) => FadeTransition(
           opacity: CurvedAnimation(parent: a1, curve: Curves.easeIn),
@@ -701,19 +1041,21 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 
   Widget _buildLayout(Size size) {
     final isWide = size.width > 900;
-    final humanName = _nameController.text.trim().isEmpty
-        ? '豆苗'
-        : _nameController.text.trim();
+    final authState = ref.watch(authStateProvider);
+    final user = authState.user;
+    final humanName = _discussionHumanName();
     return Column(
       children: [
         _TopBar(
-          nameController: _nameController,
           onSettings: () => Navigator.pushNamed(context, '/settings'),
           onDevPanel: () => _openDevPanel(context),
           onLoadConfig: _openLoadConfigDialog,
           onReplay: () => Navigator.pushNamed(context, '/replay'),
           observerMode: _isObserverMode,
           onObserverModeChanged: (v) => setState(() => _isObserverMode = v),
+          accountPhone: _resolvePhone(user),
+          accountNickname: _resolveNickname(user),
+          onAccountMenuSelected: _handleAccountMenuAction,
         ),
         Expanded(
           child: isWide
@@ -740,20 +1082,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   onFreeTopicModeToggled: _toggleFreeTopicMode,
                   onFreeTopicChanged: _handleFreeTopicTextChanged,
                   onFreeTopicDraftChanged: _handleFreeTopicDraftChanged,
-                  onCharacterToggled: (id) => setState(() {
-                    if (_selectedCharacterIds.contains(id)) {
-                      _selectedCharacterIds.remove(id);
-                    } else {
-                      _selectedCharacterIds.add(id);
-                    }
-                  }),
-                  onThinkerToggled: (id) => setState(() {
-                    if (_selectedThinkerIds.contains(id)) {
-                      _selectedThinkerIds.remove(id);
-                    } else {
-                      _selectedThinkerIds.add(id);
-                    }
-                  }),
+                  onCharacterToggled: _toggleCharacter,
+                  onThinkerToggled: _toggleThinker,
                   onStart: () {
                     _startDiscussion();
                   },
@@ -781,20 +1111,8 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
                   onFreeTopicModeToggled: _toggleFreeTopicMode,
                   onFreeTopicChanged: _handleFreeTopicTextChanged,
                   onFreeTopicDraftChanged: _handleFreeTopicDraftChanged,
-                  onCharacterToggled: (id) => setState(() {
-                    if (_selectedCharacterIds.contains(id)) {
-                      _selectedCharacterIds.remove(id);
-                    } else {
-                      _selectedCharacterIds.add(id);
-                    }
-                  }),
-                  onThinkerToggled: (id) => setState(() {
-                    if (_selectedThinkerIds.contains(id)) {
-                      _selectedThinkerIds.remove(id);
-                    } else {
-                      _selectedThinkerIds.add(id);
-                    }
-                  }),
+                  onCharacterToggled: _toggleCharacter,
+                  onThinkerToggled: _toggleThinker,
                   onStart: () {
                     _startDiscussion();
                   },
@@ -807,22 +1125,26 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 
 // ─── Top Bar ──────────────────────────────────────────────────────────────────
 class _TopBar extends StatelessWidget {
-  final TextEditingController nameController;
   final VoidCallback onSettings;
   final VoidCallback onDevPanel;
   final VoidCallback onLoadConfig;
   final VoidCallback onReplay;
   final bool observerMode;
   final ValueChanged<bool> onObserverModeChanged;
+  final String accountPhone;
+  final String accountNickname;
+  final ValueChanged<_AccountMenuAction> onAccountMenuSelected;
 
   const _TopBar({
-    required this.nameController,
     required this.onSettings,
     required this.onDevPanel,
     required this.onLoadConfig,
     required this.onReplay,
     required this.observerMode,
     required this.onObserverModeChanged,
+    required this.accountPhone,
+    required this.accountNickname,
+    required this.onAccountMenuSelected,
   });
 
   @override
@@ -897,8 +1219,6 @@ class _TopBar extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 10),
-          _GlassField(controller: nameController, hint: '你的名号'),
           const SizedBox(width: 8),
           _IconBtn(
               icon: Icons.monitor_heart_outlined,
@@ -914,6 +1234,12 @@ class _TopBar extends StatelessWidget {
               onTap: onLoadConfig),
           _IconBtn(
               icon: Icons.settings_outlined, tooltip: '设置', onTap: onSettings),
+          const SizedBox(width: 8),
+          _AccountMenuButton(
+            phone: accountPhone,
+            nickname: accountNickname,
+            onSelected: onAccountMenuSelected,
+          ),
         ],
       ),
     );
@@ -995,45 +1321,6 @@ class _LogoPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-class _GlassField extends StatelessWidget {
-  final TextEditingController controller;
-  final String hint;
-
-  const _GlassField({required this.controller, required this.hint});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 112,
-      height: 34,
-      child: TextField(
-        controller: controller,
-        style: const TextStyle(
-            color: _kTextPrimary, fontSize: 13, fontWeight: FontWeight.w500),
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle: const TextStyle(color: _kTextSecondary, fontSize: 12),
-          prefixIcon:
-              const Icon(Icons.person_outline, color: _kNeonCyan, size: 15),
-          border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: _kBorder)),
-          enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: _kBorder)),
-          focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: _kNeonCyan, width: 1.5)),
-          filled: true,
-          fillColor: _kCard,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 6, vertical: 0),
-        ),
-      ),
-    );
-  }
-}
-
 class _IconBtn extends StatelessWidget {
   final IconData icon;
   final String tooltip;
@@ -1053,6 +1340,112 @@ class _IconBtn extends StatelessWidget {
           width: 36,
           height: 36,
           child: Icon(icon, color: _kTextSecondary, size: 20),
+        ),
+      ),
+    );
+  }
+}
+
+class _AccountMenuButton extends StatelessWidget {
+  final String phone;
+  final String nickname;
+  final ValueChanged<_AccountMenuAction> onSelected;
+
+  const _AccountMenuButton({
+    required this.phone,
+    required this.nickname,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<_AccountMenuAction>(
+      tooltip: '登录账号管理',
+      color: _kSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: _kBorder),
+      ),
+      onSelected: onSelected,
+      itemBuilder: (context) => const [
+        PopupMenuItem<_AccountMenuAction>(
+          value: _AccountMenuAction.profile,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.manage_accounts_outlined, color: _kNeonCyan),
+            title: Text('个人信息管理', style: TextStyle(color: _kTextPrimary)),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuItem<_AccountMenuAction>(
+          value: _AccountMenuAction.loginDetail,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.login_outlined, color: _kTextSecondary),
+            title: Text('登录详情', style: TextStyle(color: _kTextPrimary)),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuItem<_AccountMenuAction>(
+          value: _AccountMenuAction.medals,
+          child: ListTile(
+            dense: true,
+            leading:
+                Icon(Icons.workspace_premium_outlined, color: _kTextSecondary),
+            title: Text('获得勋章', style: TextStyle(color: _kTextPrimary)),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuItem<_AccountMenuAction>(
+          value: _AccountMenuAction.billing,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.receipt_long_outlined, color: _kTextSecondary),
+            title: Text('账单费用', style: TextStyle(color: _kTextPrimary)),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuDivider(height: 8),
+        PopupMenuItem<_AccountMenuAction>(
+          value: _AccountMenuAction.logout,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.logout, color: Colors.redAccent),
+            title: Text('退出登录', style: TextStyle(color: Colors.redAccent)),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+      ],
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: _kCard,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: _kBorder),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.account_circle_outlined,
+                color: _kNeonGold, size: 16),
+            const SizedBox(width: 6),
+            Text(
+              formatHomeAccountPhoneLabel(phone),
+              style: const TextStyle(
+                color: _kTextPrimary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              formatHomeAccountNicknameLabel(nickname),
+              style: const TextStyle(color: _kTextSecondary, fontSize: 11),
+            ),
+            const SizedBox(width: 4),
+            const Icon(Icons.expand_more, color: _kTextSecondary, size: 16),
+          ],
         ),
       ),
     );
@@ -3556,8 +3949,10 @@ class _HumanSeatBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final title = observerMode ? '旁听席' : '你的席位';
-    final subtitle = observerMode ? '只观看，不进入发言轮次' : humanName;
+    final title = formatHomeSeatBadgeTitle(
+      humanName: humanName,
+      observerMode: observerMode,
+    );
     final icon = observerMode
         ? Icons.visibility_outlined
         : Icons.person_pin_circle_outlined;
@@ -3582,17 +3977,18 @@ class _HumanSeatBadge extends StatelessWidget {
                 title,
                 style: TextStyle(
                   color: color,
-                  fontSize: 12,
+                  fontSize: 14,
                   fontWeight: FontWeight.w700,
                 ),
               ),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  color: _kTextSecondary,
-                  fontSize: 11,
+              if (observerMode)
+                const Text(
+                  '只观看，不进入发言轮次',
+                  style: TextStyle(
+                    color: _kTextSecondary,
+                    fontSize: 11,
+                  ),
                 ),
-              ),
             ],
           ),
         ],

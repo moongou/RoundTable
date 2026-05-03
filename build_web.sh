@@ -105,3 +105,4 @@ fi
 echo "=== 构建完成！==="
 echo "静态文件已部署到: $BACKEND_STATIC_DIR"
 echo "启动后端即可访问: http://localhost:8001"
+echo "管理后台: http://localhost:8001/admin/"

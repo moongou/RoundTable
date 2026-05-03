@@ -9,14 +9,13 @@ const http = require('http');
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const url = require('url');
 
 const PORT = 8888;
 const ROOT = __dirname;
 const BACKEND_DIR = path.join(ROOT, 'backend');
 const FRONTEND_DIR = path.join(ROOT, 'frontend');
 const MEETING_HISTORY_DIR = path.join(BACKEND_DIR, 'runtime', 'meeting_history');
-const MEETING_HISTORY_RETENTION_LIMIT = 10;
+const MEETING_HISTORY_RETENTION_LIMIT = 9999;
 const MEETING_RUNNING_STALE_TIMEOUT_SECONDS = 10 * 60;
 
 // ── 进程管理 ──────────────────────────────────────────────
@@ -48,7 +47,7 @@ function startBackend() {
   if (isPortListening(8001)) {
     log('backend', '⚠ 端口 8001 已被占用（外部进程）');
     broadcastStatus();
-    return { ok: false, msg: '端口 8001 已被占用，请先停止再重试' };
+    return { ok: false, msg: '检测到后端已由外部进程运行，可直接“打开应用”；若需面板接管，请先点击“停止后端”后再启动' };
   }
   const rootVenvPy = path.join(ROOT, '.venv', 'bin', 'python');
   const backendVenvPy = path.join(BACKEND_DIR, 'venv', 'bin', 'python');
@@ -288,6 +287,146 @@ function httpGet(reqUrl) {
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
   });
+}
+
+function readRequestBody(req, maxBytes) {
+  const limit = typeof maxBytes === 'number' && maxBytes > 0 ? maxBytes : 1024 * 1024;
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+      if (Buffer.byteLength(body, 'utf8') > limit) {
+        reject(new Error('request_body_too_large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+function requestBackend(method, reqPath, options) {
+  const opts = options || {};
+  const headers = Object.assign({}, opts.headers || {});
+  const body = typeof opts.body === 'string' ? opts.body : '';
+  if (body && !headers['Content-Length']) {
+    headers['Content-Length'] = Buffer.byteLength(body, 'utf8');
+  }
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: '127.0.0.1',
+        port: 8001,
+        method,
+        path: reqPath,
+        timeout: 6000,
+        headers,
+      },
+      res => {
+        let raw = '';
+        res.on('data', chunk => {
+          raw += chunk.toString();
+        });
+        res.on('end', () => {
+          resolve({
+            statusCode: res.statusCode || 500,
+            body: raw,
+            headers: res.headers || {},
+          });
+        });
+      }
+    );
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy(new Error('backend_request_timeout'));
+    });
+
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function sendJson(res, statusCode, payload) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(payload));
+}
+
+async function proxyBackendJson(res, requestOptions) {
+  const opts = requestOptions || {};
+  const method = opts.method || 'GET';
+  const reqPath = opts.path || '/';
+  const upstream = await requestBackend(method, reqPath, {
+    headers: opts.headers || {},
+    body: opts.body || '',
+  });
+  res.writeHead(upstream.statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(upstream.body || '{}');
+}
+
+let backendAdminSessionToken = '';
+let backendAdminSessionExpireAt = 0;
+
+function parseBackendJson(raw) {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    return {};
+  }
+}
+
+async function ensureBackendAdminSession(forceRefresh) {
+  const now = Date.now();
+  if (!forceRefresh && backendAdminSessionToken && now < backendAdminSessionExpireAt) {
+    return backendAdminSessionToken;
+  }
+
+  const loginPayload = {
+    username: 'admin',
+    password: '',
+  };
+  const upstream = await requestBackend('POST', '/api/v1/auth/login', {
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(loginPayload),
+  });
+
+  const parsed = parseBackendJson(upstream.body);
+  const token = String(parsed.token || '').trim();
+  if (upstream.statusCode >= 400 || !token) {
+    const reason = parsed.detail || parsed.error || ('HTTP ' + upstream.statusCode);
+    throw new Error('admin_auto_auth_failed: ' + reason);
+  }
+
+  backendAdminSessionToken = token;
+  // 会话 token 由后端维持 7 天，面板侧保守缓存 6 小时并按 401 自动刷新。
+  backendAdminSessionExpireAt = now + 6 * 60 * 60 * 1000;
+  return backendAdminSessionToken;
+}
+
+async function proxyBackendAdminJson(res, requestOptions) {
+  const opts = requestOptions || {};
+  const method = opts.method || 'GET';
+  const reqPath = opts.path || '/';
+  const baseHeaders = Object.assign({}, opts.headers || {});
+
+  let token = await ensureBackendAdminSession(false);
+  let upstream = await requestBackend(method, reqPath, {
+    headers: Object.assign({}, baseHeaders, { Authorization: 'Bearer ' + token }),
+    body: opts.body || '',
+  });
+
+  if (upstream.statusCode === 401) {
+    token = await ensureBackendAdminSession(true);
+    upstream = await requestBackend(method, reqPath, {
+      headers: Object.assign({}, baseHeaders, { Authorization: 'Bearer ' + token }),
+      body: opts.body || '',
+    });
+  }
+
+  res.writeHead(upstream.statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(upstream.body || '{}');
 }
 
 function safeHistoryId(sessionId) {
@@ -629,7 +768,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .history-summary-card{border:1px solid rgba(27,51,95,0.9);border-radius:10px;background:#11192f;padding:12px}
   .history-summary-label{font-size:11px;color:#7f90b5;margin-bottom:4px}
   .history-summary-value{font-size:13px;color:#e5ebff;line-height:1.5;word-break:break-word}
-  .history-sections{display:flex;flex-direction:column;gap:14px}
+  .history-sections-cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+  .history-card{border:1px solid rgba(27,51,95,0.88);border-radius:12px;background:linear-gradient(180deg,rgba(11,17,32,0.96),rgba(15,27,50,0.9));overflow:hidden}
+  .history-card-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:14px 16px;cursor:pointer;user-select:none;border-bottom:1px solid rgba(27,51,95,0.6);transition:background .2s}
+  .history-card-head:hover{background:rgba(255,255,255,0.03)}
+  .history-card-title{font-size:14px;color:#f6e3a5;font-weight:700;letter-spacing:1px}
+  .history-card-meta{font-size:11px;color:#7f90b5;flex:1}
+  .history-card-toggle{font-size:12px;color:#7f90b5;transition:transform .2s}
+  .history-card-toggle.collapsed{transform:rotate(-90deg)}
+  .history-card-body{padding:14px}
+  .history-card-body.collapsed{display:none}
   .history-section{border:1px solid rgba(27,51,95,0.88);border-radius:12px;background:linear-gradient(180deg,rgba(11,17,32,0.96),rgba(15,27,50,0.9));padding:14px}
   .history-section-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px}
   .history-section-title{font-size:14px;color:#f6e3a5;font-weight:700;letter-spacing:1px}
@@ -671,10 +819,33 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .history-mini-pill{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;border:1px solid rgba(52,88,143,0.68);background:rgba(16,32,61,0.86);color:#cfe0ff;font-size:10px;line-height:1.2}
   .history-mini-pill.active{border-color:#d4a017;background:rgba(80,56,19,0.92);color:#fff1c8}
   .history-empty-note{min-height:160px;flex-direction:column;gap:12px}
+  .ops-auth{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+  .ops-auth input{height:34px;padding:0 10px;border-radius:8px;border:1px solid #1c3762;background:#0f1b35;color:#dce8ff;font-size:12px;min-width:150px}
+  .ops-auth input::placeholder{color:#6c7ea5}
+  .ops-auth-note{font-size:11px;color:#8fa3cc;line-height:1.6}
+  .ops-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px}
+  .ops-stat-card{background:#0d0d1a;border:1px solid #0f3460;border-radius:10px;padding:12px}
+  .ops-stat-value{font-size:24px;color:#f6e3a5;font-weight:700;line-height:1.2}
+  .ops-stat-label{font-size:11px;color:#7f90b5;margin-top:6px}
+  .ops-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+  .ops-toolbar input{height:34px;padding:0 10px;border-radius:8px;border:1px solid #1c3762;background:#0f1b35;color:#dce8ff;font-size:12px;min-width:220px}
+  .ops-toolbar-meta{margin-left:auto;font-size:11px;color:#8fa3cc}
+  .ops-table-wrap{background:#0d0d1a;border:1px solid #0f3460;border-radius:10px;overflow:auto}
+  .ops-table{width:100%;border-collapse:collapse;min-width:760px}
+  .ops-table th{font-size:11px;color:#7f90b5;font-weight:600;padding:10px 12px;text-align:left;border-bottom:1px solid rgba(15,52,96,0.7);background:#11192f}
+  .ops-table td{font-size:12px;color:#dce8ff;padding:9px 12px;border-bottom:1px solid rgba(15,52,96,0.38)}
+  .ops-table tr:hover td{background:rgba(255,255,255,0.02)}
+  .ops-table-actions{display:flex;gap:6px;flex-wrap:wrap}
+  .ops-btn-mini{border:1px solid #315488;background:#10203d;color:#dce8ff;padding:4px 8px;border-radius:6px;font-size:11px}
+  .ops-btn-mini:hover{border-color:#80cbc4}
+  .ops-btn-mini.danger{border-color:#874040;color:#ffb1b1;background:#2b1616}
+  .ops-btn-mini.danger:hover{border-color:#ef5350;color:#ffd8d8}
+  .ops-table-empty{padding:20px;text-align:center;color:#6c7ea5;font-size:12px}
   @media (max-width: 1080px){
     .runtime-split{grid-template-columns:1fr}
     .runtime-col + .runtime-col{border-left:none;border-top:1px solid rgba(15,52,96,0.75);padding-left:0;padding-top:18px}
     .history-split{grid-template-columns:1fr}
+    .ops-grid{grid-template-columns:1fr}
   }
   .footer{margin-top:24px;color:#444;font-size:12px}
 </style>
@@ -692,11 +863,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="quick-actions">
       <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动后端</button>
       <button class="btn-stop" id="btn-stop-backend" onclick="ctrl('backend','stop')" disabled>⏹ 停止后端</button>
-      <a class="btn-open" href="http://localhost:8001" target="_blank" rel="noopener">🏠 打开应用</a>
-      <a class="btn-open" href="http://localhost:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
-      <a class="btn-open" href="http://localhost:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
-      <a class="btn-open" href="http://localhost:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
-      <a class="btn-open" href="http://localhost:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+      <a class="btn-open" id="quick-link-app" href="http://127.0.0.1:8001/" target="_blank" rel="noopener">🏠 打开应用</a>
+      <a class="btn-open" id="quick-link-admin" href="http://127.0.0.1:8001/admin/" target="_blank" rel="noopener">🛠 管理后台</a>
+      <a class="btn-open" id="quick-link-asr" href="http://127.0.0.1:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
+      <a class="btn-open" id="quick-link-docs" href="http://127.0.0.1:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
+      <a class="btn-open" id="quick-link-topics" href="http://127.0.0.1:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
+      <a class="btn-open" id="quick-link-thinkers" href="http://127.0.0.1:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
       <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 检测并打开报告</button>
     </div>
   </div>
@@ -718,14 +890,46 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </section>
     </div>
   </div>
+  <div class="card" id="card-ops">
+    <div class="card-title">
+      📊 用户使用统计（已合并 admin）
+      <span class="status-label" id="ops-status">自动连接中…</span>
+      <button class="btn-refresh" onclick="refreshAdminStats()" style="margin-left:auto">🔄 刷新</button>
+      <button class="btn-open" onclick="openAdminPage()" style="cursor:pointer">↗ 打开 /admin</button>
+    </div>
+    <div class="ops-auth-note" id="ops-auth-note">本面板已切换为管理员自动鉴权模式，无需手动输入用户名密码。</div>
+    <div class="ops-grid">
+      <div class="ops-stat-card"><div class="ops-stat-value" id="ops-stat-users">-</div><div class="ops-stat-label">总用户数</div></div>
+      <div class="ops-stat-card"><div class="ops-stat-value" id="ops-stat-active">-</div><div class="ops-stat-label">7日活跃</div></div>
+      <div class="ops-stat-card"><div class="ops-stat-value" id="ops-stat-sessions">-</div><div class="ops-stat-label">累计场次</div></div>
+    </div>
+    <div class="ops-toolbar">
+      <input id="ops-search" placeholder="搜索用户名或显示名" oninput="renderAdminUsers()">
+      <button class="btn-refresh" onclick="exportAdminUsersCsv()">📤 导出 CSV</button>
+      <span class="ops-toolbar-meta" id="ops-user-count">未加载用户数据</span>
+    </div>
+    <div class="ops-table-wrap">
+      <table class="ops-table">
+        <thead>
+          <tr>
+            <th>ID</th><th>用户名</th><th>显示名</th><th>注册时间</th><th>最近登录</th><th>场次</th><th>发言</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="ops-user-table">
+          <tr><td class="ops-table-empty" colspan="8">正在加载统计数据…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
   <div class="card" id="card-history">
     <div class="card-title">
       🗂 历史发言记录板
       <span class="status-label" id="history-summary">加载中…</span>
-      <span class="history-retention-note" id="history-retention-note">自动保留最近 10 场</span>
-      <button class="btn-refresh" onclick="pruneMeetingHistory()">✂️ 保留最近10场</button>
-      <button class="btn-danger-subtle" id="btn-delete-history" onclick="deleteActiveMeetingHistory()" disabled>🗑 删除当前</button>
-      <button class="btn-refresh" onclick="refreshMeetingHistory()" style="margin-left:auto">🔄 刷新</button>
+      <span style="flex:1"></span>
+      <button class="history-export-btn" onclick="downloadMeetingScriptExport(&quot;markdown&quot;)" id="btn-export-md-header" disabled>📄 导出 Markdown</button>
+      <button class="history-export-btn alt" onclick="downloadMeetingScriptExport(&quot;json&quot;)" id="btn-export-json-header" disabled>📦 导出 JSON</button>
+      <button class="btn-refresh" onclick="refreshMeetingHistory()">🔄 刷新</button>
+      <button class="btn-danger-subtle" id="btn-delete-history" onclick="deleteActiveMeetingHistory()" disabled>🗑 删除</button>
     </div>
     <div class="history-split">
       <aside class="history-list" id="history-list">
@@ -740,7 +944,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="card-title">🎨 前端 Flutter Web</div>
     <div class="monitor-info" id="flutter-monitor">
       <div><span class="label">部署方式:</span> <span class="val">内嵌到后端 :8001</span></div>
-      <div><span class="label">访问地址:</span> <a href="http://localhost:8001" target="_blank" rel="noopener" style="color:#d4a017">http://localhost:8001</a></div>
+      <div><span class="label">访问地址:</span> <a id="flutter-app-link" href="http://127.0.0.1:8001/" target="_blank" rel="noopener" style="color:#d4a017">http://127.0.0.1:8001/</a></div>
       <div><span class="label">静态文件:</span> <span class="val" id="flutter-static">检测中…</span></div>
       <div><span class="label">运行状态:</span> <span class="val" id="flutter-status-detail">检测中…</span></div>
       <div style="margin-top:10px;color:#666;font-size:11px">
@@ -813,7 +1017,7 @@ function updateFlutterStatus(s) {
   document.getElementById('flutter-static').className = 'val' + (s.embedded ? ' ok' : ' warn');
   document.getElementById('flutter-static').textContent = s.embedded ? '✓ 已部署 (backend/static/)' : '✗ 未找到静态文件';
   document.getElementById('flutter-status-detail').className = 'val' + (ok ? ' ok' : ' warn');
-  document.getElementById('flutter-status-detail').textContent = ok ? '✓ 通过后端 :8001 正常提供服务' : s.embedded ? '⚠ 后端未启动，无法访问' : '⚠ 请先构建前端';
+  document.getElementById('flutter-status-detail').textContent = ok ? '✓ 通过当前后端入口正常提供服务' : s.embedded ? '⚠ 后端未启动，无法访问' : '⚠ 请先构建前端';
 }
 fetch('/api/status').then(function(r){return r.json()}).then(function(d) {
   updateBackendStatus(d.backend);
@@ -863,10 +1067,268 @@ function escAttr(s) {
   return String(s || '')
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 }
+var adminUsers = [];
+var adminStats = null;
+
+function backendOrigin() {
+  var protocol = window.location.protocol || 'http:';
+  var hostname = window.location.hostname || '127.0.0.1';
+  var host = window.location.host || '';
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+    return protocol + '//' + hostname + ':8001';
+  }
+  if (host) {
+    return protocol + '//' + host;
+  }
+  return protocol + '//' + hostname;
+}
+
+function backendUrl(pathname) {
+  var suffix = String(pathname || '/');
+  if (!suffix.startsWith('/')) suffix = '/' + suffix;
+  return backendOrigin() + suffix;
+}
+
+function applyQuickLinks() {
+  var mappings = [
+    ['quick-link-app', '/'],
+    ['quick-link-admin', '/admin/'],
+    ['quick-link-asr', '/browser-asr-test.html'],
+    ['quick-link-docs', '/docs'],
+    ['quick-link-topics', '/api/v1/topics/'],
+    ['quick-link-thinkers', '/api/v1/thinkers/'],
+  ];
+  mappings.forEach(function(item) {
+    var el = document.getElementById(item[0]);
+    if (!el) return;
+    el.href = backendUrl(item[1]);
+  });
+
+  var flutterLink = document.getElementById('flutter-app-link');
+  if (flutterLink) {
+    flutterLink.href = backendUrl('/');
+    flutterLink.textContent = backendUrl('/');
+  }
+}
+
+function openAdminPage() {
+  window.open(backendUrl('/admin/'), '_blank', 'noopener');
+}
+
+function setOpsStatus(text, color) {
+  var el = document.getElementById('ops-status');
+  if (!el) return;
+  el.textContent = text;
+  if (color) el.style.color = color;
+}
+
+function proxyAdminFetch(path, opts) {
+  var options = opts || {};
+  var headers = {};
+  var key;
+  if (options.headers) {
+    for (key in options.headers) {
+      if (Object.prototype.hasOwnProperty.call(options.headers, key)) {
+        headers[key] = options.headers[key];
+      }
+    }
+  }
+  return fetch(path, Object.assign({}, options, { headers: headers }))
+    .then(function(r) {
+      return r.text().then(function(text) {
+        var payload = {};
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch (_) {
+            payload = { detail: text };
+          }
+        }
+        if (!r.ok) {
+          var msg = payload.detail || payload.error || ('HTTP ' + r.status);
+          var err = new Error(msg);
+          err.status = r.status;
+          throw err;
+        }
+        return payload;
+      });
+    });
+}
+
+function formatAdminDate(value) {
+  if (!value) return '从未';
+  var date = new Date(value);
+  if (isNaN(date.getTime())) return String(value);
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatAdminDuration(ms) {
+  var num = Number(ms || 0);
+  if (!isFinite(num) || num <= 0) return '0 秒';
+  if (num < 60000) return Math.round(num / 1000) + ' 秒';
+  if (num < 3600000) return Math.round(num / 60000) + ' 分钟';
+  return (num / 3600000).toFixed(1) + ' 小时';
+}
+
+function updateAdminStatCards(stats) {
+  var payload = stats || {};
+  document.getElementById('ops-stat-users').textContent = payload.total_users || 0;
+  document.getElementById('ops-stat-active').textContent = payload.active_users_7d || 0;
+  document.getElementById('ops-stat-sessions').textContent = payload.total_sessions || 0;
+}
+
+function refreshAdminStats() {
+  setOpsStatus('加载中…', '#80cbc4');
+  document.getElementById('ops-auth-note').textContent = '正在自动连接管理员统计通道…';
+  Promise.all([
+    proxyAdminFetch('/api/admin/stats'),
+    proxyAdminFetch('/api/admin/users?limit=500'),
+  ])
+    .then(function(results) {
+      adminStats = results[0] || {};
+      adminUsers = (results[1] && results[1].users) || [];
+      updateAdminStatCards(adminStats);
+      renderAdminUsers();
+      setOpsStatus('已连接', '#4caf50');
+      document.getElementById('ops-auth-note').textContent = '统计已更新：' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    })
+    .catch(function(err) {
+      setOpsStatus('加载失败', '#ef5350');
+      document.getElementById('ops-auth-note').textContent = '统计加载失败（管理员自动鉴权失败）：' + ((err && err.message) || 'unknown');
+      showToast('统计加载失败：' + ((err && err.message) || 'unknown'));
+    });
+}
+
+function renderAdminUsers() {
+  var tbody = document.getElementById('ops-user-table');
+  var searchValue = String(document.getElementById('ops-search').value || '').toLowerCase();
+  var filtered = searchValue
+    ? adminUsers.filter(function(user) {
+        return String(user.username || '').toLowerCase().indexOf(searchValue) >= 0 ||
+          String(user.display_name || '').toLowerCase().indexOf(searchValue) >= 0;
+      })
+    : adminUsers.slice();
+
+  document.getElementById('ops-user-count').textContent = adminUsers.length
+    ? ('共 ' + filtered.length + ' / ' + adminUsers.length + ' 名用户')
+    : '暂无用户数据';
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td class="ops-table-empty" colspan="8">没有匹配的用户。</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(function(user) {
+    return '' +
+      '<tr>' +
+        '<td>' + escHtml(String(user.id || '-')) + '</td>' +
+        '<td>' + escHtml(user.username || '-') + '</td>' +
+        '<td>' + escHtml(user.display_name || '-') + '</td>' +
+        '<td>' + escHtml(formatAdminDate(user.created_at)) + '</td>' +
+        '<td>' + escHtml(formatAdminDate(user.last_login)) + '</td>' +
+        '<td>' + escHtml(String(user.session_count || 0)) + '</td>' +
+        '<td>' + escHtml(String(user.total_speech_count || 0)) + '</td>' +
+        '<td><div class="ops-table-actions">' +
+          '<button class="ops-btn-mini" onclick="showAdminUserDetail(' + Number(user.id || 0) + ')">详情</button>' +
+          '<button class="ops-btn-mini danger" onclick="deleteAdminUser(' + Number(user.id || 0) + ')">删除</button>' +
+        '</div></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function showAdminUserDetail(userId) {
+  proxyAdminFetch('/api/admin/users/' + encodeURIComponent(String(userId)))
+    .then(function(payload) {
+      var user = payload.user || {};
+      var events = payload.events || [];
+      var recentEvents = events.slice(0, 8).map(function(item) {
+        return '- [' + formatAdminDate(item.created_at) + '] ' + (item.event_type || 'event') + (item.event_data ? ' ｜ ' + item.event_data : '');
+      });
+      var lines = [
+        '用户详情',
+        'ID: ' + (user.id || '-'),
+        '用户名: ' + (user.username || '-'),
+        '显示名: ' + (user.display_name || '-'),
+        '注册时间: ' + formatAdminDate(user.created_at),
+        '最近登录: ' + formatAdminDate(user.last_login),
+        '讨论场次: ' + (user.session_count || 0),
+        '发言次数: ' + (user.total_speech_count || 0),
+        '在线时长: ' + formatAdminDuration(user.total_online_ms || 0),
+        '',
+        '最近事件:',
+      ];
+      if (recentEvents.length) {
+        lines = lines.concat(recentEvents);
+      } else {
+        lines.push('- 暂无事件');
+      }
+      window.alert(lines.join('\\n'));
+    })
+    .catch(function(err) {
+      showToast('用户详情加载失败：' + ((err && err.message) || 'unknown'));
+    });
+}
+
+function deleteAdminUser(userId) {
+  var safeName = 'ID ' + String(userId || '-');
+  for (var idx = 0; idx < adminUsers.length; idx++) {
+    if (Number(adminUsers[idx].id || 0) === Number(userId || 0)) {
+      safeName = String(adminUsers[idx].username || safeName);
+      break;
+    }
+  }
+  if (!window.confirm('确认删除用户 "' + safeName + '"？此操作不可撤销。')) return;
+  proxyAdminFetch('/api/admin/users/' + encodeURIComponent(String(userId)), { method: 'DELETE' })
+    .then(function() {
+      showToast('已删除用户：' + safeName);
+      refreshAdminStats();
+    })
+    .catch(function(err) {
+      showToast('删除失败：' + ((err && err.message) || 'unknown'));
+    });
+}
+
+function exportAdminUsersCsv() {
+  if (!adminUsers.length) {
+    showToast('当前没有可导出的用户数据');
+    return;
+  }
+  var header = 'ID,用户名,显示名,注册时间,最近登录,场次,发言次数,在线时长(ms)\\n';
+  var rows = adminUsers.map(function(user) {
+    return [
+      user.id,
+      user.username,
+      user.display_name,
+      user.created_at,
+      user.last_login,
+      user.session_count,
+      user.total_speech_count,
+      user.total_online_ms,
+    ].map(function(value) {
+      return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+    }).join(',');
+  }).join('\\n');
+  var blob = new Blob(['﻿' + header + rows], { type: 'text/csv;charset=utf-8' });
+  var anchor = document.createElement('a');
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = 'roundtable_users.csv';
+  anchor.click();
+  URL.revokeObjectURL(anchor.href);
+}
+
+function initAdminOps() {
+  setOpsStatus('自动连接中…', '#80cbc4');
+  updateAdminStatCards({});
+  refreshAdminStats();
+}
+
 refreshHealth();
+initAdminOps();
+applyQuickLinks();
 
 var activeMeetingHistoryId = '';
 var currentMeetingHistoryRecord = null;
@@ -1185,24 +1647,32 @@ function clearMeetingHistoryFilters() {
 function syncMeetingHistoryActions() {
   var deleteBtn = document.getElementById('btn-delete-history');
   if (deleteBtn) deleteBtn.disabled = !activeMeetingHistoryId;
-  var note = document.getElementById('history-retention-note');
-  if (note) note.textContent = '自动保留最近 ' + MEETING_HISTORY_RETENTION_LIMIT + ' 场';
+  var exportMdBtn = document.getElementById('btn-export-md-header');
+  if (exportMdBtn) exportMdBtn.disabled = !activeMeetingHistoryId;
+  var exportJsonBtn = document.getElementById('btn-export-json-header');
+  if (exportJsonBtn) exportJsonBtn.disabled = !activeMeetingHistoryId;
+}
+
+function toggleHistoryCard(cardName) {
+  var body = document.getElementById('history-card-body-' + cardName);
+  var toggle = document.getElementById('history-card-toggle-' + cardName);
+  if (!body || !toggle) return;
+  var collapsed = body.classList.toggle('collapsed');
+  toggle.classList.toggle('collapsed', collapsed);
 }
 
 function buildMeetingScriptExportUrl(sessionId, format) {
   var exportFormat = format === 'json' ? 'json' : 'markdown';
-  var backendOrigin = window.location.protocol + '//' + (window.location.hostname || '127.0.0.1') + ':8001';
-  return backendOrigin + '/api/v1/history/sessions/' + encodeURIComponent(sessionId) + '/script/export?format=' + encodeURIComponent(exportFormat);
+  return backendUrl('/api/v1/history/sessions/' + encodeURIComponent(sessionId) + '/script/export?format=' + encodeURIComponent(exportFormat));
 }
 
 function buildMeetingScriptPackageUrl(sessionId, options) {
-  var backendOrigin = window.location.protocol + '//' + (window.location.hostname || '127.0.0.1') + ':8001';
   var params = new URLSearchParams();
   params.set('include_markdown', options.includeMarkdown ? 'true' : 'false');
   params.set('include_json', options.includeJson ? 'true' : 'false');
   params.set('include_recording_manifest', options.includeRecordingManifest ? 'true' : 'false');
   params.set('include_recording_audio', options.includeRecordingAudio ? 'true' : 'false');
-  return backendOrigin + '/api/v1/history/sessions/' + encodeURIComponent(sessionId) + '/script/package?' + params.toString();
+  return backendUrl('/api/v1/history/sessions/' + encodeURIComponent(sessionId) + '/script/package?' + params.toString());
 }
 
 function readMeetingScriptPackageSelection() {
@@ -1420,7 +1890,7 @@ function renderMeetingHistoryList(items) {
     return;
   }
 
-  summaryEl.textContent = items.length + ' / ' + MEETING_HISTORY_RETENTION_LIMIT + ' 场会议';
+  summaryEl.textContent = items.length + ' 场会议';
   summaryEl.style.color = '#80cbc4';
   if (!items.some(function(item) { return item.session_id === activeMeetingHistoryId; })) {
     activeMeetingHistoryId = items[0].session_id;
@@ -1429,8 +1899,6 @@ function renderMeetingHistoryList(items) {
 
   listEl.innerHTML = items.map(function(item) {
     var topicTitle = item.topic && item.topic.title ? item.topic.title : (item.config && item.config.free_topic) || item.session_id;
-    var participants = Array.isArray(item.participants) ? item.participants.join(' · ') : '-';
-    var preview = item.last_event_preview || '暂无事件预览';
     var encodedSessionId = encodeURIComponent(item.session_id || '');
     return '' +
       '<div class="history-item' + (item.session_id === activeMeetingHistoryId ? ' active' : '') + '" data-session-id="' + escHtml(item.session_id) + '" onclick="openMeetingHistory(decodeURIComponent(&quot;' + encodedSessionId + '&quot;))">' +
@@ -1440,8 +1908,6 @@ function renderMeetingHistoryList(items) {
           '<span class="history-pill">' + escHtml(String(item.event_count || 0)) + ' 条</span>' +
           '<span class="history-pill">' + escHtml(formatMeetingTime(item.updated_at)) + '</span>' +
         '</div>' +
-        '<div class="history-preview">' + escHtml(preview) + '</div>' +
-        '<div class="history-preview" style="margin-top:8px;color:#7787ad">参与者：' + escHtml(participants) + '</div>' +
       '</div>';
   }).join('');
 }
@@ -1475,27 +1941,34 @@ function renderMeetingHistoryDetail(record) {
         '</div>' +
       '</div>' +
       '<div class="history-detail-actions">' +
-        '<div class="history-export-quick">' +
-          '<span class="history-export-note">单文件导出：Markdown 适合分享，JSON 适合归档</span>' +
-          '<button type="button" class="history-export-btn" onclick="downloadMeetingScriptExport(&quot;markdown&quot;)">导出 Markdown 复盘稿</button>' +
-          '<button type="button" class="history-export-btn alt" onclick="downloadMeetingScriptExport(&quot;json&quot;)">导出 JSON 存档</button>' +
-        '</div>' +
         renderMeetingScriptPackagePanel(recordings, summary) +
       '</div>' +
     '</div>' +
     '<div class="history-summary-grid">' + cards.map(function(card) {
       return '<div class="history-summary-card"><div class="history-summary-label">' + escHtml(card[0]) + '</div><div class="history-summary-value">' + escHtml(card[1]) + '</div></div>';
     }).join('') + '</div>' +
-    '<div class="history-sections">' +
-      renderMeetingScriptSection(script) +
-      renderMeetingRecordingsSection(recordings) +
-      '<section class="history-section">' +
-        '<div class="history-section-head">' +
-          '<div class="history-section-title">完整时间线</div>' +
-          '<div class="history-section-meta">' + escHtml(String(filteredEvents.length)) + ' / ' + escHtml(String(events.length)) + ' 条</div>' +
+    '<div class="history-sections-cards">' +
+      // 左侧卡片: 完整剧本
+      '<div class="history-card" id="history-card-script">' +
+        '<div class="history-card-head" onclick="toggleHistoryCard(&quot;script&quot;)">' +
+          '<div class="history-card-title">📜 完整剧本</div>' +
+          '<div class="history-card-meta">' + escHtml(String((script.lines || []).length)) + ' 行</div>' +
+          '<span class="history-card-toggle" id="history-card-toggle-script">▼</span>' +
         '</div>' +
-        renderMeetingHistoryFilterPanel(summary, events, filteredEvents) +
-        '<div class="history-events">' + (filteredEvents.length ? filteredEvents.map(function(event) {
+        '<div class="history-card-body" id="history-card-body-script">' +
+          renderMeetingScriptSection(script) +
+        '</div>' +
+      '</div>' +
+      // 右侧卡片: 完整时间线
+      '<div class="history-card" id="history-card-timeline">' +
+        '<div class="history-card-head" onclick="toggleHistoryCard(&quot;timeline&quot;)">' +
+          '<div class="history-card-title">⏱ 完整时间线</div>' +
+          '<div class="history-card-meta">' + escHtml(String(filteredEvents.length)) + ' / ' + escHtml(String(events.length)) + ' 条</div>' +
+          '<span class="history-card-toggle" id="history-card-toggle-timeline">▼</span>' +
+        '</div>' +
+        '<div class="history-card-body" id="history-card-body-timeline">' +
+          renderMeetingHistoryFilterPanel(summary, events, filteredEvents) +
+          '<div class="history-events">' + (filteredEvents.length ? filteredEvents.map(function(event) {
       var processIndex = processIndexMap.get(event) || '-';
       return '' +
         '<div class="history-event">' +
@@ -1511,7 +1984,10 @@ function renderMeetingHistoryDetail(record) {
           '<details><summary style="margin-top:8px;color:#7f90b5;cursor:pointer">查看原始数据</summary><div class="history-event-raw" style="margin-top:8px">原始事件序号 #' + escHtml(String(event.event_seq || '-')) + '</div><pre class="history-json">' + escHtml(JSON.stringify(event.data || {}, null, 2)) + '</pre></details>' +
         '</div>';
     }).join('') : '<div class="history-empty history-empty-note">当前筛选下没有匹配事件。<button type="button" class="history-filter-clear" onclick="clearMeetingHistoryFilters()">清除筛选</button></div>') + '</div>' +
-      '</section>' +
+        '</div>' +
+      '</div>' +
+      // 录音留存 (下方全宽)
+      renderMeetingRecordingsSection(recordings) +
     '</div>';
 }
 
@@ -1667,7 +2143,7 @@ function fetchHardware() {
   if (!reportWindow) return;
   btn.disabled = true;
   btn.textContent = '检测中...';
-  fetch('http://localhost:8001/api/v1/benchmark/hardware?apply_tuning=true')
+  fetch(backendUrl('/api/v1/benchmark/hardware?apply_tuning=true'))
     .then(function(r){ return r.json(); })
     .then(function(hw) {
       var el = document.getElementById('hw-info');
@@ -1706,7 +2182,9 @@ function fetchHardware() {
 </html>`;
 
 const server = http.createServer(async (req, res) => {
-  const { pathname } = url.parse(req.url);
+  const parsedUrl = new URL(req.url || '/', 'http://127.0.0.1');
+  const pathname = parsedUrl.pathname || '/';
+  const search = parsedUrl.search || '';
   if (pathname === '/' || pathname === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(DASHBOARD_HTML);
@@ -1721,8 +2199,41 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(health));
     } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: e.message }));
+      return sendJson(res, 500, { error: e.message });
+    }
+  }
+  if (pathname === '/api/admin/stats' && req.method === 'GET') {
+    try {
+      await proxyBackendAdminJson(res, {
+        method: 'GET',
+        path: '/api/v1/admin/stats',
+      });
+      return;
+    } catch (e) {
+      return sendJson(res, 500, { detail: e.message || 'admin_stats_proxy_failed' });
+    }
+  }
+  if (pathname === '/api/admin/users' && req.method === 'GET') {
+    try {
+      await proxyBackendAdminJson(res, {
+        method: 'GET',
+        path: '/api/v1/admin/users' + search,
+      });
+      return;
+    } catch (e) {
+      return sendJson(res, 500, { detail: e.message || 'admin_users_proxy_failed' });
+    }
+  }
+  if (/^\/api\/admin\/users\/\d+$/.test(pathname) && (req.method === 'GET' || req.method === 'DELETE')) {
+    try {
+      const userId = pathname.split('/').pop();
+      await proxyBackendAdminJson(res, {
+        method: req.method,
+        path: '/api/v1/admin/users/' + encodeURIComponent(String(userId || '')),
+      });
+      return;
+    } catch (e) {
+      return sendJson(res, 500, { detail: e.message || 'admin_user_proxy_failed' });
     }
   }
   if (pathname === '/api/meeting-history/prune' && req.method === 'POST') {

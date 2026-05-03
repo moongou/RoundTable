@@ -4,14 +4,14 @@
 ///
 /// 注意：此文件使用 dart:html（仅限 Flutter Web）。
 /// 在非 Web 平台，此文件将无法编译，需要条件导入替代实现。
-// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
-import 'dart:html' as html;
 import 'dart:async';
+import 'dart:js_interop';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:web/web.dart' as web;
 
 import 'speech_contract.dart';
 
@@ -33,7 +33,7 @@ class ServerTtsService implements TtsService {
   final String providerId;
   final Dio _dio;
   bool _isSpeaking = false;
-  html.AudioElement? _audioElement;
+  web.HTMLAudioElement? _audioElement;
   Completer<void>? _pendingCompleter;
   String? _activeObjectUrl;
   final Map<String, _ServerTtsAudioPayload> _prefetchCache = {};
@@ -48,7 +48,7 @@ class ServerTtsService implements TtsService {
     this.serverUrl = 'http://localhost:8001',
     this.providerId = 'edge_tts',
   }) : _dio = Dio(BaseOptions(
-          baseUrl: serverUrl,
+          baseUrl: Uri.base.origin,
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
           responseType: ResponseType.bytes,
@@ -76,7 +76,7 @@ class ServerTtsService implements TtsService {
       data: {
         'text': text,
         'provider': providerId,
-        'voice': voice ?? 'alloy',
+        if (voice != null) 'voice': voice,
       },
       options: Options(responseType: ResponseType.bytes),
     );
@@ -177,11 +177,15 @@ class ServerTtsService implements TtsService {
             payload.responseInfo.copyWith(fromPrefetchCache: false);
       }
 
-      final blob = html.Blob([payload.bytes], payload.contentType);
-      final url = html.Url.createObjectUrlFromBlob(blob);
+      final blobParts = <JSAny>[payload.bytes.toJS];
+      final blob = web.Blob(
+        blobParts.toJS,
+        web.BlobPropertyBag(type: payload.contentType),
+      );
+      final url = web.URL.createObjectURL(blob);
       _activeObjectUrl = url;
 
-      _audioElement = html.AudioElement()
+      _audioElement = web.HTMLAudioElement()
         ..src = url
         ..playbackRate = rate
         ..autoplay = true;
@@ -202,7 +206,7 @@ class ServerTtsService implements TtsService {
         if (_activeObjectUrl == url) {
           _activeObjectUrl = null;
         }
-        html.Url.revokeObjectUrl(url);
+        web.URL.revokeObjectURL(url);
         _audioElement = null;
         _pendingCompleter = null;
         if (!completer.isCompleted) completer.complete();
@@ -213,7 +217,7 @@ class ServerTtsService implements TtsService {
         if (_activeObjectUrl == url) {
           _activeObjectUrl = null;
         }
-        html.Url.revokeObjectUrl(url);
+        web.URL.revokeObjectURL(url);
         _audioElement = null;
         _pendingCompleter = null;
         if (!completer.isCompleted) {
@@ -221,7 +225,7 @@ class ServerTtsService implements TtsService {
         }
       });
 
-      await _audioElement!.play();
+      await _audioElement!.play().toDart;
       markStarted();
       await completer.future;
     } catch (e) {
@@ -238,7 +242,7 @@ class ServerTtsService implements TtsService {
     final url = _activeObjectUrl;
     _activeObjectUrl = null;
     if (url != null) {
-      html.Url.revokeObjectUrl(url);
+      web.URL.revokeObjectURL(url);
     }
     // 完成 pending completer 以立即中断 speak() 中的等待
     if (_pendingCompleter != null && !_pendingCompleter!.isCompleted) {
@@ -262,9 +266,9 @@ class ServerAsrService implements AsrService {
   bool _isListening = false;
   final StreamController<AsrResult> _controller =
       StreamController<AsrResult>.broadcast();
-  html.MediaRecorder? _mediaRecorder;
-  html.MediaStream? _mediaStream;
-  final List<html.Blob> _chunks = [];
+  web.MediaRecorder? _mediaRecorder;
+  web.MediaStream? _mediaStream;
+  final List<web.Blob> _chunks = [];
   DateTime? _recordingStartTime;
   AsrAudioCapture? _lastCapture;
 
@@ -272,7 +276,7 @@ class ServerAsrService implements AsrService {
     this.serverUrl = 'http://localhost:8001',
     this.providerId,
   }) : _dio = Dio(BaseOptions(
-          baseUrl: serverUrl,
+          baseUrl: Uri.base.origin,
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
         ));
@@ -298,28 +302,22 @@ class ServerAsrService implements AsrService {
     _lastCapture = null;
 
     try {
-      final mediaDevices = html.window.navigator.mediaDevices;
-      if (mediaDevices == null) {
-        _controller.addError('浏览器不支持麦克风访问');
-        return;
-      }
-
-      final stream = await mediaDevices.getUserMedia({'audio': true});
+      final stream = await web.window.navigator.mediaDevices
+          .getUserMedia(web.MediaStreamConstraints(audio: true.toJS))
+          .toDart;
       _mediaStream = stream;
-      _mediaRecorder = html.MediaRecorder(stream);
+      _mediaRecorder = web.MediaRecorder(stream);
       _chunks.clear();
       _recordingStartTime = DateTime.now();
 
-      _mediaRecorder!.addEventListener('dataavailable', (html.Event event) {
-        final blobEvent = event as html.BlobEvent;
-        if (blobEvent.data != null) {
-          _chunks.add(blobEvent.data!);
-        }
-      });
+      _mediaRecorder!.ondataavailable = ((web.Event event) {
+        final blobEvent = event as web.BlobEvent;
+        _chunks.add(blobEvent.data);
+      }).toJS;
 
-      _mediaRecorder!.addEventListener('stop', (html.Event _) async {
-        await _sendForTranscription();
-      });
+      _mediaRecorder!.onstop = ((web.Event _) {
+        unawaited(_sendForTranscription());
+      }).toJS;
 
       // 每秒收集一次数据
       _mediaRecorder!.start(1000);
@@ -368,18 +366,20 @@ class ServerAsrService implements AsrService {
     if (_chunks.isEmpty) return;
 
     // 避免并发发送
-    final chunksToSend = List<html.Blob>.from(_chunks);
+    final chunksToSend = List<web.Blob>.from(_chunks);
     _chunks.clear();
 
     try {
       // 合并音频块为单个 Blob
-      final mergedBlob = html.Blob(chunksToSend, 'audio/webm');
+      final blobParts = <JSAny>[...chunksToSend];
+      final mergedBlob = web.Blob(
+        blobParts.toJS,
+        web.BlobPropertyBag(type: 'audio/webm'),
+      );
 
       // 读取 Blob 为字节
-      final reader = html.FileReader();
-      reader.readAsArrayBuffer(mergedBlob);
-      await reader.onLoadEnd.first;
-      final audioData = reader.result as Uint8List;
+      final audioBuffer = await mergedBlob.arrayBuffer().toDart;
+      final audioData = Uint8List.view(audioBuffer.toDart);
 
       // 空音频检查
       if (audioData.isEmpty || audioData.length < 1024) {
@@ -465,7 +465,7 @@ class ServerAsrService implements AsrService {
     }
     if (_mediaStream != null) {
       try {
-        _mediaStream!.getTracks().forEach((track) => track.stop());
+        _mediaStream!.getTracks().toDart.forEach((track) => track.stop());
       } catch (_) {
         // 忽略清理错误
       }

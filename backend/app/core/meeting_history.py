@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 MEETING_HISTORY_DIR = Path(__file__).resolve().parents[2] / "runtime" / "meeting_history"
-MEETING_HISTORY_RETENTION_LIMIT = 10
+MEETING_HISTORY_RETENTION_LIMIT = 10_000
 MEETING_RECORDINGS_DIRNAME = "recordings"
 MEETING_RECORDINGS_MANIFEST = "recordings.json"
 MEETING_SCRIPT_FILENAME = "script.json"
@@ -787,6 +787,27 @@ class MeetingHistoryStore:
                 self._summary["agent_display_map"] = _jsonable(agent_display_map)
             self._summary["updated_at"] = _utc_now_iso()
             self._write_snapshot_locked()
+
+    async def get_review_messages(self) -> list[dict[str, str]]:
+        """Return speech messages in user-review-compatible format."""
+        async with self._lock:
+            lines = list(self._script_lines)
+
+        messages: list[dict[str, str]] = []
+        for line in lines:
+            kind = str(line.get("kind", "") or "").strip()
+            if kind != "speech":
+                continue
+            speaker = str(line.get("speaker", "") or "").strip()
+            text = str(line.get("text", "") or "").strip()
+            if not speaker or not text:
+                continue
+            messages.append({
+                "source": speaker,
+                "content": text,
+                "type": "text",
+            })
+        return messages
 
     async def append_entry(
         self,

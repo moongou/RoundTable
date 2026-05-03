@@ -19,12 +19,28 @@ class ApiClient {
       headers: {'Content-Type': 'application/json'},
     ));
 
+    // 请求拦截器：自动注入 Authorization header
+    _dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        if (_authToken != null && _authToken!.isNotEmpty) {
+          options.headers['Authorization'] = 'Bearer $_authToken';
+        }
+        handler.next(options);
+      },
+    ));
+
     // 错误拦截器：将 Dio 底层错误转为用户友好的中文提示
     _dio.interceptors.add(InterceptorsWrapper(
       onError: (DioException e, ErrorInterceptorHandler handler) {
         handler.next(e.copyWith(message: _friendlyError(e)));
       },
     ));
+  }
+
+  String? _authToken;
+
+  void setAuthToken(String? token) {
+    _authToken = token;
   }
 
   /// 更新 baseUrl（设置页修改服务器地址后调用）

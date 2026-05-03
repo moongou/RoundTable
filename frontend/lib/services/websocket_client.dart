@@ -81,6 +81,7 @@ class DiscussionWebSocket {
     List<String> thinkerIds = const [],
     bool observerMode = false,
     int maxTurns = 24,
+    int? userId,
   }) async {
     final uri = Uri.parse('$wsUrl/api/v1/ws/discussion/$sessionId');
     _channel = WebSocketChannel.connect(uri);
@@ -88,14 +89,18 @@ class DiscussionWebSocket {
     _connected = true;
 
     // 发送初始配置
-    _channel!.sink.add(jsonEncode({
+    final config = <String, dynamic>{
       'topic_id': topicId,
       'character_ids': characterIds,
       'thinker_ids': thinkerIds,
       'human_names': humanNames,
       'max_turns': maxTurns,
       'observer_mode': observerMode,
-    }));
+    };
+    if (userId != null) {
+      config['user_id'] = userId;
+    }
+    _channel!.sink.add(jsonEncode(config));
 
     // 监听消息
     _channel!.stream.listen(

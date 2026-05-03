@@ -86,7 +86,7 @@ class CreateSessionRequest(BaseModel):
     free_topic_detail: str = ""  # 可选：自由话题的原始详细描述
     character_ids: list[str] = Field(default_factory=lambda: ["explorer", "skeptic"])
     thinker_ids: list[str] = Field(default_factory=list)  # 额外的思想家角色
-    human_names: list[str] = Field(default_factory=lambda: ["豆苗"])
+    human_names: list[str] = Field(default_factory=lambda: ["同学"])
     max_turns: int = 24
 
 

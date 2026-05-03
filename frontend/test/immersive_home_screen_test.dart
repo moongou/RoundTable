@@ -153,4 +153,27 @@ void main() {
     expect(draft.effectiveTitle, '小学生该不该限制刷短视频？');
     expect(draft.effectiveSourceText, contains('很多小学生'));
   });
+
+  test('home account labels keep phone and nickname fallback text', () {
+    expect(formatHomeAccountPhoneLabel('13912345678'), '登录 13912345678');
+    expect(formatHomeAccountPhoneLabel(''), '登录 未登录');
+
+    expect(formatHomeAccountNicknameLabel('小袁'), '(小袁)');
+    expect(formatHomeAccountNicknameLabel(''), '(同学)');
+  });
+
+  test('home seat title uses nickname in non observer mode', () {
+    expect(
+      formatHomeSeatBadgeTitle(humanName: '小袁', observerMode: false),
+      '小袁的席位',
+    );
+    expect(
+      formatHomeSeatBadgeTitle(humanName: '', observerMode: false),
+      '同学的席位',
+    );
+    expect(
+      formatHomeSeatBadgeTitle(humanName: '任意', observerMode: true),
+      '旁听席',
+    );
+  });
 }

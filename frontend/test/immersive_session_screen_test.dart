@@ -327,6 +327,17 @@ void main() {
       ),
       isFalse,
     );
+
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+        completedSpeaker: '豆苗',
+      ),
+      isTrue,
+    );
   });
 
   test('inter-speaker pause only applies between AI speakers', () {

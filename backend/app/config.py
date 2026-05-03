@@ -69,10 +69,6 @@ PROVIDER_DEFAULTS = {
         "base_url": "",
         "model": "",
     },
-    "custom2": {
-        "base_url": "",
-        "model": "",
-    },
 }
 
 # 所有可用的提供商列表
@@ -112,8 +108,7 @@ PROVIDER_NAMES = {
     "zhipu": "智谱AI (ChatGLM)",
     "anthropic": "Anthropic Claude",
     "gemini": "Google Gemini",
-    "custom1": "自定义一（OpenAI 兼容）",
-    "custom2": "自定义二（OpenAI 兼容）",
+    "custom1": "自定义（OpenAI 兼容）",
 }
 
 
@@ -127,6 +122,7 @@ ASR_PROVIDERS = {
     "openai_whisper": "OpenAI Whisper API",
     "siliconflow_asr": "硅基流动 ASR",
     "groq_whisper": "Groq Whisper API",
+    "volcengine_asr": "火山引擎 ASR",
     "disabled": "禁用语音识别（纯文本输入）",
 }
 
@@ -140,6 +136,7 @@ TTS_PROVIDERS = {
     "cosyvoice": "CosyVoice 本地服务",
     "openai_tts": "OpenAI TTS API",
     "siliconflow_tts": "硅基流动 TTS",
+    "volcengine_tts": "火山引擎 TTS",
     "disabled": "禁用语音合成（纯文本显示）",
 }
 
@@ -276,6 +273,25 @@ VOICE_SERVICE_META = {
         "default_model": "FunAudioLLM/CosyVoice2-0.5B",
         "default_voice": "FunAudioLLM/CosyVoice2-0.5B:alex",
     },
+    "volcengine_asr": {
+        "name": "火山引擎 ASR",
+        "default_url": "https://openspeech.bytedance.com/api/v1/asr",
+        "type": "asr",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/",
+        "default_model": "bigmodel",
+    },
+    "volcengine_tts": {
+        "name": "火山引擎 TTS",
+        "default_url": "https://openspeech.bytedance.com/api/v1/tts",
+        "type": "tts",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/",
+        "default_model": "tts-1",
+        "default_voice": "zh_female_qingxin",
+    },
 }
 
 
@@ -288,12 +304,12 @@ class Settings(BaseSettings):
 
     # ── LLM 提供商 ─────────────────────────────────────────────────────────
 
-    llm_provider: str = "openai"
+    llm_provider: str = "deepseek"
 
     # OpenAI
     openai_api_key: str = ""
-    openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = ""
+    openai_model: str = ""
 
     # 通义千问
     qwen_api_key: str = ""
@@ -358,11 +374,6 @@ class Settings(BaseSettings):
     custom1_model: str = ""
     custom1_display_name: str = "自定义一"
 
-    custom2_api_key: str = ""
-    custom2_base_url: str = ""
-    custom2_model: str = ""
-    custom2_display_name: str = "自定义二"
-
     custom_providers: str = "[]"  # JSON string of custom provider configs（保留兼容字段）
 
     # ── 语音服务 ────────────────────────────────────────────────────────────
@@ -378,7 +389,7 @@ class Settings(BaseSettings):
     openai_whisper_model: str = "whisper-1"
     siliconflow_asr_api_key: str = ""  # uses siliconflow_api_key if blank
     siliconflow_asr_base_url: str = "https://api.siliconflow.cn/v1"
-    siliconflow_asr_model: str = "TeleAI/TeleSpeechASR"
+    siliconflow_asr_model: str = "FunAudioLLM/SenseVoiceSmall"
     groq_whisper_api_key: str = ""
     groq_whisper_base_url: str = "https://api.groq.com/openai/v1"
     groq_whisper_model: str = "whisper-large-v3-turbo"
@@ -400,6 +411,16 @@ class Settings(BaseSettings):
     siliconflow_tts_base_url: str = "https://api.siliconflow.cn/v1"
     siliconflow_tts_model: str = "FunAudioLLM/CosyVoice2-0.5B"
     siliconflow_tts_voice: str = "FunAudioLLM/CosyVoice2-0.5B:alex"
+    # 火山引擎 ASR/TTS
+    volcengine_asr_access_key: str = ""
+    volcengine_asr_secret_key: str = ""
+    volcengine_asr_base_url: str = "https://openspeech.bytedance.com/api/v1/asr"
+    volcengine_asr_model: str = "bigmodel"
+    volcengine_tts_access_key: str = ""
+    volcengine_tts_secret_key: str = ""
+    volcengine_tts_base_url: str = "https://openspeech.bytedance.com/api/v1/tts"
+    volcengine_tts_model: str = "tts-1"
+    volcengine_tts_voice: str = "zh_female_qingxin"
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     cosyvoice_voice: str = "default"
 
@@ -426,7 +447,7 @@ class Settings(BaseSettings):
         "http://localhost:5173,"
         "http://127.0.0.1:5173"
     )
-    management_api_token: str = ""
+    management_api_token: str = "roundtable-admin-dev"
     management_auth_enforced: bool = False
 
     # ── 讨论参数 ───────────────────────────────────────────────────────────
@@ -581,7 +602,15 @@ class Settings(BaseSettings):
             "siliconflow_tts_api_key",
             "siliconflow_tts_base_url",
             "siliconflow_tts_model",
-            "siliconflow_tts_voice",
+            "volcengine_asr_access_key",
+            "volcengine_asr_secret_key",
+            "volcengine_asr_base_url",
+            "volcengine_asr_model",
+            "volcengine_tts_access_key",
+            "volcengine_tts_secret_key",
+            "volcengine_tts_base_url",
+            "volcengine_tts_model",
+            "volcengine_tts_voice",
             "tts_voice",
             "cosyvoice_voice",
             # Web search
@@ -596,7 +625,6 @@ class Settings(BaseSettings):
             allowed_fields.add(f"{pid}_model")
         # 自定义提供商额外允许设置显示名
         allowed_fields.add("custom1_display_name")
-        allowed_fields.add("custom2_display_name")
 
         for field, value in updates.items():
             if field == "llm_provider":
@@ -622,6 +650,8 @@ class Settings(BaseSettings):
             "groq_whisper": self.groq_whisper_base_url,
             "openai_tts": self.openai_tts_base_url,
             "siliconflow_tts": self.siliconflow_tts_base_url,
+            "volcengine_asr": self.volcengine_asr_base_url,
+            "volcengine_tts": self.volcengine_tts_base_url,
         }
         url = url_map.get(sid, "")
         if url:
@@ -639,6 +669,8 @@ class Settings(BaseSettings):
             "groq_whisper": self.groq_whisper_api_key,
             "openai_tts": self.openai_tts_api_key or self.openai_api_key,
             "siliconflow_tts": self.siliconflow_tts_api_key or self.siliconflow_api_key,
+            "volcengine_asr": self.volcengine_asr_access_key,
+            "volcengine_tts": self.volcengine_tts_access_key,
         }
         return api_key_map.get(sid, "")
 
@@ -651,6 +683,8 @@ class Settings(BaseSettings):
             "groq_whisper": self.groq_whisper_model,
             "openai_tts": self.openai_tts_model,
             "siliconflow_tts": self.siliconflow_tts_model,
+            "volcengine_asr": self.volcengine_asr_model,
+            "volcengine_tts": self.volcengine_tts_model,
         }
         return model_map.get(sid, VOICE_SERVICE_META.get(sid, {}).get("default_model", ""))
 
@@ -662,6 +696,7 @@ class Settings(BaseSettings):
             "siliconflow_tts": self.siliconflow_tts_voice,
             "cosyvoice": self.cosyvoice_voice,
             "edge_tts": self.tts_voice,
+            "volcengine_tts": self.volcengine_tts_voice,
         }
         return voice_map.get(
             sid, VOICE_SERVICE_META.get(sid, {}).get("default_voice", self.tts_voice)

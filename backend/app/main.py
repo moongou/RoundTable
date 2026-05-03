@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Flutter Web 构建产物目录
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+ADMIN_PANEL_DIR = Path(__file__).resolve().parent.parent / "admin_panel"
 
 
 async def _startup_preload():
@@ -131,6 +133,17 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+@app.get("/admin.html", include_in_schema=False)
+@app.get("/admin.htm", include_in_schema=False)
+async def legacy_admin_redirect():
+    """兼容历史入口，统一跳转到新管理面板路由。"""
+    return RedirectResponse(url="/admin/", status_code=307)
+
+# 挂载管理后台静态文件
+if ADMIN_PANEL_DIR.exists():
+    app.mount("/admin", StaticFiles(directory=str(ADMIN_PANEL_DIR), html=True), name="admin_panel")
 
 # 挂载 Flutter Web 静态文件（必须在路由之后挂载，否则会覆盖 API）
 if STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists():

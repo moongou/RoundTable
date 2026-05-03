@@ -293,18 +293,29 @@ def _get_voice_for_character(character_id: str, provider_id: str | None = None) 
 
     如果角色有指定的音色，返回该音色；否则返回默认音色。
     需求14：优先级 思想家 YAML > 角色模板 YAML > 默认。
+
+    硅基流动 TTS 专属分配：
+    - 主持人李老师 (moderator) → anna
+    - 思想家 (thinkers)       → benjamin
+    - 小爱 (empath)           → diana
+    - 其他角色                → alex
     """
-    if provider_id == "openvoice":
+    pid = (provider_id or "").strip().lower()
+
+    if pid == "openvoice":
         profile_id = openvoice_profile_for_character_id(character_id)
         if profile_id:
             return profile_id
+
+    if pid == "siliconflow_tts":
+        return _siliconflow_voice_for_character(character_id)
 
     try:
         from app.core.thinkers import get_thinker
 
         thinker = get_thinker(character_id)
         if thinker:
-            if provider_id == "openvoice":
+            if pid == "openvoice":
                 return "ov:thinker_elder"
             voice = (thinker.get("voice") or "").strip()
             if voice:
@@ -316,7 +327,7 @@ def _get_voice_for_character(character_id: str, provider_id: str | None = None) 
 
         templates = load_all_templates()
         if character_id in templates:
-            if provider_id == "openvoice":
+            if pid == "openvoice":
                 profile_id = openvoice_profile_for_character_id(character_id)
                 if profile_id:
                     return profile_id
@@ -327,6 +338,58 @@ def _get_voice_for_character(character_id: str, provider_id: str | None = None) 
     except Exception:
         pass
     return "alloy"
+
+
+def _siliconflow_voice_for_character(character_id: str) -> str:
+    """硅基流动 CosyVoice2 音色分配。
+
+    固定分配：
+    - 李老师 → anna
+    - 思想家 → benjamin
+    - 小爱   → diana
+    """
+    model = "FunAudioLLM/CosyVoice2-0.5B"
+
+    if character_id == "moderator":
+        return f"{model}:anna"
+    if character_id == "empath":
+        return f"{model}:diana"
+
+    try:
+        from app.core.thinkers import get_thinker
+
+        thinker = get_thinker(character_id)
+        if thinker:
+            return f"{model}:benjamin"
+    except Exception:
+        pass
+
+    return f"{model}:alex"
+
+
+def _normalize_siliconflow_voice(voice: str, character_id: str | None = None) -> str:
+    """Ensure voice is valid for SiliconFlow CosyVoice2.
+
+    If already in model:voice format, return as-is.
+    Otherwise map bare OpenAI-style voice names or use character-based assignment.
+    """
+    model_prefix = "FunAudioLLM/CosyVoice2-0.5B:"
+    if voice.startswith(model_prefix):
+        return voice
+
+    if character_id:
+        return _siliconflow_voice_for_character(character_id)
+
+    bare = voice.split(":")[-1].strip().lower()
+    name_map = {
+        "alloy": "alex",
+        "echo": "alex",
+        "fable": "benjamin",
+        "onyx": "benjamin",
+        "nova": "diana",
+        "shimmer": "anna",
+    }
+    return f"{model_prefix}{name_map.get(bare, 'alex')}"
 
 
 # ── TTS 端点 ──────────────────────────────────────────────────────────────────
@@ -352,6 +415,17 @@ async def text_to_speech(request: TTSRequest) -> Response:
         voice = requested_voice
     else:
         voice = settings.get_tts_voice_for_provider(provider_id) or "alloy"
+
+    if provider_id == "siliconflow_tts":
+        voice = _normalize_siliconflow_voice(voice, request.character_id)
+
+    logger.info(
+        "TTS request: provider=%s character_id=%s voice=%s text_len=%d",
+        provider_id,
+        request.character_id or "-",
+        voice,
+        len(request.text),
+    )
 
     try:
         provider = create_tts_provider(request.provider)

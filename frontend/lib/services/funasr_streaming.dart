@@ -6,14 +6,15 @@
 ///
 /// 对应本项目需求 5b："从 LOCALHOST:9999 面板上找到合适作为流式语音识别的
 /// 工具，然后改造本项目为流式输入输出"。
-// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:html' as html;
-import 'dart:js' as js;
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 import 'dart:typed_data';
+
+import 'package:web/web.dart' as web;
 
 import 'speech_contract.dart';
 
@@ -35,11 +36,11 @@ class FunasrStreamingAsrService implements AsrService {
   bool _isListening = false;
   bool _available = true;
 
-  html.WebSocket? _ws;
-  html.MediaStream? _mediaStream;
-  js.JsObject? _audioContext;
-  js.JsObject? _sourceNode;
-  js.JsObject? _processorNode;
+  web.WebSocket? _ws;
+  web.MediaStream? _mediaStream;
+  JSObject? _audioContext;
+  JSObject? _sourceNode;
+  JSObject? _processorNode;
   Completer<void>? _finalResultCompleter;
 
   final StringBuffer _onlineBuf = StringBuffer();
@@ -60,7 +61,7 @@ class FunasrStreamingAsrService implements AsrService {
   @override
   Future<void> warmup() async {
     try {
-      final probe = html.WebSocket(wsUrl, 'binary');
+      final probe = web.WebSocket(wsUrl, 'binary'.toJS);
       final c = Completer<bool>();
       probe.onOpen.first.then((_) {
         if (!c.isCompleted) c.complete(true);
@@ -86,20 +87,11 @@ class FunasrStreamingAsrService implements AsrService {
     _finalResultCompleter = Completer<void>();
 
     try {
-      final md = html.window.navigator.mediaDevices;
-      if (md == null) {
-        _controller.addError('浏览器不支持麦克风访问');
-        return;
-      }
-      _mediaStream = await md.getUserMedia({
-        'audio': {
-          'channelCount': 1,
-          'echoCancellation': true,
-          'noiseSuppression': true,
-        }
-      });
+      _mediaStream = await web.window.navigator.mediaDevices
+          .getUserMedia(web.MediaStreamConstraints(audio: true.toJS))
+          .toDart;
 
-      _ws = html.WebSocket(wsUrl, 'binary');
+      _ws = web.WebSocket(wsUrl, 'binary'.toJS);
       _ws!.binaryType = 'arraybuffer';
 
       final openC = Completer<void>();
@@ -124,16 +116,18 @@ class FunasrStreamingAsrService implements AsrService {
 
       await openC.future.timeout(const Duration(seconds: 5));
 
-      _ws!.sendString(jsonEncode({
-        'chunk_size': [5, 10, 5],
-        'wav_name': 'roundtable',
-        'is_speaking': true,
-        'chunk_interval': chunkIntervalMs ~/ 10,
-        'itn': itn,
-        'mode': mode,
-        'wav_format': 'PCM',
-        'audio_fs': 16000,
-      }));
+      _ws!.send(
+        jsonEncode({
+          'chunk_size': [5, 10, 5],
+          'wav_name': 'roundtable',
+          'is_speaking': true,
+          'chunk_interval': chunkIntervalMs ~/ 10,
+          'itn': itn,
+          'mode': mode,
+          'wav_format': 'PCM',
+          'audio_fs': 16000,
+        }).toJS,
+      );
 
       _setupAudioPipeline();
       _isListening = true;
@@ -147,48 +141,107 @@ class FunasrStreamingAsrService implements AsrService {
   }
 
   void _setupAudioPipeline() {
-    final ctx = js.context;
-    final audioContextClass = ctx.hasProperty('AudioContext')
-        ? ctx['AudioContext']
-        : ctx['webkitAudioContext'];
-    _audioContext = js.JsObject(audioContextClass as js.JsFunction, [
-      js.JsObject.jsify({'sampleRate': 16000})
-    ]);
-    _sourceNode = _audioContext!.callMethod(
-      'createMediaStreamSource',
-      [js.JsObject.fromBrowserObject(_mediaStream!)],
+    final ctx = globalContext;
+    JSFunction? audioContextCtor;
+    try {
+      audioContextCtor = (ctx.has('AudioContext')
+          ? ctx['AudioContext']
+          : ctx['webkitAudioContext']) as JSFunction?;
+    } catch (_) {
+      audioContextCtor = null;
+    }
+    if (audioContextCtor == null) {
+      throw StateError('浏览器不支持 AudioContext');
+    }
+
+    JSFunction? objectCtor;
+    try {
+      objectCtor = ctx['Object'] as JSFunction?;
+    } catch (_) {
+      objectCtor = null;
+    }
+    JSObject? options;
+    if (objectCtor != null) {
+      options = objectCtor.callAsConstructor<JSObject>();
+      options['sampleRate'] = 16000.toJS;
+    }
+
+    _audioContext = options == null
+        ? audioContextCtor.callAsConstructor<JSObject>()
+        : audioContextCtor.callAsConstructor<JSObject>(options);
+
+    if (_mediaStream == null) {
+      throw StateError('麦克风流未初始化');
+    }
+
+    _sourceNode = _audioContext!.callMethod<JSObject>(
+      'createMediaStreamSource'.toJS,
+      _mediaStream!,
     );
-    _processorNode = _audioContext!.callMethod(
-      'createScriptProcessor',
-      [4096, 1, 1],
+    _processorNode = _audioContext!.callMethod<JSObject>(
+      'createScriptProcessor'.toJS,
+      4096.toJS,
+      1.toJS,
+      1.toJS,
     );
 
-    _processorNode!['onaudioprocess'] =
-        js.JsFunction.withThis((thisArg, event) {
-      if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
-      final inputBuffer = (event as js.JsObject)['inputBuffer'];
-      final channelData = inputBuffer.callMethod('getChannelData', [0]);
-      final length = (channelData['length'] as num).toInt();
-      final int16Data = Int16List(length);
-      for (var i = 0; i < length; i++) {
-        final s = (channelData[i] as num).toDouble().clamp(-1.0, 1.0);
+    _processorNode!['onaudioprocess'] = ((JSAny? event) {
+      if (_ws == null || _ws!.readyState != web.WebSocket.OPEN) {
+        return;
+      }
+      JSObject? eventObj;
+      JSObject? inputBuffer;
+      JSFloat32Array? channelData;
+      try {
+        eventObj = event as JSObject?;
+        inputBuffer = eventObj?['inputBuffer'] as JSObject?;
+        channelData = inputBuffer?.callMethod<JSAny?>(
+            'getChannelData'.toJS, 0.toJS) as JSFloat32Array?;
+      } catch (_) {
+        channelData = null;
+      }
+      if (channelData == null) {
+        return;
+      }
+
+      final samples = channelData.toDart;
+      final int16Data = Int16List(samples.length);
+      for (var i = 0; i < samples.length; i++) {
+        final s = samples[i].clamp(-1.0, 1.0);
         int16Data[i] = (s * 32767).round();
       }
-      try {
-        _ws!.sendTypedData(int16Data);
-      } catch (_) {}
-    });
 
-    _sourceNode!.callMethod('connect', [_processorNode]);
-    _processorNode!.callMethod('connect', [_audioContext!['destination']]);
+      try {
+        _ws!.send(int16Data.toJS);
+      } catch (_) {}
+    }).toJS;
+
+    _sourceNode!.callMethod<JSAny?>('connect'.toJS, _processorNode!);
+    final destination = _audioContext!['destination'];
+    if (destination != null) {
+      _processorNode!.callMethod<JSAny?>('connect'.toJS, destination);
+    }
   }
 
-  void _onWsMessage(html.MessageEvent ev) {
+  String? _extractMessageText(web.MessageEvent ev) {
     final data = ev.data;
-    if (data is! String) return;
+    if (data == null) {
+      return null;
+    }
+    try {
+      return (data as JSString).toDart;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _onWsMessage(web.MessageEvent ev) {
+    final rawText = _extractMessageText(ev);
+    if (rawText == null) return;
+
     Map<String, dynamic> payload;
     try {
-      payload = jsonDecode(data) as Map<String, dynamic>;
+      payload = jsonDecode(rawText) as Map<String, dynamic>;
     } catch (_) {
       return;
     }
@@ -230,8 +283,8 @@ class FunasrStreamingAsrService implements AsrService {
     _isListening = false;
 
     try {
-      if (_ws?.readyState == html.WebSocket.OPEN) {
-        _ws!.sendString(jsonEncode({'is_speaking': false}));
+      if (_ws?.readyState == web.WebSocket.OPEN) {
+        _ws!.send(jsonEncode({'is_speaking': false}).toJS);
       }
     } catch (_) {}
 
@@ -250,16 +303,16 @@ class FunasrStreamingAsrService implements AsrService {
 
   Future<void> _cleanupAudio() async {
     try {
-      _processorNode?.callMethod('disconnect');
+      _processorNode?.callMethod<JSAny?>('disconnect'.toJS);
     } catch (_) {}
     try {
-      _sourceNode?.callMethod('disconnect');
+      _sourceNode?.callMethod<JSAny?>('disconnect'.toJS);
     } catch (_) {}
     try {
-      _audioContext?.callMethod('close');
+      _audioContext?.callMethod<JSAny?>('close'.toJS);
     } catch (_) {}
     try {
-      _mediaStream?.getTracks().forEach((t) => t.stop());
+      _mediaStream?.getTracks().toDart.forEach((track) => track.stop());
     } catch (_) {}
     _processorNode = null;
     _sourceNode = null;

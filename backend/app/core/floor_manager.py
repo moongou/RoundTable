@@ -99,6 +99,10 @@ class FloorManager:
     _MODERATOR_REGULAR_SENTENCE_LIMIT = 1
     _MODERATOR_INVITE_SENTENCE_LIMIT = 2
     _MODERATOR_CLOSING_SENTENCE_LIMIT = 2
+    _FIRST_HUMAN_MAX_WAIT_SEC = 120.0
+    _HUMAN_TURN_MIN_TARGET = 5
+    _NON_HUMAN_AI_MAX_SENTENCES = 3
+    _NON_HUMAN_AI_MAX_CHARS = 160
     _MODERATOR_END_MARKERS = (
         "讨论结束",
         "就到这里",
@@ -206,7 +210,7 @@ class FloorManager:
 
         # Selector stall recovery: track consecutive LLM selector failures
         self._consecutive_selector_stalls = 0
-        self._max_consecutive_selector_stalls = 2
+        self._max_consecutive_selector_stalls = 1
 
         # 暂停状态
         self._paused = False
@@ -335,8 +339,9 @@ class FloorManager:
         count = self._speaker_message_count.get(source, 0)
         is_moderator = source == "moderator"
         is_first_turn = count == 0
+        is_first_discussion_turn = self._is_discussion_opening_message(source)
 
-        if is_moderator and is_first_turn:
+        if is_moderator and is_first_discussion_turn:
             # 老师开场不引用任何人
             text = re.sub(
                 r"[^。！？!?]*(?:同学|先生)?[，,:：]?\s*你?(?:刚才|前面|上一位)[^。！？!?]*[。！？!?]",
@@ -355,13 +360,35 @@ class FloorManager:
                 text = self._build_moderator_opening_baseline()
             return text
 
-        if (source in self.ai_names or source in self.human_names) and is_first_turn:
+        if source != "moderator" and (source in self.ai_names or source in self.human_names) and is_first_turn:
             # 同学首轮发言去掉"上一位同学"式互引
             text = re.sub(r"(上一位同学|刚才.*同学|某位同学)", "这个问题", text)
             text = re.sub(r"(你说得对|他说得对|她说得对)", "我先说说我的看法", text)
             text = re.sub(r"^(基于|根据).{0,12}(发言|观点)[，,]", "", text)
             return text
 
+        return text
+
+    def _is_discussion_opening_message(self, source: str) -> bool:
+        if source != "moderator" or self._speaker_message_count.get("moderator", 0) > 0:
+            return False
+        return not any(
+            count > 0
+            for name, count in self._speaker_message_count.items()
+            if name != "moderator"
+        )
+
+    def _ensure_moderator_opening_context(self, content: str) -> str:
+        text = (content or "").strip()
+        if self._validate_moderator_opening(text) and self._moderator_opening_has_context(text):
+            return text
+        baseline = self._build_moderator_opening_baseline()
+        if not text:
+            return baseline
+        if self._has_moderator_invitation_intent(text):
+            return f"{baseline}{text}"
+        if len(text) < 36 or not self._moderator_opening_has_context(text):
+            return baseline
         return text
 
     def _get_spoken_display_names(self) -> set[str]:
@@ -542,6 +569,8 @@ class FloorManager:
             parts.append(f"📖 背景资料：{story_preview}")
 
         return "\n".join(parts)
+
+    def _smart_fallback_speaker(self) -> str:
         """Deterministic fallback when LLM selector stalls.
 
         Returns the best next speaker without calling any LLM.
@@ -570,11 +599,15 @@ class FloorManager:
                 return thinkers_unspoken[0]
             return unspoken[0]
 
-        # Priority 3: least-recent non-human, non-moderator speaker
+        # Priority 3: least-recent non-human, non-moderator speaker (skip last speaker)
+        last_agent = self._last_substantive_agent_speaker()
         for display_name in reversed(self._recent_display_speakers):
             agent_name = self._display_name_to_agent.get(display_name, display_name)
-            if agent_name not in self.human_names and agent_name != "moderator":
+            if agent_name not in self.human_names and agent_name != "moderator" and agent_name != last_agent:
                 return agent_name
+        # If only last speaker is available among non-humans, return moderator
+        if last_agent and last_agent != "moderator" and last_agent not in self.human_names:
+            return "moderator"
 
         # Priority 4: human (even if above target)
         if human_agent and self.human_names:
@@ -602,7 +635,7 @@ class FloorManager:
     def _should_block_moderator_final_closing(self) -> bool:
         if not self.human_names:
             return False
-        return self._human_turn_count() < 5
+        return self._human_turn_count() < self._HUMAN_TURN_MIN_TARGET
 
     def _non_human_turn_count_before_first_human(self) -> int:
         return sum(
@@ -622,7 +655,16 @@ class FloorManager:
         return turns
 
     def _should_force_first_human_invite(self) -> bool:
-        return False
+        if not self.human_names or self._has_human_spoken():
+            return False
+        target_agent = self._preferred_human_agent_name()
+        if target_agent and self._speaker_message_count.get(target_agent, 0) > 0:
+            return False
+        if self._non_human_turn_count_before_first_human() >= 2:
+            return True
+        if self._discussion_started_mono <= 0:
+            return False
+        return (time.monotonic() - self._discussion_started_mono) >= self._FIRST_HUMAN_MAX_WAIT_SEC
 
     def _enforce_expected_ai_speaker(self, source: str) -> bool:
         expected = self._expected_next_ai_speaker
@@ -764,12 +806,12 @@ class FloorManager:
             return False
 
         human_count = self._human_turn_count()
-        if human_count >= 5:
+        if human_count >= self._HUMAN_TURN_MIN_TARGET:
             return False
 
-        # First human turn: invite after 2 non-human warm-up turns
+        # First human turn: invite after 2 non-human warm-up turns or at 2 minutes.
         if self._speaker_message_count.get(target_agent, 0) <= 0:
-            return self._non_human_turn_count_before_first_human() >= 2
+            return self._should_force_first_human_invite()
 
         # Even distribution: calculate adaptive gap based on remaining budget
         # Remaining human turns needed vs remaining total turns
@@ -777,13 +819,15 @@ class FloorManager:
             1 for name, count in self._speaker_message_count.items()
             if name != "moderator" and name not in self.human_names and count > 0
         )
-        remaining_human = 5 - human_count
+        remaining_human = self._HUMAN_TURN_MIN_TARGET - human_count
         # Estimate remaining turns based on nominal max
         estimated_remaining = max(1, self._nominal_max_turns - total_non_mod - human_count)
         # Desired gap: evenly space remaining human turns across remaining discussion
         desired_gap = max(2, estimated_remaining // max(1, remaining_human + 1))
 
         current_gap = self._non_human_turns_since_last_human()
+        if human_count < self._HUMAN_TURN_MIN_TARGET:
+            return current_gap >= 1
         return current_gap >= desired_gap
 
     def _force_first_human_stream_segment(self, source: str, segment: str) -> str:
@@ -834,7 +878,7 @@ class FloorManager:
     def _has_moderator_invitation_intent(self, text: str) -> bool:
         return bool(
             re.search(
-                r"(请|想问问|问问|想听听|听听|有请|邀请|轮到|下一位|接下来|交给|发言|你怎么看)",
+                r"(请|想问问|问问|想听听|听听|有请|邀请|轮到|下一位|接下来|交给|发言|你怎么看|来说说|说说|谈谈|讲讲|分享|回应|补充)",
                 text or "",
             )
         )
@@ -863,6 +907,42 @@ class FloorManager:
         else:
             limit = self._MODERATOR_REGULAR_SENTENCE_LIMIT
         return self._limit_text_sentence_count(value, max_sentences=limit)
+
+    def _limit_text_char_count(self, text: str, *, max_chars: int) -> str:
+        value = (text or "").strip()
+        if not value or len(value) <= max_chars:
+            return value
+
+        segments, remainder = self._drain_complete_stream_sentences(value)
+        units = [*segments]
+        if remainder:
+            units.append(remainder)
+
+        kept: list[str] = []
+        current_len = 0
+        for unit in units:
+            next_len = current_len + len(unit)
+            if kept and next_len > max_chars:
+                break
+            if not kept and len(unit) > max_chars:
+                trimmed = unit[: max_chars - 1].rstrip("，,；;:：、 ")
+                return f"{trimmed}。" if trimmed else ""
+            kept.append(unit)
+            current_len = next_len
+        return "".join(kept).strip()
+
+    def _enforce_non_human_ai_duration(self, source: str, text: str) -> str:
+        value = (text or "").strip()
+        if not value or source not in self.ai_names or source == "moderator":
+            return value
+        value = self._limit_text_sentence_count(
+            value,
+            max_sentences=self._NON_HUMAN_AI_MAX_SENTENCES,
+        )
+        return self._limit_text_char_count(
+            value,
+            max_chars=self._NON_HUMAN_AI_MAX_CHARS,
+        )
 
     def _sanitize_unknown_student_vocatives(self, text: str, *, last_display: str) -> str:
         value = text or ""
@@ -1059,6 +1139,23 @@ class FloorManager:
         ]
         for pattern in self_reference_patterns:
             text = re.sub(pattern, r"有同学\1", text)
+
+        self_rewrites = [
+            (
+                r"我(?:很|非常)?(?:赞同|认可|同意)自己(?:刚才)?(?:讲|说|提|提出|讲过|说过)?的?(?:话|观点|想法|说法)",
+                "我想补充刚才这个观点",
+            ),
+            (
+                r"我(?:很|非常)?(?:赞同|认可|同意)我(?:刚才)?(?:讲|说|提|提出|讲过|说过)?的?(?:话|观点|想法|说法)",
+                "我想补充刚才这个观点",
+            ),
+            (
+                r"自己(?:刚才)?(?:讲|说|提出|讲过|说过)的(?:话|观点|想法|说法)",
+                "刚才这个观点",
+            ),
+        ]
+        for pattern, replacement in self_rewrites:
+            text = re.sub(pattern, replacement, text)
 
         # 防止"我（XX）觉得……"这种冗余自我介绍
         text = re.sub(rf"我[（(]{re.escape(current_display)}[）)]", "我", text)
@@ -2416,6 +2513,11 @@ class FloorManager:
                         if self._moderator_stream_sentence_emitted >= self._MODERATOR_INVITE_SENTENCE_LIMIT:
                             consumed_raw_segments.append(raw_segment)
                             continue
+                    else:
+                        segment = self._enforce_non_human_ai_duration(source, segment)
+                        if not segment:
+                            consumed_raw_segments.append(raw_segment)
+                            continue
                     segment = await self.safety_filter.filter_or_rewrite(segment)
                     segment = self._strip_meta_reasoning_text(segment).strip()
                     if segment:
@@ -2522,17 +2624,14 @@ class FloorManager:
             if (
                 source == "moderator"
                 and not is_final_closing
-                and self._speaker_message_count.get("moderator", 0) == 0
+                and self._is_discussion_opening_message(source)
                 and not is_non_substantive_turn(content)
             ):
                 if not self._validate_moderator_opening(content):
                     logger.warning(
-                        "[FloorManager] 主持人开场不合格，将通过后续系统消息提示"
+                        "[FloorManager] 主持人开场不合格，已强制替换为话题简介"
                     )
-                    # Inject topic context as system note so students have context
-                    topic_intro = self._build_topic_context_note()
-                    if topic_intro:
-                        await self._emit_message("系统", topic_intro, "system")
+                content = self._ensure_moderator_opening_context(content)
             designated_pre_filter: Optional[str] = None
             display_source = self._agent_to_display_name.get(source, source)
             all_display_names = list(self._display_name_to_agent.keys())
@@ -2581,6 +2680,11 @@ class FloorManager:
                 if not content:
                     logger.info("[FloorManager] 主持人消息被长度约束后为空，跳过发送")
                     return None
+            elif source in self.ai_names:
+                content = self._enforce_non_human_ai_duration(source, content)
+                if not content:
+                    logger.info("[FloorManager] AI 消息被40秒时长约束后为空，跳过发送: source=%s", source)
+                    return None
 
             # 如果是老师或用户的发言，检查是否指定了下一位发言者（需求4）
             designated: Optional[str] = designated_pre_filter
@@ -2591,7 +2695,22 @@ class FloorManager:
                 if designated:
                     agent_name = self._display_name_to_agent.get(designated, designated)
                     logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
-                    if source == "moderator" and agent_name in self.human_names:
+                    # 防止指定刚发过言的人（back-to-back），与现实讨论场景不符且会导致流程停滞
+                    last_substantive = self._last_substantive_agent_speaker()
+                    if agent_name == last_substantive:
+                        logger.warning(
+                            "[FloorManager] 拦截back-to-back指定: %s 刚发过言，不能立即再次指定",
+                            agent_name,
+                        )
+                        agent_name = self._smart_fallback_speaker()
+                        if agent_name and agent_name != last_substantive:
+                            designated = self._agent_to_display_name.get(agent_name, agent_name)
+                            logger.info("[FloorManager] back-to-back已重定向至: %s (display=%s)", agent_name, designated)
+                        else:
+                            # 无可选fallback，放弃指定让selector自行决定
+                            designated = None
+                            agent_name = ""
+                    if designated and source == "moderator" and agent_name in self.human_names:
                         self._set_designated_speaker(agent_name)
                         immediate_human_request = agent_name
                         immediate_human_request_reason = "moderator_designated_human"

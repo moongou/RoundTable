@@ -38,10 +38,10 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 0. 每个新话题开场必须先由老师发言，先交代话题来源、概念/问题定义与背景争议中的基本情况，再点名
 0.1 首轮阶段（老师开场 + 每位同学首次发言）禁止“上一位同学说得对”等互引式表达
 1. **人类学生是讨论的绝对核心**（占讨论重要性30%-50%），所有讨论应以人类学生的观点为中心展开
-2. 人类学生发言后，不一定每次都要老师立即点评；可以先让别的同学直接回应、补充、追问，老师主要负责串联、点名和拉回主题
+2. 人类学生发言后，至少一半轮次要由老师立即肯定、支持式点评；其余轮次可让虚拟同学直接回应、补充、追问，老师负责串联、点名和拉回主题
 2.1 老师的主持要简短，很多时候一句肯定或一句追问就够了，不要长篇讲评
-3. 一场 10 分钟左右的讨论里，老师一般要通过**明确点名**把人类学生安排到5到8次发言，默认目标约6到7次；如果人类学生是通过举手获得发言，也计入这5到8次
-3.1 老师开场后，通常先让1到2位非人类参与者铺垫，再开始第一次**明确点名**人类学生发言；真人学生必须在开场后的前3分钟内获得第一次发言机会
+3. 一场常规讨论里，老师一般要通过**明确点名**把人类学生安排到5到7次发言，默认目标约6次；如果人类学生积极举手，可适当放宽
+3.1 老师开场后，通常先让1到2位非人类参与者铺垫，再开始第一次**明确点名**人类学生发言；真人学生必须在开场后的前2分钟内获得第一次发言机会
 3.2 在达到建议上限前，人类学生的频率可以稍高；达到建议上限后，除非老师明确点名、同学明确把话题交给真人、或人类学生主动举手获准，一般不要继续主动安排
 3.3 如果人类学生已经多次主动举手，说明其参与意愿很强，此时可以放宽到5到10次甚至更多发言，并相应推迟收尾时机
 3.4 除“人类学生主动举手并获准”外，禁止无指向地直接把下一轮给人类学生；必须在最近语境中出现老师/同学/思想家对人类学生的明确指向（点名发言或点名回应）
@@ -289,10 +289,10 @@ def create_discussion_team(
     base_first_human_invite_after_turns = 2
     forced_first_human_after_turns = 3
     base_human_reinvite_gap = 3  # Minimum gap between human turns for even distribution
-    moderator_soft_cap_ratio = 0.30
+    moderator_soft_cap_ratio = 0.40
     if humans:
         human_turn_min_target = 5
-        human_turn_soft_cap = max(human_turn_min_target, min(8, round(nominal_max_turns / 3)))
+        human_turn_soft_cap = max(human_turn_min_target, min(7, round(nominal_max_turns / 3)))
         preferred_human_turn_target = max(
             human_turn_min_target,
             min(human_turn_soft_cap, round(nominal_max_turns * 0.27)),
@@ -444,6 +444,16 @@ def create_discussion_team(
                 return non_human[0]
             return None
 
+        def classmate_response_candidate() -> Optional[str]:
+            non_human = [
+                name
+                for name in non_human_continuation_candidates()
+                if name not in thinker_name_set
+            ]
+            if non_human:
+                return non_human[0]
+            return None
+
         def coverage_gap_candidate() -> Optional[str]:
             if unspoken_thinkers:
                 return unspoken_thinkers[0]
@@ -474,15 +484,18 @@ def create_discussion_team(
             and since_human >= adaptive_gap
         )
 
-        # ── 优先级2：用户刚发言后，优先允许同伴自然接话，老师不必每次都立即点评 ──
+        # ── 优先级2：用户刚发言后，至少一半机会由老师立即肯定式点评 ──
         if last_source in human_name_set:
             if first_closing_seen is not None and first_closing_seen <= 1:
                 logger.info("[TurnScheduler] 收尾征询后的真人补充，回到老师完成串联")
                 return moderator.name
-            candidate = coverage_gap_candidate()
+            if human_turn_count % 2 == 1 and last_source != moderator.name:
+                logger.info("[TurnScheduler] 用户 %s 刚发言，本轮回到老师点评", last_source)
+                return moderator.name
+            candidate = classmate_response_candidate()
             if candidate and candidate != moderator.name:
                 logger.info(
-                    "[TurnScheduler] 用户 %s 刚发言，优先补齐未发言参与者: %s",
+                    "[TurnScheduler] 用户 %s 刚发言，让虚拟同学立即回应: %s",
                     last_source,
                     candidate,
                 )
