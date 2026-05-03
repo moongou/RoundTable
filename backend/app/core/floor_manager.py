@@ -102,7 +102,17 @@ class FloorManager:
     _FIRST_HUMAN_MAX_WAIT_SEC = 120.0
     _HUMAN_TURN_MIN_TARGET = 5
     _NON_HUMAN_AI_MAX_SENTENCES = 3
-    _NON_HUMAN_AI_MAX_CHARS = 160
+    # ~200 中文字 ≈ 35-40 秒 TTS（中文播报约 5-6 字/秒），符合规则五的 40 秒上限。
+    _NON_HUMAN_AI_MAX_CHARS = 200
+    # 规则 14：老师发言总占比软目标 30-40%，超出 0.45 后告警。
+    _MODERATOR_TURN_SHARE_TARGET_MIN = 0.30
+    _MODERATOR_TURN_SHARE_TARGET_MAX = 0.40
+    _MODERATOR_TURN_SHARE_WARN_OVER = 0.45
+    # 规则 11：老师点名占比软目标约 80%。
+    _MODERATOR_NOMINATION_SHARE_TARGET = 0.80
+    _MODERATOR_NOMINATION_SHARE_WARN_BELOW = 0.65
+    # 规则 7：真人发言后老师立即接住的最低占比软目标。
+    _POST_HUMAN_MODERATOR_FEEDBACK_TARGET = 0.50
     _MODERATOR_END_MARKERS = (
         "讨论结束",
         "就到这里",
@@ -209,6 +219,16 @@ class FloorManager:
         self._pending_human_input_reason = "normal"
         self._human_turn_idle_notice_sent = False
 
+        # 规则 7/11/13/14：发言/点名分布度量。
+        self._substantive_turn_count: int = 0
+        self._moderator_substantive_turn_count: int = 0
+        self._human_completed_turn_count: int = 0
+        self._immediate_post_human_feedback_moderator: int = 0
+        self._immediate_post_human_feedback_peer: int = 0
+        self._post_human_feedback_pending: bool = False
+        self._moderator_nomination_count: int = 0
+        self._peer_nomination_count: int = 0
+
         # Selector stall recovery: track consecutive LLM selector failures
         self._consecutive_selector_stalls = 0
         self._max_consecutive_selector_stalls = 1
@@ -271,6 +291,7 @@ class FloorManager:
         human_turn_count = sum(
             self._speaker_message_count.get(name, 0) for name in self.human_names
         )
+        metrics = self.discussion_metrics()
         return {
             "dropped_ai_stream_while_human_waiting": self._dropped_ai_stream_while_human_waiting,
             "dropped_ai_message_while_human_waiting": self._dropped_ai_message_while_human_waiting,
@@ -278,6 +299,61 @@ class FloorManager:
             "spoken_display_names": spoken_display_names,
             "missing_ai_display_names": missing_ai_display_names,
             "coverage_ok": not missing_ai_display_names and human_turn_count > 0,
+            "discussion_metrics": metrics,
+        }
+
+    def discussion_metrics(self) -> dict[str, Any]:
+        """规则 7/11/13/14：返回老师占比、点名分布、点评率等度量数据。"""
+        total_turns = self._substantive_turn_count
+        moderator_turns = self._moderator_substantive_turn_count
+        moderator_share = (moderator_turns / total_turns) if total_turns > 0 else 0.0
+
+        total_nominations = self._moderator_nomination_count + self._peer_nomination_count
+        moderator_nomination_share = (
+            self._moderator_nomination_count / total_nominations
+        ) if total_nominations > 0 else 0.0
+
+        total_post_human = self._human_completed_turn_count
+        moderator_feedback_rate = (
+            self._immediate_post_human_feedback_moderator / total_post_human
+        ) if total_post_human > 0 else 0.0
+
+        warnings: list[str] = []
+        if total_turns >= 6 and moderator_share > self._MODERATOR_TURN_SHARE_WARN_OVER:
+            warnings.append(
+                f"moderator_turn_share={moderator_share:.2f}超出建议范围(0.30-0.40)"
+            )
+        if total_nominations >= 4 and moderator_nomination_share < self._MODERATOR_NOMINATION_SHARE_WARN_BELOW:
+            warnings.append(
+                f"moderator_nomination_share={moderator_nomination_share:.2f}偏低(目标≈0.80)"
+            )
+        if total_post_human >= 2 and moderator_feedback_rate < self._POST_HUMAN_MODERATOR_FEEDBACK_TARGET:
+            warnings.append(
+                f"post_human_moderator_feedback_rate={moderator_feedback_rate:.2f}偏低(目标≥0.50)"
+            )
+        missing_count = sum(
+            1
+            for name in self.ai_names
+            if name != "moderator" and self._speaker_message_count.get(name, 0) <= 0
+        )
+        if total_turns >= 8 and missing_count > 0:
+            warnings.append(f"missing_ai_count={missing_count}(规则13要求每位虚拟角色至少1次发言)")
+
+        return {
+            "total_substantive_turns": total_turns,
+            "moderator_turn_share": round(moderator_share, 3),
+            "moderator_turn_share_target_range": [
+                self._MODERATOR_TURN_SHARE_TARGET_MIN,
+                self._MODERATOR_TURN_SHARE_TARGET_MAX,
+            ],
+            "moderator_nomination_count": self._moderator_nomination_count,
+            "peer_nomination_count": self._peer_nomination_count,
+            "moderator_nomination_share": round(moderator_nomination_share, 3),
+            "human_completed_turn_count": total_post_human,
+            "post_human_moderator_feedback_count": self._immediate_post_human_feedback_moderator,
+            "post_human_peer_feedback_count": self._immediate_post_human_feedback_peer,
+            "post_human_moderator_feedback_rate": round(moderator_feedback_rate, 3),
+            "warnings": warnings,
         }
 
     async def _wait_until_resumed(self) -> None:
@@ -2729,6 +2805,11 @@ class FloorManager:
                 if designated:
                     agent_name = self._display_name_to_agent.get(designated, designated)
                     logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
+                    # 规则 11：统计老师 vs 同学点名次数。
+                    if source == "moderator":
+                        self._moderator_nomination_count += 1
+                    elif source in self.ai_names:
+                        self._peer_nomination_count += 1
                     # 防止指定刚发过言的人（back-to-back），与现实讨论场景不符且会导致流程停滞
                     last_substantive = self._last_substantive_agent_speaker()
                     if agent_name == last_substantive:
@@ -2796,6 +2877,20 @@ class FloorManager:
                 self._recent_display_speakers.append(display_source)
                 if len(self._recent_display_speakers) > 16:
                     self._recent_display_speakers = self._recent_display_speakers[-16:]
+                # 规则 14: 老师占比；规则 7: 人后馈馈领。
+                self._substantive_turn_count += 1
+                if source == "moderator":
+                    self._moderator_substantive_turn_count += 1
+                if (
+                    self._post_human_feedback_pending
+                    and source not in self.human_names
+                    and source != "系统"
+                ):
+                    if source == "moderator":
+                        self._immediate_post_human_feedback_moderator += 1
+                    else:
+                        self._immediate_post_human_feedback_peer += 1
+                    self._post_human_feedback_pending = False
             await self._record_turn_summary(source, content)
             if (
                 source == "moderator"
@@ -2823,6 +2918,9 @@ class FloorManager:
                 self._moderator_stream_sentence_emitted = 0
             if source in self.human_names:
                 self._last_human_input_request_id = ""
+                # 规则 7：记录人后馈馈领待补。
+                self._human_completed_turn_count += 1
+                self._post_human_feedback_pending = True
                 await self._set_state(FloorState.SELECTING_SPEAKER, reason="human_message_complete")
             return {
                 "event_type": "message",

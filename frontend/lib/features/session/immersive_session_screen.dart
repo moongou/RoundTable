@@ -262,12 +262,14 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool handApprovedToSpeak,
     required bool hasRaisedHand,
     String completedSpeaker = '',
+    int raiseHandCooldownTurns = 0,
   }) {
     return completedSpeaker.trim().isNotEmpty ||
         hasRaisedHand ||
         isMyTurn ||
         pendingHumanTurn ||
-        handApprovedToSpeak;
+        handApprovedToSpeak ||
+        raiseHandCooldownTurns > 0;
   }
 
   static bool shouldResetCompletedHumanTurnOnIncomingSpeech({
@@ -873,6 +875,9 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   _OpeningCueState _openingCueState = _OpeningCueState.preparing;
   DateTime? _openingReadyShownAt;
   bool _hasRaisedHand = false;
+  // 规则 3：用户发言结束后需要过一个轮次才能重新举手。
+  // 0 = 未开启冷却；>=1 = 还需等待 N 个非人轮次。
+  int _raiseHandCooldownTurns = 0;
   bool _isPaused = false;
   DateTime? _discussionStartedAt;
   DateTime? _discussionPausedAt;
@@ -3213,6 +3218,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             _currentSpeaker = speaker;
             _isMyTurn = isHuman && speaker == humanName;
             _hasRaisedHand = false;
+            // 需求3：用户发言后再过一个非人类轮次后再恢复举手按钮。
+            if (!isHuman && _raiseHandCooldownTurns > 0) {
+              _raiseHandCooldownTurns -= 1;
+            }
             _sttPartialText = '';
             if (_isMyTurn) {
               // 需求4：新一轮轮到我，解锁麦克风
@@ -3870,6 +3879,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _centerSpeaker = widget.humanName;
     });
     _commander.markHumanTurnCompleted();
+    _raiseHandCooldownTurns = 1;
     _cancelPendingHumanTurnGuard();
 
     // 字幕保留
@@ -4472,6 +4482,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       handApprovedToSpeak: _handApprovedToSpeak,
       hasRaisedHand: _hasRaisedHand,
       completedSpeaker: _completedHumanTurnSpeaker,
+      raiseHandCooldownTurns: _raiseHandCooldownTurns,
     )) {
       if (_isMyTurn || _pendingHumanTurn || _handApprovedToSpeak) {
         _showStatusToast('老师已经把这一轮发言留给你了，不需要重复举手');
@@ -5423,6 +5434,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           handApprovedToSpeak: _handApprovedToSpeak,
           hasRaisedHand: _hasRaisedHand,
           completedSpeaker: _completedHumanTurnSpeaker,
+          raiseHandCooldownTurns: _raiseHandCooldownTurns,
         );
     final showHumanTurnPromptCue =
         ImmersiveSessionScreen.shouldShowHumanTurnPromptCue(

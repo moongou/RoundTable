@@ -385,6 +385,67 @@ def test_floor_manager_pending_human_input_request_snapshot_returns_none_for_non
     assert snapshot is None
 
 
+def test_floor_manager_discussion_metrics_initial_state_is_zero() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+    metrics = floor_manager.discussion_metrics()
+    assert metrics['total_substantive_turns'] == 0
+    assert metrics['moderator_turn_share'] == 0.0
+    assert metrics['moderator_nomination_share'] == 0.0
+    assert metrics['post_human_moderator_feedback_rate'] == 0.0
+    assert metrics['warnings'] == []
+
+
+def test_floor_manager_discussion_metrics_tracks_shares_and_warnings() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+    # 模拟若干轮发言：老师占比超出 0.45 触发警告。
+    floor_manager._substantive_turn_count = 10
+    floor_manager._moderator_substantive_turn_count = 6
+    # 点名：老师 1 次、同学 4 次（同学占比 0.80，违反规则11）。
+    floor_manager._moderator_nomination_count = 1
+    floor_manager._peer_nomination_count = 4
+    # 真人发言后老师立即接住的比例为 0/3。
+    floor_manager._human_completed_turn_count = 3
+    floor_manager._immediate_post_human_feedback_moderator = 0
+    floor_manager._immediate_post_human_feedback_peer = 1
+
+    metrics = floor_manager.discussion_metrics()
+    assert metrics['moderator_turn_share'] == 0.6
+    assert metrics['moderator_nomination_share'] == 0.2
+    assert metrics['post_human_moderator_feedback_rate'] == 0.0
+    warnings_text = '\n'.join(metrics['warnings'])
+    assert 'moderator_turn_share' in warnings_text
+    assert 'moderator_nomination_share' in warnings_text
+    assert 'post_human_moderator_feedback_rate' in warnings_text
+
+
+def test_floor_manager_diagnostics_includes_discussion_metrics() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=SimpleNamespace(),
+    )
+    diag = floor_manager.diagnostics()
+    assert 'discussion_metrics' in diag
+    assert diag['discussion_metrics']['total_substantive_turns'] == 0
+
+
+def test_floor_manager_non_human_ai_max_chars_supports_40_second_envelope() -> None:
+    # 规则5：非真人单轮上限提升到约 40 秒，对应 ~200 中文字符。
+    assert FloorManager._NON_HUMAN_AI_MAX_CHARS >= 180
+    assert FloorManager._NON_HUMAN_AI_MAX_CHARS <= 240
+
+
 def test_sanitize_all_references_rewrites_first_turn_and_self_reference() -> None:
     floor_manager = FloorManager(
         team=_TeamStub(),

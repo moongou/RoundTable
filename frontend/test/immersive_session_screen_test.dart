@@ -340,6 +340,30 @@ void main() {
     );
   });
 
+  test('raise hand stays dim during one-turn cooldown after user finished', () {
+    // 规则3：用户发言结束后再过一个非人类轮次后举手按钮才可重新启用。
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+        raiseHandCooldownTurns: 1,
+      ),
+      isTrue,
+    );
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+        raiseHandCooldownTurns: 0,
+      ),
+      isFalse,
+    );
+  });
+
   test('inter-speaker pause only applies between AI speakers', () {
     expect(
       ImmersiveSessionScreen.shouldInsertInterSpeakerPause(
