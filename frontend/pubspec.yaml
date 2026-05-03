@@ -1,7 +1,7 @@
 name: roundtable
 description: 圆桌思辨 - 小学生AI引导思辨讨论平台
 publish_to: 'none'
-version: 1.0.10
+version: 1.0.11
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

@@ -7,6 +7,25 @@
 
 ---
 
+## v1.0.11 - 2026-05-04
+
+### Bug 修复
+
+- 修复“暂停后继续只重读当前字幕并卡住”的核心链路：恢复时后端会重同步挂起的真人输入请求，前端可正确恢复真人回合与麦克风准备状态。
+- 修复停滞恢复仅提示“已指定真人继续发言”但未真正触发真人回合的问题：当 fallback 指向真人时，立即发出 `human_input_requested`，确保讨论按正常流程续行。
+
+### 规则加固
+
+- 规则 3：新增“真人发言结束后需再经过 1 个非真人轮次才能再次举手”的前端冷却守卫，避免连续抢麦。
+- 规则 5：非真人单轮发言长度上限从 160 字提升到 200 字，更贴近 40 秒以内播报窗口。
+- 规则 7/11/13/14：新增后端 `discussion_metrics` 指标，持续跟踪老师发言占比、老师点名占比、真人发言后老师即时点评率、未发言虚拟角色等，并在偏离目标时输出告警。
+
+### 验证
+
+- 后端全量测试：`backend/.venv/bin/python -m pytest backend/tests -q --timeout=30 -p no:cacheprovider`（202 passed）。
+- 前端会话测试：`flutter test --no-pub test/immersive_session_screen_test.dart`（38 passed）。
+- Flutter Web 已重建并同步到 `backend/static`。
+
 ## v1.0.10 - 2026-05-03
 
 ### Bug 修复
