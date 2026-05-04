@@ -5,6 +5,18 @@ import 'package:roundtable/models/discussion_models.dart';
 import 'package:roundtable/services/saved_topics_store.dart';
 
 void main() {
+  test('home dev panel entry only appears on localhost hosts', () {
+    expect(shouldShowHomeDevPanelEntry('localhost'), isTrue);
+    expect(shouldShowHomeDevPanelEntry('127.0.0.1'), isTrue);
+    expect(shouldShowHomeDevPanelEntry('::1'), isTrue);
+    expect(shouldShowHomeDevPanelEntry('rainforgrain.top'), isFalse);
+    expect(shouldShowHomeDevPanelEntry('39.97.253.10'), isFalse);
+  });
+
+  test('home dev panel points to localhost 8888', () {
+    expect(resolveHomeDevPanelUrl(), 'http://localhost:8888');
+  });
+
   test('home ASR keeps direct capswriter URL', () {
     expect(
       resolveHomeAsrProviderUrl(

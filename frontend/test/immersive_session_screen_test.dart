@@ -12,6 +12,23 @@ void main() {
     );
   });
 
+  test(
+      'ready prompt in auto mode keeps mic on standby instead of auto-starting',
+      () {
+    expect(
+      ImmersiveSessionScreen.humanTurnReadyPrompt(
+        humanName: '豆苗',
+        hotkeyLabel: 'Alt',
+        autoOpenMic: true,
+        isPushToTalk: false,
+      ),
+      allOf(
+        contains('麦克风已经准备好'),
+        isNot(contains('自动开启')),
+      ),
+    );
+  });
+
   test('session voice defaults stay on funasr and edge_tts during boot', () {
     expect(
       ImmersiveSessionScreen.defaultAsrProvider,

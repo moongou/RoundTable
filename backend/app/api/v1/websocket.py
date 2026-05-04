@@ -547,7 +547,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         floor_manager.set_display_name_map(agent_display_map)
 
         # 注册回调，将事件推送到 WebSocket
-        async def on_message(source, content, msg_type):
+        async def on_message(source, content, msg_type, tts_text=""):
             # 需求8：暂停期间丢弃 AI/角色消息，避免恢复后出现堆积重放与错乱
             if floor_manager is not None and getattr(floor_manager, "_paused", False):
                 if msg_type != "system":
@@ -557,14 +557,17 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     )
                     return
             display_source = agent_display_map.get(source, source)
+            payload = {
+                "source": display_source,
+                "agent_source": source,
+                "content": content,
+                "msg_type": msg_type,
+            }
+            if (tts_text or "").strip():
+                payload["tts_text"] = tts_text
             await send_event(
                 "message",
-                {
-                    "source": display_source,
-                    "agent_source": source,
-                    "content": content,
-                    "msg_type": msg_type,
-                },
+                payload,
             )
 
         async def on_turn_change(speaker, is_human):

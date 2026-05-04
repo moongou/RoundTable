@@ -7,6 +7,23 @@
 
 ---
 
+## v1.0.12 - 2026-05-04
+
+### Bug 修复
+
+- 修复主持人开场过短且过早把话筒交给真人的问题：后端现在会把老师首轮发言强制补成带话题背景的完整开场，并要求至少先经过 1 位非真人暖场后，才允许第一次明确点名真人发言。
+- 修复“未明确点名就自动开麦”与 ASR 空结果/错误后反复亮麦的问题：前端把自动开麦改为“麦克风已准备好”的待命态，用户需自己开始说话，不再被系统反复自动拉起录音。
+- 修复开场字幕/语音被截断的问题：当流式 TTS 只先播出前半段时，后端现在会继续通过 websocket 透传消息尾段 `tts_text`，前端和历史记录都能补齐剩余老师台词，不再出现“只有首句、后半段被吞”的静默跳句。
+- 修复 `siliconflow_tts` / CosyVoice2 的默认音色回退错误：OpenAI 兼容 TTS provider 在未显式传入音色、或误传 `alloy` 时，会优先使用 provider 自身配置的默认音色，避免启动预热和运行时合成再向上游发出无效 voice。
+- 调整首页“后台服务”入口：本地开发环境仍保留入口，但跳转改为 `localhost:8888`；云端产品页默认隐藏该入口，避免普通用户看到运维入口。
+
+### 验证
+
+- 后端守卫与链路测试：`backend/.venv/bin/python -m pytest backend/tests/test_acceptance_guards.py -k 'test_floor_manager_rewrites_short_opening_into_topic_context or test_floor_manager_blocks_opening_human_handoff_before_warmup or test_floor_manager_forces_first_human_invitation_after_two_warmup_turns or test_floor_manager_message_callback_receives_streaming_tail_tts'`。
+- TTS 默认音色回退测试：`backend/.venv/bin/python -m pytest backend/tests/test_voice_factory.py -k 'test_create_siliconflow_tts_provider_uses_openai_compatible_client or test_openai_tts_provider_uses_configured_default_voice_when_voice_is_omitted or test_openai_tts_provider_replaces_alloy_with_provider_default_voice'`。
+- 前端测试：`flutter test --no-pub test/immersive_session_screen_test.dart test/immersive_home_screen_test.dart`。
+- Flutter Web 已重建并同步到 `backend/static`。
+
 ## v1.0.11 - 2026-05-04
 
 ### Bug 修复

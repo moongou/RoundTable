@@ -99,6 +99,8 @@ class FloorManager:
     _MODERATOR_REGULAR_SENTENCE_LIMIT = 1
     _MODERATOR_INVITE_SENTENCE_LIMIT = 2
     _MODERATOR_CLOSING_SENTENCE_LIMIT = 2
+    _MODERATOR_OPENING_SENTENCE_LIMIT = 5
+    _FIRST_HUMAN_MIN_WARMUP_TURNS = 1
     _FIRST_HUMAN_MAX_WAIT_SEC = 120.0
     _HUMAN_TURN_MIN_TARGET = 5
     _NON_HUMAN_AI_MAX_SENTENCES = 3
@@ -400,12 +402,26 @@ class FloorManager:
 
     def _build_moderator_opening_baseline(self) -> str:
         focus = self._topic_focus_label()
+        topic_lines = [line.strip() for line in (self._current_topic or "").splitlines() if line.strip()]
+        detail = topic_lines[1] if len(topic_lines) >= 2 else ""
+        detail = re.sub(r"^(背景|情境|提示|思考题|讨论题)[:：]\s*", "", detail)
+        detail = detail.strip().rstrip("。！？!?")
+        if len(detail) > 48:
+            detail = detail[:48].rstrip("，,；;、 ") + "…"
+
+        opening_parts = ["同学们好！我是李老师。"]
         if focus:
-            return (
-                f"今天这个话题来自生活里常见的真实讨论：{focus}，"
-                "我们先把基本情况和核心争议说清楚，再请大家发言。"
+            opening_parts.append(f"今天我们来聊聊“{focus}”。")
+        else:
+            opening_parts.append("今天我们来聊一个生活里常会碰到的问题。")
+        if detail:
+            opening_parts.append(f"事情大概是这样：{detail}。")
+        else:
+            opening_parts.append(
+                "这个问题来自生活里常见的真实讨论，我们要先弄清楚它到底在问什么、难点又在哪里。"
             )
-        return "今天这个问题来自大家日常会遇到的真实讨论，我们先把基本情况和核心争议说清楚，再请大家发言。"
+        opening_parts.append("我们先把基本情况和争议点说清楚，再请同学们轮流发言。")
+        return "".join(opening_parts)
 
     def _sanitize_opening_reference(self, source: str, content: str) -> str:
         """首轮发言兜底规整：避免开场阶段出现不当引用。"""
@@ -427,6 +443,16 @@ class FloorManager:
             ).strip()
             text = re.sub(
                 r"(刚才|前面|上一位|某位同学|有同学).*?(说|提到|讲到)[^。！？!?]*[。！？!?]",
+                "",
+                text,
+            ).strip()
+            text = re.sub(
+                r"(?:请|想问问|问问|想听听|听听|有请|邀请|轮到|接下来|交给|先请|先让)[^。！？!?]*(?:发言|怎么看|来说|来谈|说说|谈谈|讲讲|分享|回应|补充)[^。！？!?]*[。！？!?]?",
+                "",
+                text,
+            ).strip()
+            text = re.sub(
+                r"[^。！？!?]*(?:同学|先生)?[，,:：]\s*你怎么看[^。！？!?]*[。！？!?]?",
                 "",
                 text,
             ).strip()
@@ -463,7 +489,7 @@ class FloorManager:
         if not text:
             return baseline
         if self._has_moderator_invitation_intent(text):
-            return f"{baseline}{text}"
+            return baseline
         if len(text) < 36 or not self._moderator_opening_has_context(text):
             return baseline
         return text
@@ -743,6 +769,11 @@ class FloorManager:
             return False
         return (time.monotonic() - self._discussion_started_mono) >= self._FIRST_HUMAN_MAX_WAIT_SEC
 
+    def _should_delay_first_human_handoff(self) -> bool:
+        if not self.human_names or self._has_human_spoken():
+            return False
+        return self._non_human_turn_count_before_first_human() < self._FIRST_HUMAN_MIN_WARMUP_TURNS
+
     def _enforce_expected_ai_speaker(self, source: str) -> bool:
         expected = self._expected_next_ai_speaker
         if not expected or source not in self.ai_names:
@@ -979,6 +1010,8 @@ class FloorManager:
             return ""
         if is_final_closing:
             limit = self._MODERATOR_CLOSING_SENTENCE_LIMIT
+        elif self._is_discussion_opening_message("moderator"):
+            limit = self._MODERATOR_OPENING_SENTENCE_LIMIT
         elif self._has_moderator_invitation_intent(value):
             limit = self._MODERATOR_INVITE_SENTENCE_LIMIT
         else:
@@ -2088,7 +2121,7 @@ class FloorManager:
         }
 
     def on_message(self, callback: Callable) -> "FloorManager":
-        """注册消息回调。callback(source, content, msg_type)"""
+        """注册消息回调。callback(source, content, msg_type[, tts_text])"""
         self._on_message = callback
         return self
 
@@ -2174,11 +2207,39 @@ class FloorManager:
             return ""
         return (queued_text or "").strip()
 
-    async def _emit_message(self, source: str, content: str, msg_type: str = "text") -> None:
+    async def _emit_message(
+        self,
+        source: str,
+        content: str,
+        msg_type: str = "text",
+        *,
+        tts_text: str = "",
+    ) -> None:
         """发送消息事件。"""
         self._touch_progress("emit_message")
         if self._on_message:
-            await self._on_message(source, content, msg_type)
+            callback = self._on_message
+            forwarded_tts_text = (tts_text or "").strip()
+            if not forwarded_tts_text and msg_type != "system" and source != "系统":
+                forwarded_tts_text = (content or "").strip()
+
+            try:
+                signature = inspect.signature(callback)
+                params = list(signature.parameters.values())
+                accepts_tts_text = any(
+                    param.kind in (
+                        inspect.Parameter.VAR_POSITIONAL,
+                        inspect.Parameter.VAR_KEYWORD,
+                    )
+                    for param in params
+                ) or len(signature.parameters) >= 4
+            except (TypeError, ValueError):
+                accepts_tts_text = True
+
+            if accepts_tts_text:
+                await callback(source, content, msg_type, forwarded_tts_text)
+            else:
+                await callback(source, content, msg_type)
 
     async def _emit_turn_change(self, speaker: str, is_human: bool) -> None:
         """发送轮次变更事件。"""
@@ -2804,15 +2865,24 @@ class FloorManager:
                 designated = designated or parse_speaker_designation(content, all_display_names)
                 if designated:
                     agent_name = self._display_name_to_agent.get(designated, designated)
-                    logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
-                    # 规则 11：统计老师 vs 同学点名次数。
-                    if source == "moderator":
-                        self._moderator_nomination_count += 1
-                    elif source in self.ai_names:
-                        self._peer_nomination_count += 1
+                    if source == "moderator" and agent_name in self.human_names and self._should_delay_first_human_handoff():
+                        logger.warning(
+                            "[FloorManager] 首轮真人暖场不足，忽略主持人过早点名: target=%s non_human_turns=%s",
+                            agent_name,
+                            self._non_human_turn_count_before_first_human(),
+                        )
+                        designated = None
+                        agent_name = ""
+                    if designated:
+                        logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
+                        # 规则 11：统计老师 vs 同学点名次数。
+                        if source == "moderator":
+                            self._moderator_nomination_count += 1
+                        elif source in self.ai_names:
+                            self._peer_nomination_count += 1
                     # 防止指定刚发过言的人（back-to-back），与现实讨论场景不符且会导致流程停滞
                     last_substantive = self._last_substantive_agent_speaker()
-                    if agent_name == last_substantive:
+                    if designated and agent_name == last_substantive:
                         logger.warning(
                             "[FloorManager] 拦截back-to-back指定: %s 刚发过言，不能立即再次指定",
                             agent_name,
@@ -2871,7 +2941,7 @@ class FloorManager:
                 else:
                     tts_text = content
 
-            await self._emit_message(source, content, "text")
+            await self._emit_message(source, content, "text", tts_text=tts_text)
             if not is_non_substantive_turn(content):
                 self._speaker_message_count[source] = self._speaker_message_count.get(source, 0) + 1
                 self._recent_display_speakers.append(display_source)

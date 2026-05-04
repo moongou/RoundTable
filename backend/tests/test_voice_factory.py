@@ -3,6 +3,7 @@ import struct
 
 import pytest
 import websockets
+import httpx
 
 from app.config import settings
 from app.voice.factory import create_asr_provider, create_tts_provider
@@ -10,6 +11,31 @@ from app.voice.gateway import GatewayTTSProvider
 from app.voice.openai_tts import OpenAITTSProvider
 from app.voice.openai_whisper import OpenAIWhisperProvider
 from app.voice.standalone_ws_asr import StandaloneWsAsrProvider
+
+
+class _OpenAITtsClientStub:
+    def __init__(self, *, captured_payloads: list[dict], response: httpx.Response | None = None, **_: object) -> None:
+        self._captured_payloads = captured_payloads
+        self._response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url: str, json: dict, headers: dict) -> httpx.Response:
+        request = httpx.Request("POST", url)
+        self._captured_payloads.append(
+            {
+                "url": url,
+                "json": dict(json),
+                "headers": dict(headers),
+            }
+        )
+        if self._response is not None:
+            return self._response
+        return httpx.Response(200, request=request, content=b"ID3fake-mp3")
 
 
 def test_create_siliconflow_asr_provider_uses_openai_compatible_client() -> None:
@@ -38,6 +64,54 @@ def test_create_siliconflow_tts_provider_uses_openai_compatible_client() -> None
     assert provider.api_key == "sf-tts-key"
     assert provider.model == "FunAudioLLM/CosyVoice2-0.5B"
     assert provider.default_voice == "FunAudioLLM/CosyVoice2-0.5B:alex"
+
+
+@pytest.mark.asyncio
+async def test_openai_tts_provider_uses_configured_default_voice_when_voice_is_omitted(monkeypatch) -> None:
+    captured_payloads: list[dict] = []
+
+    monkeypatch.setattr(
+        "app.voice.openai_tts.httpx.AsyncClient",
+        lambda *args, **kwargs: _OpenAITtsClientStub(
+            captured_payloads=captured_payloads,
+            **kwargs,
+        ),
+    )
+
+    provider = OpenAITTSProvider(
+        base_url="https://api.siliconflow.cn/v1",
+        api_key="sf-tts-key",
+        model="FunAudioLLM/CosyVoice2-0.5B",
+        default_voice="FunAudioLLM/CosyVoice2-0.5B:alex",
+    )
+
+    await provider.synthesize("你好")
+
+    assert captured_payloads[-1]["json"]["voice"] == "FunAudioLLM/CosyVoice2-0.5B:alex"
+
+
+@pytest.mark.asyncio
+async def test_openai_tts_provider_replaces_alloy_with_provider_default_voice(monkeypatch) -> None:
+    captured_payloads: list[dict] = []
+
+    monkeypatch.setattr(
+        "app.voice.openai_tts.httpx.AsyncClient",
+        lambda *args, **kwargs: _OpenAITtsClientStub(
+            captured_payloads=captured_payloads,
+            **kwargs,
+        ),
+    )
+
+    provider = OpenAITTSProvider(
+        base_url="https://api.siliconflow.cn/v1",
+        api_key="sf-tts-key",
+        model="FunAudioLLM/CosyVoice2-0.5B",
+        default_voice="FunAudioLLM/CosyVoice2-0.5B:alex",
+    )
+
+    await provider.synthesize("你好", voice="alloy")
+
+    assert captured_payloads[-1]["json"]["voice"] == "FunAudioLLM/CosyVoice2-0.5B:alex"
 
 
 def test_create_openvoice_provider_uses_runtime_openvoice_url() -> None:

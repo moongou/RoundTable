@@ -1164,6 +1164,44 @@ async def test_floor_manager_streaming_tts_only_leaves_final_tail_for_message() 
 
 
 @pytest.mark.asyncio
+async def test_floor_manager_message_callback_receives_streaming_tail_tts() -> None:
+    captured: list[tuple[str, str, str, str]] = []
+
+    async def _collect_message(
+        source: str,
+        content: str,
+        msg_type: str,
+        tts_text: str,
+    ) -> None:
+        captured.append((source, content, msg_type, tts_text))
+
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.on_message(_collect_message)
+
+    await floor_manager._process_event(
+        ModelClientStreamingChunkEvent(
+            source='explorer',
+            content='先看规则。再想',
+        )
+    )
+    await floor_manager._process_event(
+        TextMessage(source='explorer', content='先看规则。再想一想。')
+    )
+
+    assert captured[-1] == (
+        'explorer',
+        '先看规则。再想一想。',
+        'text',
+        '再想一想。',
+    )
+
+
+@pytest.mark.asyncio
 async def test_floor_manager_drops_meta_reasoning_stream_segments() -> None:
     floor_manager = FloorManager(
         team=_TeamStub(),
@@ -1787,6 +1825,64 @@ async def test_floor_manager_forces_first_human_invitation_after_two_warmup_turn
     assert result['event_type'] == 'human_input_requested'
     assert result['data']['reason'] == 'moderator_designated_human'
     assert any('麦克风交给豆苗' in content for _source, content, _type in emitted_messages)
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_rewrites_short_opening_into_topic_context() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[
+            SimpleNamespace(name='moderator'),
+            SimpleNamespace(name='explorer'),
+        ],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager._current_topic = '树木有生命权吗\n为了建学校，要不要砍掉校园旁边的一片老树林？'
+
+    result = await floor_manager._process_event(
+        TextMessage(source='moderator', content='同学们好！我是李老师。')
+    )
+
+    assert result is not None
+    assert result['event_type'] == 'message'
+    content = result['data']['content']
+    assert '今天我们来聊聊' in content
+    assert '老树林' in content
+    assert '先把基本情况和争议点说清楚' in content
+
+
+@pytest.mark.asyncio
+async def test_floor_manager_blocks_opening_human_handoff_before_warmup() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[
+            SimpleNamespace(name='moderator'),
+            SimpleNamespace(name='explorer'),
+        ],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager._current_topic = '树木有生命权吗\n为了建学校，要不要砍掉校园旁边的一片老树林？'
+
+    result = await floor_manager._process_event(
+        TextMessage(source='moderator', content='豆苗，你怎么看？')
+    )
+
+    assert result is not None
+    assert result['event_type'] == 'message'
+    content = result['data']['content']
+    assert '豆苗' not in content
+    assert '今天我们来聊聊' in content
+    assert floor_manager._pending_human_input_reason == 'normal'
+    assert floor_manager._last_human_input_requested_speaker == ''
 
 
 @pytest.mark.asyncio

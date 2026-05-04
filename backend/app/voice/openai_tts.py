@@ -33,9 +33,15 @@ class OpenAITTSProvider(TTSProvider):
     async def synthesize(
         self,
         text: str,
-        voice: str = "alloy",
+        voice: str | None = None,
         speed: float = 1.0,
     ) -> bytes:
+        default_voice = (self.default_voice or "").strip() or "alloy"
+        requested_voice = (voice or "").strip()
+        resolved_voice = requested_voice or default_voice
+        if requested_voice.lower() in {"alloy", "default"} and default_voice != requested_voice:
+            resolved_voice = default_voice
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -44,7 +50,7 @@ class OpenAITTSProvider(TTSProvider):
         payload = {
             "model": self.model,
             "input": text,
-            "voice": voice or self.default_voice,
+            "voice": resolved_voice,
             "response_format": "mp3",
         }
         if speed != 1.0:
@@ -62,7 +68,7 @@ class OpenAITTSProvider(TTSProvider):
                     response.status_code,
                     response.text[:500],
                     self.model,
-                    voice or self.default_voice,
+                    resolved_voice,
                     len(text),
                 )
             response.raise_for_status()

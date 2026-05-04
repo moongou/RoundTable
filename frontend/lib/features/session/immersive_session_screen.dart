@@ -132,6 +132,22 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     return true;
   }
 
+  static String humanTurnReadyPrompt({
+    required String humanName,
+    required String hotkeyLabel,
+    required bool autoOpenMic,
+    required bool isPushToTalk,
+  }) {
+    final teacherCue = '李老师：$humanName，请来谈谈这个话题吧。';
+    if (autoOpenMic) {
+      return '$teacherCue 麦克风已经准备好，等你准备好后再开始说，也可按 $hotkeyLabel 控制';
+    }
+    if (isPushToTalk) {
+      return '$teacherCue 按住 $hotkeyLabel 或点击“讲话”开始';
+    }
+    return '$teacherCue 按 $hotkeyLabel 或点击“讲话”开始/结束';
+  }
+
   static Set<LogicalKeyboardKey> micHotkeyLogicalKeys(String? hotkeyId) {
     switch (hotkeyId?.trim()) {
       case 'left_alt':
@@ -1923,15 +1939,12 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   bool get _usesHoldToSpeak => _isPushToTalk && !_autoOpenMic;
 
   String _readyToSpeakStatusText() {
-    final hotkey = _micHotkeyLabel;
-    final teacherCue = '李老师：${widget.humanName}，请来谈谈这个话题吧。';
-    if (_autoOpenMic) {
-      return '$teacherCue 麦克风会自动开启，也可按 $hotkey 控制';
-    }
-    if (_isPushToTalk) {
-      return '$teacherCue 按住 $hotkey 或点击“讲话”开始';
-    }
-    return '$teacherCue 按 $hotkey 或点击“讲话”开始/结束';
+    return ImmersiveSessionScreen.humanTurnReadyPrompt(
+      humanName: widget.humanName,
+      hotkeyLabel: _micHotkeyLabel,
+      autoOpenMic: _autoOpenMic,
+      isPushToTalk: _isPushToTalk,
+    );
   }
 
   void _cancelAutoMicStart() {
@@ -1958,7 +1971,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       if (!(_isMyTurn || _handApprovedToSpeak) || _hasStartedSpeechThisTurn) {
         return;
       }
-      _onPttStart(startedFromHoldCtrl: false);
+      _keyboardFocusNode.requestFocus();
+      final readyText = _readyToSpeakStatusText();
+      if (_statusText != readyText) {
+        setState(() {
+          _statusText = readyText;
+        });
+      }
     });
   }
 

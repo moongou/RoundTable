@@ -52,6 +52,15 @@ enum _AccountMenuAction {
   logout,
 }
 
+bool shouldShowHomeDevPanelEntry(String host) {
+  final normalized = host.trim().toLowerCase();
+  return normalized == 'localhost' ||
+      normalized == '127.0.0.1' ||
+      normalized == '::1';
+}
+
+String resolveHomeDevPanelUrl() => 'http://localhost:8888';
+
 class FreeTopicDraftValue {
   final String title;
   final String sourceText;
@@ -384,8 +393,10 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
   }
 
   void _openDevPanel(BuildContext context) {
-    final host = Uri.base.host;
-    openExternalUrl('https://$host/admin.html');
+    if (!shouldShowHomeDevPanelEntry(Uri.base.host)) {
+      return;
+    }
+    openExternalUrl(resolveHomeDevPanelUrl());
   }
 
   void _showHomeSnack(String message, {bool error = false}) {
@@ -1044,11 +1055,13 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     final authState = ref.watch(authStateProvider);
     final user = authState.user;
     final humanName = _discussionHumanName();
+    final showDevPanelEntry = shouldShowHomeDevPanelEntry(Uri.base.host);
     return Column(
       children: [
         _TopBar(
           onSettings: () => Navigator.pushNamed(context, '/settings'),
           onDevPanel: () => _openDevPanel(context),
+          showDevPanel: showDevPanelEntry,
           onLoadConfig: _openLoadConfigDialog,
           onReplay: () => Navigator.pushNamed(context, '/replay'),
           observerMode: _isObserverMode,
@@ -1127,6 +1140,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
 class _TopBar extends StatelessWidget {
   final VoidCallback onSettings;
   final VoidCallback onDevPanel;
+  final bool showDevPanel;
   final VoidCallback onLoadConfig;
   final VoidCallback onReplay;
   final bool observerMode;
@@ -1138,6 +1152,7 @@ class _TopBar extends StatelessWidget {
   const _TopBar({
     required this.onSettings,
     required this.onDevPanel,
+    required this.showDevPanel,
     required this.onLoadConfig,
     required this.onReplay,
     required this.observerMode,
@@ -1219,11 +1234,13 @@ class _TopBar extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 8),
-          _IconBtn(
-              icon: Icons.monitor_heart_outlined,
-              tooltip: '后台服务',
-              onTap: onDevPanel),
+          if (showDevPanel) ...[
+            const SizedBox(width: 8),
+            _IconBtn(
+                icon: Icons.monitor_heart_outlined,
+                tooltip: '后台服务（localhost:8888）',
+                onTap: onDevPanel),
+          ],
           _IconBtn(
               icon: Icons.replay_circle_filled,
               tooltip: '思辨复盘：载入下载的 ZIP 复盘包重现全过程',
