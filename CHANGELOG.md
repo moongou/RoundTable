@@ -15,12 +15,15 @@
 - 修复首页从沉浸式讨论返回后，上一轮已选角色和思想家残留到下一轮的问题；返回首页时会清空这两组选中状态，避免连续 live 轮次串场。
 - 修复主持人台词中的表层污染：会去掉 `老师**：` 一类 markdown/角色标签残留，改写 `谢谢老师分享` 这类老师自指感谢，并压缩 `有有有` 这类重复填词。
 - 模型配置页支持手动输入模型名，并以用户手填值优先于测试连接返回的下拉选择，降低新模型或私有模型接入门槛。
+- 修复 ECS 快速部署后的目录残留问题：`deploy.sh` 现在默认把远端顶层旧源码树、旧前端构建和常见 IDE/cache 杂项清理掉，`deploy_aliyun.sh` 也可通过 `CLEAN_STALE_TOP_LEVEL=true` 单独复用这套清理逻辑。
 
 ### 验证
 
 - 后端守卫与清洗测试：`backend/.venv/bin/python -m pytest backend/tests/test_acceptance_guards.py -k 'test_submit_human_input_requests_restart_without_external_wait_cancel or test_submit_human_skip_clears_stale_designation or test_submit_human_input_requests_owner_loop_recovery_when_no_active_wait_task or test_sanitize_all_references_strips_moderator_surface_noise or test_sanitize_all_references_moderator_quote_whitelist_keeps_traceable_quote'`。
 - 前端静态检查：`flutter analyze --no-pub lib/features/home/immersive_home_screen.dart`（仅剩既有 info 级提示，无新增 error/warning）。
 - Flutter Web 已重建并同步到 `backend/static`。
+- ECS 部署脚本语法校验：`bash -n deploy/deploy.sh && bash -n deploy/deploy_aliyun.sh`。
+- 使用 `CLEAN_STALE_TOP_LEVEL=true SKIP_WEB_BUILD=true ./deploy/deploy.sh` 实际部署验证，线上日志显示自动清理钩子已触发，且 `roundtable`、`roundtable-devpanel`、`nginx` 保持 `active`。
 
 ## v1.0.12 - 2026-05-04
 

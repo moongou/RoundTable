@@ -27,12 +27,17 @@ TLS_KEY_FILE="${TLS_KEY_FILE:-$TLS_CERT_DIR/privkey.pem}"
 TLS_OPTIONS_FILE="${TLS_OPTIONS_FILE:-/etc/letsencrypt/options-ssl-nginx.conf}"
 TLS_DHPARAM_FILE="${TLS_DHPARAM_FILE:-/etc/letsencrypt/ssl-dhparams.pem}"
 CONFIG_ONLY="${CONFIG_ONLY:-false}"
+CLEAN_STALE_TOP_LEVEL="${CLEAN_STALE_TOP_LEVEL:-false}"
 SERVICE_NAME="${SERVICE_NAME:-$APP_NAME}"
 DEVPANEL_SERVICE_NAME="${DEVPANEL_SERVICE_NAME:-$APP_NAME-devpanel}"
 NGINX_SITE_NAME="${NGINX_SITE_NAME:-$APP_NAME}"
 NGINX_CONF="/etc/nginx/sites-available/$NGINX_SITE_NAME"
 BACKEND_USER="${BACKEND_USER:-www-data}"
 OPS_PANEL_TOKEN="${OPS_PANEL_TOKEN:-change-this-ops-token}"
+STALE_TOP_LEVEL_PATHS_DEFAULT="CapsWriter-Offline frontend harmonyos docs src .idea .playwright-mcp .pytest_cache .vscode"
+STALE_TOP_LEVEL_FILES_DEFAULT=".DS_Store README.md CHANGELOG.md RoundTable.code-workspace RoundTable.iml build_web.sh .gitignore"
+STALE_TOP_LEVEL_PATHS="${STALE_TOP_LEVEL_PATHS:-$STALE_TOP_LEVEL_PATHS_DEFAULT}"
+STALE_TOP_LEVEL_FILES="${STALE_TOP_LEVEL_FILES:-$STALE_TOP_LEVEL_FILES_DEFAULT}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[INFO]${NC}  $1"; }
@@ -76,6 +81,36 @@ configure_public_tls() {
     [ -f "$TLS_CERT_FILE" ] || err "已启用 ENABLE_PUBLIC_TLS，但未找到证书文件: $TLS_CERT_FILE"
     [ -f "$TLS_KEY_FILE" ] || err "已启用 ENABLE_PUBLIC_TLS，但未找到私钥文件: $TLS_KEY_FILE"
     PUBLIC_TLS_ACTIVE="true"
+}
+
+cleanup_stale_top_level_paths() {
+    if ! is_true "$CLEAN_STALE_TOP_LEVEL"; then
+        return
+    fi
+
+    log "清理 ECS 顶层旧源码/旧构建残留..."
+    local entry=""
+    local removed_any="false"
+
+    for entry in $STALE_TOP_LEVEL_PATHS; do
+        if [ -e "$APP_DIR/$entry" ]; then
+            rm -rf "$APP_DIR/$entry"
+            echo "  removed dir: $APP_DIR/$entry"
+            removed_any="true"
+        fi
+    done
+
+    for entry in $STALE_TOP_LEVEL_FILES; do
+        if [ -e "$APP_DIR/$entry" ]; then
+            rm -rf "$APP_DIR/$entry"
+            echo "  removed file: $APP_DIR/$entry"
+            removed_any="true"
+        fi
+    done
+
+    if [ "$removed_any" = "false" ]; then
+        echo "  no stale top-level paths to remove"
+    fi
 }
 
 write_nginx_server_block() {
@@ -254,6 +289,8 @@ else
 fi
 
 cd "$APP_DIR"
+
+cleanup_stale_top_level_paths
 
 # ---- 4. 环境变量配置 ----
 if [ ! -f "$APP_DIR/backend/.env" ]; then
