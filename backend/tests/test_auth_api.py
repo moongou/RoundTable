@@ -77,3 +77,12 @@ def test_profile_update_and_logout_flow(isolated_auth_runtime) -> None:
     with pytest.raises(HTTPException) as exc_info:
         auth_api.get_current_user(f"Bearer {token}")
     assert exc_info.value.status_code == 401
+
+
+def test_login_allows_local_test_user_a_without_password(isolated_auth_runtime) -> None:
+    result = auth_api.login(auth_api.LoginRequest(username="a", password=""))
+
+    assert result.user["username"] == "a"
+    assert result.user["display_name"] == "测试用户a"
+    current_user = auth_api.get_current_user(f"Bearer {result.token}")
+    assert current_user["username"] == "a"

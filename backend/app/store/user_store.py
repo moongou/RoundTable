@@ -11,6 +11,9 @@ from typing import Optional
 
 _DB: Optional[sqlite3.Connection] = None
 _PHONE_USERNAME_RE = re.compile(r"^1\d{10}$")
+_ADMIN_NO_PASSWORD_SENTINEL = "__admin_no_password__"
+_LOCAL_TEST_USERNAME = "a"
+_LOCAL_TEST_NO_PASSWORD_SENTINEL = "__local_test_no_password__"
 
 # 将来接入 Authing.cn 时，在此处添加 OAuth/OIDC 配置
 # AUTHING_APP_ID = ""
@@ -68,18 +71,39 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         """
     )
     db.commit()
-    _ensure_admin(db)
+    _ensure_builtin_users(db)
 
 
-def _ensure_admin(db: sqlite3.Connection) -> None:
-    """Auto-create admin user if not exists (development phase: no password)."""
-    row = db.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
+def _ensure_builtin_user(
+    db: sqlite3.Connection,
+    *,
+    username: str,
+    password: str,
+    display_name: str,
+) -> None:
+    row = db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
     if row:
         return
     now = datetime.now(timezone.utc).isoformat()
     db.execute(
         "INSERT INTO users (username, password, display_name, created_at) VALUES (?, ?, ?, ?)",
-        ("admin", "__admin_no_password__", "管理员", now),
+        (username, password, display_name, now),
+    )
+
+
+def _ensure_builtin_users(db: sqlite3.Connection) -> None:
+    """Auto-create local development users that can bypass passwords."""
+    _ensure_builtin_user(
+        db,
+        username="admin",
+        password=_ADMIN_NO_PASSWORD_SENTINEL,
+        display_name="管理员",
+    )
+    _ensure_builtin_user(
+        db,
+        username=_LOCAL_TEST_USERNAME,
+        password=_LOCAL_TEST_NO_PASSWORD_SENTINEL,
+        display_name="测试用户a",
     )
     db.commit()
 
@@ -135,8 +159,11 @@ def authenticate(username: str, password: str) -> Optional[dict]:
     row = db.execute("SELECT * FROM users WHERE username = ?", (normalized_username,)).fetchone()
     if not row:
         return None
-    # Admin hardcoded access — no password required during development phase
-    if row["password"] == "__admin_no_password__":
+    # Built-in local development users bypass passwords.
+    if row["password"] in {
+        _ADMIN_NO_PASSWORD_SENTINEL,
+        _LOCAL_TEST_NO_PASSWORD_SENTINEL,
+    }:
         pass
     elif not _verify_password(password, row["password"]):
         return None

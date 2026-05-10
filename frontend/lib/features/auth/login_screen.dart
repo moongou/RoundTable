@@ -13,6 +13,7 @@ class LoginScreen extends ConsumerStatefulWidget {
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   static final RegExp _mobileRegex = RegExp(r'^1\d{10}$');
+  static const String _localTestUsername = 'a';
 
   final _usernameCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
@@ -64,13 +65,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 TextFormField(
                   controller: _usernameCtrl,
                   decoration: const InputDecoration(
-                      labelText: '手机号',
-                      prefixIcon: Icon(Icons.phone_android_outlined)),
-                  keyboardType: TextInputType.phone,
+                      labelText: '手机号 / 测试账号',
+                      helperText: '本地测试可直接输入 a，密码留空',
+                      prefixIcon: Icon(Icons.person_outline)),
+                  keyboardType: TextInputType.text,
                   validator: (v) {
                     final value = (v ?? '').trim();
+                    if (value == _localTestUsername) {
+                      return null;
+                    }
                     if (!_mobileRegex.hasMatch(value)) {
-                      return '请输入 11 位手机号';
+                      return '请输入 11 位手机号，或输入测试账号 a';
                     }
                     return null;
                   },
@@ -81,8 +86,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   obscureText: true,
                   decoration: const InputDecoration(
                       labelText: '密码', prefixIcon: Icon(Icons.lock_outline)),
-                  validator: (v) =>
-                      (v == null || v.length < 6) ? '密码至少6位' : null,
+                  validator: (v) {
+                    if (_usernameCtrl.text.trim() == _localTestUsername) {
+                      return null;
+                    }
+                    return (v == null || v.length < 6) ? '密码至少6位' : null;
+                  },
                   onFieldSubmitted: (_) => _submit(),
                 ),
                 if (state.error != null) ...[

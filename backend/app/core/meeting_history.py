@@ -193,6 +193,62 @@ def _build_preview(entry_type: str, data: Any) -> str:
     return preview[:180]
 
 
+def _apply_timeout_fallback_from_script(
+    final_stats: Any,
+    script_lines: list[dict[str, Any]],
+) -> Any:
+    stats = _jsonable(final_stats) if final_stats is not None else {}
+    if not isinstance(stats, dict):
+        return stats
+
+    floor_manager = stats.get("floor_manager")
+    if not isinstance(floor_manager, dict):
+        return stats
+
+    human_skip_stats = floor_manager.get("human_skip_stats")
+    if not isinstance(human_skip_stats, dict):
+        return stats
+
+    last_requested_speaker = ""
+    timeout_notice_speakers: list[str] = []
+
+    for line in script_lines:
+        if not isinstance(line, dict):
+            continue
+        entry_type = str(line.get("entry_type", "") or "").strip()
+        if entry_type == "human_input_requested":
+            speaker = str(line.get("speaker", "") or "").strip()
+            if speaker:
+                last_requested_speaker = speaker
+            continue
+        if entry_type == "message":
+            speaker = str(line.get("speaker", "") or "").strip()
+            text = str(line.get("text", "") or "").strip()
+            if speaker == "系统" and "系统不会替你跳过" in text:
+                timeout_notice_speakers.append(last_requested_speaker)
+
+    if not timeout_notice_speakers:
+        return stats
+
+    existing_timeout_count = int(human_skip_stats.get("timeout_count") or 0)
+    if len(timeout_notice_speakers) > existing_timeout_count:
+        human_skip_stats["timeout_count"] = len(timeout_notice_speakers)
+
+    speaker_statuses = floor_manager.get("speaker_utterance_statuses")
+    if not isinstance(speaker_statuses, dict):
+        return stats
+
+    for speaker in timeout_notice_speakers:
+        display = str(speaker or "").strip()
+        if not display:
+            continue
+        current = str(speaker_statuses.get(display, "") or "").strip()
+        if current in {"", "nominated_only"}:
+            speaker_statuses[display] = "timed_out"
+
+    return stats
+
+
 def _normalize_script_text(value: str) -> str:
     return re.sub(r"\s+", "", (value or "").strip())
 
@@ -324,6 +380,19 @@ def _build_script_line(
             **base_line,
             "kind": "note",
             "text": f"指定下一位发言者：{target}",
+        }
+
+    if entry_type == "end_discussion":
+        speaker = str(payload.get("speaker", "") or "").strip() or "用户"
+        reason = str(payload.get("reason", "") or "").strip()
+        text = f"{speaker}请求结束本次讨论"
+        if reason:
+            text = f"{text}（{reason}）"
+        return {
+            **base_line,
+            "kind": "note",
+            "speaker": speaker,
+            "text": text,
         }
 
     if entry_type in {"system", "error", "api_error", "ended", "pause", "resume"}:
@@ -859,7 +928,10 @@ class MeetingHistoryStore:
             if reason:
                 self._summary["finish_reason"] = reason
             if final_stats is not None:
-                self._summary["final_stats"] = _jsonable(final_stats)
+                self._summary["final_stats"] = _apply_timeout_fallback_from_script(
+                    final_stats,
+                    self._script_lines,
+                )
             self._write_snapshot_locked()
             _prune_meeting_histories(keep_safe_session_id=self.safe_session_id)
 

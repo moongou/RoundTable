@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * RoundTable 开发面板 — localhost:8888
+ * RoundTable 开发面板 — 端口可配置
  * 无需 npm install，使用 Node.js 内置模块运行。
  * 启动: node devpanel.js
  */
@@ -10,7 +10,16 @@ const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const PORT = 8888;
+function parsePort(value, fallback) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEV_PANEL_PORT = parsePort(process.env.ROUNDTABLE_DEVPANEL_PORT, 8888);
+const BACKEND_PORT = parsePort(process.env.ROUNDTABLE_BACKEND_PORT, 8001);
+const LOCAL_BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+const LOCALHOST_BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
+const LOCALHOST_DEVPANEL_URL = `http://localhost:${DEV_PANEL_PORT}`;
 const ROOT = __dirname;
 const BACKEND_DIR = path.join(ROOT, 'backend');
 const FRONTEND_DIR = path.join(ROOT, 'frontend');
@@ -20,7 +29,7 @@ const MEETING_RUNNING_STALE_TIMEOUT_SECONDS = 10 * 60;
 
 // ── 进程管理 ──────────────────────────────────────────────
 const processes = {
-  backend: { proc: null, logs: [], label: '后端 (FastAPI :8001)' },
+  backend: { proc: null, logs: [], label: `后端 (FastAPI :${BACKEND_PORT})` },
 };
 
 // 是否正在停止中（kill 后端口可能短暂残留，此时强制上报 running=false）
@@ -44,8 +53,8 @@ function log(service, line) {
 function startBackend() {
   _backendStopping = false; // clear any stale stopping state
   if (processes.backend.proc) return { ok: false, msg: '已在运行' };
-  if (isPortListening(8001)) {
-    log('backend', '⚠ 端口 8001 已被占用（外部进程）');
+  if (isPortListening(BACKEND_PORT)) {
+    log('backend', `⚠ 端口 ${BACKEND_PORT} 已被占用（外部进程）`);
     broadcastStatus();
     return { ok: false, msg: '检测到后端已由外部进程运行，可直接“打开应用”；若需面板接管，请先点击“停止后端”后再启动' };
   }
@@ -60,7 +69,7 @@ function startBackend() {
     'app.main:app',
     '--app-dir', BACKEND_DIR,
     '--host', '0.0.0.0',
-    '--port', '8001',
+    '--port', String(BACKEND_PORT),
   ];
   if (fs.existsSync(envFile)) {
     args.splice(5, 0, '--env-file', envFile);
@@ -91,7 +100,7 @@ function stopBackend() {
     procToKill.kill('SIGTERM');
     // Kill any remaining processes on the port (e.g., uvicorn --reload children)
     setTimeout(() => {
-      getAllPortPids(8001).forEach(pid => {
+      getAllPortPids(BACKEND_PORT).forEach(pid => {
         try { execSync('kill -9 ' + pid, { timeout: 1000 }); } catch(e) {}
       });
       broadcastStatus();
@@ -102,7 +111,7 @@ function stopBackend() {
     let attempts = 0;
     const pollTimer = setInterval(() => {
       attempts++;
-      if (!isPortListening(8001) || attempts >= 20) {
+      if (!isPortListening(BACKEND_PORT) || attempts >= 20) {
         clearInterval(pollTimer);
         _backendStopping = false;
         broadcastStatus();
@@ -111,7 +120,7 @@ function stopBackend() {
     return { ok: true };
   }
   _backendStopping = true;
-  const pids = getAllPortPids(8001);
+  const pids = getAllPortPids(BACKEND_PORT);
   if (pids.length === 0) { _backendStopping = false; return { ok: false, msg: '未运行' }; }
   pids.forEach(pid => {
     try { execSync('kill -9 ' + pid, { timeout: 2000 }); } catch(e) { /* ignore */ }
@@ -122,11 +131,11 @@ function stopBackend() {
   let attempts = 0;
   const timer = setInterval(() => {
     attempts++;
-    if (!isPortListening(8001) || attempts >= 20) {
+    if (!isPortListening(BACKEND_PORT) || attempts >= 20) {
       clearInterval(timer);
       _backendStopping = false;
-      if (!isPortListening(8001)) {
-        log('backend', '✅ 端口 8001 已释放');
+      if (!isPortListening(BACKEND_PORT)) {
+        log('backend', `✅ 端口 ${BACKEND_PORT} 已释放`);
       } else {
         log('backend', '⚠ 端口释放超时，请手动检查');
       }
@@ -170,7 +179,7 @@ function getAllPortPids(port) {
 
 function getStatus() {
   const backendManaged = !!processes.backend.proc;
-  const backendPortUp = isPortListening(8001);
+  const backendPortUp = isPortListening(BACKEND_PORT);
   // While explicitly stopping: report not-running so Start button re-enables immediately
   const backendRunning = _backendStopping ? false : backendPortUp;
   const flutterEmbedded = fs.existsSync(path.join(BACKEND_DIR, 'static', 'index.html'));
@@ -229,11 +238,11 @@ async function getFullHealth() {
 
   // 后端 API 服务
   try {
-    const data = await httpGet('http://127.0.0.1:8001/api/v1/config/current');
+    const data = await httpGet(`${LOCAL_BACKEND_URL}/api/v1/config/current`);
     currentConfig = JSON.parse(data);
     results.backend_api = {
       name: '后端 API 服务',
-      url: 'http://localhost:8001',
+      url: LOCALHOST_BACKEND_URL,
       reachable: true,
       detail:
         'LLM: ' + currentConfig.llm_provider_name + ' › ' + currentConfig.model +
@@ -241,20 +250,20 @@ async function getFullHealth() {
         ' ｜ TTS: ' + serviceDisplayName(currentConfig.tts_provider),
     };
   } catch(e) {
-    results.backend_api = { name: '后端 API 服务', url: 'http://localhost:8001', reachable: false, detail: '无法连接' };
+    results.backend_api = { name: '后端 API 服务', url: LOCALHOST_BACKEND_URL, reachable: false, detail: '无法连接' };
   }
 
   // 前端
   const flutterEmbedded = fs.existsSync(path.join(BACKEND_DIR, 'static', 'index.html'));
-  results.frontend = { name: '前端 Flutter Web', url: 'http://localhost:8001', reachable: flutterEmbedded && results.backend_api.reachable, detail: flutterEmbedded ? '已内嵌到后端 :8001' : '未构建' };
+  results.frontend = { name: '前端 Flutter Web', url: LOCALHOST_BACKEND_URL, reachable: flutterEmbedded && results.backend_api.reachable, detail: flutterEmbedded ? `已内嵌到后端 :${BACKEND_PORT}` : '未构建' };
 
   // 开发面板
-  results.devpanel = { name: '开发面板', url: 'http://localhost:8888', reachable: true, detail: '运行中' };
+  results.devpanel = { name: '开发面板', url: LOCALHOST_DEVPANEL_URL, reachable: true, detail: '运行中' };
 
   // 仅展示当前配置真正使用到的语音/本地模型服务。
   if (currentConfig) {
     try {
-      const data = await httpGet('http://127.0.0.1:8001/api/v1/config/health?current_only=1');
+      const data = await httpGet(`${LOCAL_BACKEND_URL}/api/v1/config/health?current_only=1`);
       const services = JSON.parse(data);
       for (const [key, val] of Object.entries(services)) {
         results['configured_' + key] = {
@@ -267,7 +276,7 @@ async function getFullHealth() {
     } catch(e) {
       results.configured_services = {
         name: '当前语音/本地模型服务',
-        url: 'http://localhost:8001/api/v1/config/health?current_only=1',
+        url: `${LOCALHOST_BACKEND_URL}/api/v1/config/health?current_only=1`,
         reachable: false,
         detail: '当前配置健康检查获取失败',
       };
@@ -317,7 +326,7 @@ function requestBackend(method, reqPath, options) {
     const req = http.request(
       {
         hostname: '127.0.0.1',
-        port: 8001,
+        port: BACKEND_PORT,
         method,
         path: reqPath,
         timeout: 6000,
@@ -790,13 +799,47 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .runtime-col + .runtime-col{border-left:1px solid rgba(15,52,96,0.75);padding-left:20px}
   .health-grid{margin-top:10px;background:#0d0d1a;border:1px solid #0f3460;border-radius:8px;overflow:hidden}
   .health-empty{padding:14px;color:#666;text-align:center}
+  .history-panel-head{align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
+  .history-panel-title{display:flex;align-items:center;gap:10px;min-width:0}
+  .history-panel-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end}
+  .history-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px;padding:12px 14px;border-radius:14px;border:1px solid rgba(36,66,116,0.88);background:linear-gradient(180deg,rgba(8,16,30,0.95),rgba(13,24,45,0.92))}
+  .history-toolbar-summary{display:flex;align-items:center;gap:8px;font-size:12px;color:#d7e5ff;font-weight:600;white-space:nowrap}
+  .history-session-filters{display:flex;flex:1;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;min-width:280px}
+  .history-filter-field{display:inline-flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;border:1px solid rgba(36,66,116,0.84);background:rgba(15,28,50,0.9);color:#dce8ff;min-height:40px}
+  .history-filter-field span{font-size:10px;color:#8fa3cc;font-weight:700;letter-spacing:1px;text-transform:uppercase;flex-shrink:0}
+  .history-filter-field input,.history-filter-field select{border:none;outline:none;background:transparent;color:#eef4ff;font-size:12px;min-width:0}
+  .history-filter-field input::placeholder{color:#6379a2}
+  .history-filter-field input[type="text"]{width:140px}
+  .history-filter-field input[type="datetime-local"]{width:168px}
+  .history-filter-field input[type="number"]{width:76px}
+  .history-filter-field select{cursor:pointer}
+  .history-filter-field-compact{gap:6px}
+  .history-filter-field-compact select{width:74px}
+  .history-dropdown{position:relative}
+  .history-dropdown > summary{list-style:none}
+  .history-dropdown > summary::-webkit-details-marker{display:none}
+  .history-dropdown-menu{position:absolute;right:0;top:calc(100% + 8px);display:flex;flex-direction:column;gap:6px;min-width:168px;padding:8px;border-radius:14px;border:1px solid rgba(56,92,148,0.82);background:linear-gradient(180deg,rgba(8,17,31,0.98),rgba(18,34,62,0.96));box-shadow:0 14px 28px rgba(0,0,0,0.26);z-index:20}
+  .history-dropdown-item{display:flex;align-items:center;justify-content:flex-start;border:none;border-radius:10px;padding:9px 12px;background:rgba(15,27,50,0.94);color:#e7f0ff;font-size:12px;cursor:pointer;text-align:left}
+  .history-dropdown-item:hover{background:rgba(44,66,105,0.94);color:#fff7d4}
+  .history-dropdown.disabled{opacity:.44;pointer-events:none}
   .history-split{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px;align-items:start}
   .history-list,.history-detail{background:#0d0d1a;border:1px solid #0f3460;border-radius:10px;min-height:280px}
   .history-list{padding:10px;display:flex;flex-direction:column;gap:10px;max-height:620px;overflow:auto}
-  .history-item{border:1px solid rgba(27,51,95,0.9);border-radius:10px;padding:12px 14px;background:linear-gradient(180deg,rgba(17,25,47,0.92),rgba(11,17,32,0.96));cursor:pointer;transition:border-color .2s,transform .2s}
+  .history-item{border:1px solid rgba(27,51,95,0.9);border-radius:10px;padding:12px 12px 12px 14px;background:linear-gradient(180deg,rgba(17,25,47,0.92),rgba(11,17,32,0.96));cursor:pointer;transition:border-color .2s,transform .2s}
   .history-item:hover{border-color:#80cbc4;transform:translateY(-1px)}
   .history-item.active{border-color:#d4a017;box-shadow:0 0 0 1px rgba(212,160,23,0.25) inset}
-  .history-topic{font-size:13px;color:#f3f5ff;font-weight:700;line-height:1.5;margin-bottom:8px}
+  .history-item.selected{border-color:#80cbc4;box-shadow:0 0 0 1px rgba(128,203,196,0.22) inset}
+  .history-item-head{display:flex;gap:12px;align-items:stretch}
+  .history-item-body{flex:1;min-width:0}
+  .history-select-wrap{display:flex;align-items:center;justify-content:center;padding-top:2px}
+  .history-select-box{width:18px;height:18px;border-radius:6px;accent-color:#80cbc4;cursor:pointer}
+  .history-item-main{display:flex;gap:12px;align-items:flex-start;justify-content:space-between}
+  .history-item-copy{flex:1;min-width:0}
+  .history-session-id{font-size:10px;line-height:1.4;color:#8fa3cc;letter-spacing:1.4px;text-transform:uppercase;margin-bottom:5px}
+  .history-topic{font-size:13px;color:#f3f5ff;font-weight:700;line-height:1.5;margin-bottom:6px}
+  .history-item-time{font-size:11px;color:#8b98b7;line-height:1.5}
+  .history-item-side{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0;padding-top:1px}
+  .history-item-count{display:inline-flex;align-items:center;justify-content:center;padding:4px 9px;border-radius:999px;border:1px solid rgba(52,88,143,0.68);background:rgba(16,32,61,0.86);color:#cfe0ff;font-size:10px;line-height:1.2}
   .history-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#8b98b7;margin-bottom:8px}
   .history-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid #244274;background:#10203d;color:#c9d4f2}
   .history-pill.ok{border-color:#2f7a46;color:#7edb92;background:#112619}
@@ -804,8 +847,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .history-pill.fail{border-color:#874040;color:#ffb1b1;background:#2b1616}
   .history-preview{font-size:11px;line-height:1.6;color:#aab2c8}
   .history-detail{padding:16px;overflow:auto}
-  .history-detail-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px}
-  .history-detail-title{font-size:18px;color:#f3f5ff;font-weight:700;line-height:1.5}
+  .history-detail-head{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,430px);gap:14px;align-items:stretch;margin-bottom:14px}
+  .history-head-panel{border:1px solid rgba(36,66,116,0.84);border-radius:16px;background:linear-gradient(160deg,rgba(9,20,39,0.97),rgba(18,34,62,0.93));padding:14px 16px;box-shadow:0 12px 28px rgba(0,0,0,0.18)}
+  .history-head-main{display:flex;flex-direction:column;justify-content:space-between;min-height:118px}
+  .history-head-kicker{font-size:10px;color:#8fa3cc;font-weight:700;letter-spacing:1.8px;text-transform:uppercase}
+  .history-detail-title{margin-top:8px;font-size:20px;color:#f3f5ff;font-weight:700;line-height:1.45}
+  .history-head-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;font-size:11px;color:#9cb2dc}
   .history-detail-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start;justify-content:flex-end}
   .history-export-quick{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end}
   .history-export-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;border:1px solid #315488;background:linear-gradient(135deg,rgba(17,39,73,0.96),rgba(33,63,109,0.92));color:#e7f0ff;font-size:11px;letter-spacing:.4px;cursor:pointer;transition:transform .18s,border-color .18s,background .18s}
@@ -813,19 +860,44 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .history-export-btn.alt{border-color:#5b437d;background:linear-gradient(135deg,rgba(34,20,52,0.94),rgba(44,35,84,0.94));color:#f1e8ff}
   .history-export-btn.alt:hover{border-color:#f6e3a5;background:linear-gradient(135deg,rgba(76,52,26,0.94),rgba(72,48,104,0.96));color:#fff6d7}
   .history-export-note{font-size:11px;color:#8fa3cc;line-height:1.5;padding-right:4px}
-  .history-package-panel{min-width:min(100%,360px);max-width:460px;padding:12px 14px;border-radius:18px;border:1px solid rgba(56,92,148,0.82);background:linear-gradient(160deg,rgba(9,20,39,0.97),rgba(18,34,62,0.93));box-shadow:0 12px 28px rgba(0,0,0,0.18)}
+  .history-package-panel{display:grid;grid-template-rows:auto auto;gap:12px;min-width:0;max-width:none;height:100%;padding:14px 16px;border-radius:16px;border:1px solid rgba(56,92,148,0.82);background:linear-gradient(160deg,rgba(9,20,39,0.97),rgba(18,34,62,0.93));box-shadow:0 12px 28px rgba(0,0,0,0.18)}
+  .history-package-top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .history-package-copy{min-width:0}
   .history-package-title{font-size:13px;font-weight:700;letter-spacing:.3px;color:#eef4ff}
   .history-package-subtitle{margin-top:4px;font-size:11px;line-height:1.5;color:#8fa3cc}
-  .history-package-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:10px}
+  .history-package-bottom{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .history-package-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;flex:1}
   .history-package-option{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;border:1px solid rgba(54,82,126,0.82);background:rgba(15,28,48,0.88);color:#dbe8ff;font-size:12px}
   .history-package-option.disabled{opacity:.45}
   .history-package-option input{accent-color:#d7c17a}
-  .history-package-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin-top:12px}
-  .history-package-status{font-size:11px;line-height:1.5;color:#9cb2dc}
-  .history-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:14px}
-  .history-summary-card{border:1px solid rgba(27,51,95,0.9);border-radius:10px;background:#11192f;padding:12px}
-  .history-summary-label{font-size:11px;color:#7f90b5;margin-bottom:4px}
-  .history-summary-value{font-size:13px;color:#e5ebff;line-height:1.5;word-break:break-word}
+  .history-package-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px}
+  .history-package-status{font-size:11px;line-height:1.6;color:#9cb2dc;text-align:right;max-width:170px}
+  .history-summary-strip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;padding:12px 14px;border-radius:14px;border:1px solid rgba(36,66,116,0.88);background:linear-gradient(180deg,rgba(8,16,30,0.95),rgba(13,24,45,0.92))}
+  .history-summary-segment{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:7px 10px;border-radius:999px;border:1px solid rgba(52,88,143,0.68);background:rgba(16,32,61,0.86);color:#dbe8ff;font-size:11px;line-height:1.4}
+  .history-summary-segment.wide{flex:1 1 260px}
+  .history-summary-segment-label{font-size:10px;color:#8fa3cc;font-weight:700;letter-spacing:1px;text-transform:uppercase;flex-shrink:0}
+  .history-summary-segment-value{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .history-runtime-insights{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(300px,1fr);gap:14px;margin-bottom:14px}
+  .history-runtime-panel{border:1px solid rgba(36,66,116,0.88);border-radius:14px;background:linear-gradient(180deg,rgba(8,16,30,0.95),rgba(13,24,45,0.92));padding:14px}
+  .history-runtime-panel-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .history-runtime-panel-title{font-size:12px;color:#f6e3a5;font-weight:700;letter-spacing:1.6px;text-transform:uppercase}
+  .history-runtime-panel-meta{font-size:11px;color:#8fa3cc;line-height:1.6}
+  .history-status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(138px,1fr));gap:10px}
+  .history-status-card{display:flex;flex-direction:column;gap:8px;padding:10px 11px;border-radius:12px;border:1px solid rgba(52,88,143,0.68);background:rgba(16,32,61,0.86)}
+  .history-status-card.ok{border-color:rgba(62,134,84,0.9);background:linear-gradient(180deg,rgba(16,45,31,0.92),rgba(12,33,24,0.96))}
+  .history-status-card.warn{border-color:rgba(149,112,43,0.9);background:linear-gradient(180deg,rgba(54,37,13,0.9),rgba(38,28,13,0.95))}
+  .history-status-card.fail{border-color:rgba(138,64,64,0.88);background:linear-gradient(180deg,rgba(51,22,22,0.92),rgba(36,18,18,0.96))}
+  .history-status-card.muted{border-color:rgba(63,82,118,0.82);background:linear-gradient(180deg,rgba(18,28,46,0.9),rgba(15,24,38,0.95))}
+  .history-status-name{font-size:12px;color:#eef4ff;font-weight:700;line-height:1.4;word-break:break-word}
+  .history-status-pill{display:inline-flex;align-items:center;align-self:flex-start;padding:4px 8px;border-radius:999px;border:1px solid currentColor;font-size:10px;line-height:1.2;font-weight:700;letter-spacing:.6px}
+  .history-status-pill.ok{color:#8be2a2}
+  .history-status-pill.warn{color:#ffd976}
+  .history-status-pill.fail{color:#ffb1b1}
+  .history-status-pill.muted{color:#b8c8ea}
+  .history-status-note{font-size:11px;line-height:1.6;color:#9fb4da}
+  .history-status-summary{display:flex;flex-wrap:wrap;gap:8px}
+  .history-status-summary-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border-radius:999px;border:1px solid rgba(52,88,143,0.68);background:rgba(16,32,61,0.86);color:#dbe8ff;font-size:10px;line-height:1.2}
+  .history-status-empty{min-height:0;padding:16px 12px;border-radius:12px;border:1px dashed rgba(63,82,118,0.82);background:rgba(13,21,35,0.76);color:#7088b6;font-size:11px;line-height:1.7;text-align:left}
   .history-sections-cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
   .history-card{border:1px solid rgba(27,51,95,0.88);border-radius:12px;background:linear-gradient(180deg,rgba(11,17,32,0.96),rgba(15,27,50,0.9));overflow:hidden}
   .history-card-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:14px 16px;cursor:pointer;user-select:none;border-bottom:1px solid rgba(27,51,95,0.6);transition:background .2s}
@@ -899,9 +971,21 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .ops-btn-mini.danger{border-color:#874040;color:#ffb1b1;background:#2b1616}
   .ops-btn-mini.danger:hover{border-color:#ef5350;color:#ffd8d8}
   .ops-table-empty{padding:20px;text-align:center;color:#6c7ea5;font-size:12px}
+  @media (max-width: 1320px){
+    .history-detail-head{grid-template-columns:1fr}
+    .history-package-status{text-align:left;max-width:none}
+    .history-package-bottom{flex-direction:column;align-items:stretch}
+    .history-package-actions{justify-content:flex-start}
+    .history-runtime-insights{grid-template-columns:1fr}
+  }
   @media (max-width: 1080px){
     .runtime-split{grid-template-columns:1fr}
     .runtime-col + .runtime-col{border-left:none;border-top:1px solid rgba(15,52,96,0.75);padding-left:0;padding-top:18px}
+    .history-panel-head{flex-direction:column;align-items:stretch}
+    .history-panel-actions{justify-content:flex-start}
+    .history-toolbar{align-items:flex-start}
+    .history-toolbar-summary{width:100%}
+    .history-session-filters{justify-content:flex-start}
     .history-split{grid-template-columns:1fr}
     .ops-grid{grid-template-columns:1fr}
   }
@@ -921,19 +1005,19 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="quick-actions">
       <button class="btn-start" id="btn-start-backend" onclick="ctrl('backend','start')">▶ 启动后端</button>
       <button class="btn-stop" id="btn-stop-backend" onclick="ctrl('backend','stop')" disabled>⏹ 停止后端</button>
-      <a class="btn-open" id="quick-link-app" href="http://127.0.0.1:8001/" target="_blank" rel="noopener">🏠 打开应用</a>
-      <a class="btn-open" id="quick-link-admin" href="http://127.0.0.1:8001/admin/" target="_blank" rel="noopener">🛠 管理后台</a>
-      <a class="btn-open" id="quick-link-asr" href="http://127.0.0.1:8001/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
-      <a class="btn-open" id="quick-link-docs" href="http://127.0.0.1:8001/docs" target="_blank" rel="noopener">📚 API 文档</a>
-      <a class="btn-open" id="quick-link-topics" href="http://127.0.0.1:8001/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
-      <a class="btn-open" id="quick-link-thinkers" href="http://127.0.0.1:8001/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+      <a class="btn-open" id="quick-link-app" href="${LOCAL_BACKEND_URL}/" target="_blank" rel="noopener">🏠 打开应用</a>
+      <a class="btn-open" id="quick-link-admin" href="${LOCAL_BACKEND_URL}/admin/" target="_blank" rel="noopener">🛠 管理后台</a>
+      <a class="btn-open" id="quick-link-asr" href="${LOCAL_BACKEND_URL}/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
+      <a class="btn-open" id="quick-link-docs" href="${LOCAL_BACKEND_URL}/docs" target="_blank" rel="noopener">📚 API 文档</a>
+      <a class="btn-open" id="quick-link-topics" href="${LOCAL_BACKEND_URL}/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
+      <a class="btn-open" id="quick-link-thinkers" href="${LOCAL_BACKEND_URL}/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
       <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 检测并打开报告</button>
     </div>
   </div>
   <div class="card" id="card-runtime">
     <div class="runtime-split">
       <section class="runtime-col" id="card-backend">
-        <div class="card-title">📟 后端运行日志 (FastAPI :8001)</div>
+        <div class="card-title">📟 后端运行日志 (FastAPI :${BACKEND_PORT})</div>
         <div class="log-box" id="log-backend"></div>
       </section>
       <section class="runtime-col" id="card-health">
@@ -980,14 +1064,34 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
   <div class="card" id="card-history">
-    <div class="card-title">
-      🗂 历史发言记录板
-      <span class="status-label" id="history-summary">加载中…</span>
-      <span style="flex:1"></span>
-      <button class="history-export-btn" onclick="downloadMeetingScriptExport(&quot;markdown&quot;)" id="btn-export-md-header" disabled>📄 导出 Markdown</button>
-      <button class="history-export-btn alt" onclick="downloadMeetingScriptExport(&quot;json&quot;)" id="btn-export-json-header" disabled>📦 导出 JSON</button>
-      <button class="btn-refresh" onclick="refreshMeetingHistory()">🔄 刷新</button>
-      <button class="btn-danger-subtle" id="btn-delete-history" onclick="deleteActiveMeetingHistory()" disabled>🗑 删除</button>
+    <div class="card-title history-panel-head">
+      <div class="history-panel-title">🗂 历史发言记录板</div>
+      <div class="history-panel-actions">
+        <button class="history-export-btn" onclick="toggleSelectAllMeetingHistories()" id="btn-select-all-history" disabled>☑ 全选</button>
+        <button class="history-export-btn alt" onclick="clearSelectedMeetingHistories()" id="btn-clear-history-selection" disabled>✖ 清空选择</button>
+        <details class="history-dropdown disabled" id="history-export-dropdown">
+          <summary class="history-export-btn">📤 导出</summary>
+          <div class="history-dropdown-menu">
+            <button type="button" class="history-dropdown-item" onclick="closeHistoryExportMenu();downloadMeetingScriptExport(&quot;markdown&quot;)">Markdown 剧本</button>
+            <button type="button" class="history-dropdown-item" onclick="closeHistoryExportMenu();downloadMeetingScriptExport(&quot;json&quot;)">JSON 剧本</button>
+          </div>
+        </details>
+        <button class="btn-refresh" onclick="refreshMeetingHistory()">🔄 刷新</button>
+        <button class="btn-danger-subtle" id="btn-delete-history" onclick="deleteActiveMeetingHistory()" disabled>🗑 删除</button>
+        <button class="btn-danger-subtle" id="btn-delete-history-selected" onclick="deleteSelectedMeetingHistories()" disabled>🗑 删除所选</button>
+      </div>
+    </div>
+    <div class="history-toolbar">
+      <div class="history-toolbar-summary"><span class="status-label" id="history-summary">加载中…</span></div>
+      <div class="history-session-filters">
+        <label class="history-filter-field"><span>话题</span><input id="history-filter-topic" type="text" placeholder="包含关键词" oninput="applyMeetingHistorySessionFilters()"></label>
+        <label class="history-filter-field"><span>起始</span><input id="history-filter-time-from" type="datetime-local" onchange="applyMeetingHistorySessionFilters()"></label>
+        <label class="history-filter-field"><span>截止</span><input id="history-filter-time-to" type="datetime-local" onchange="applyMeetingHistorySessionFilters()"></label>
+        <label class="history-filter-field"><span>状态</span><select id="history-filter-status" onchange="applyMeetingHistorySessionFilters()"><option value="__all__">全部状态</option></select></label>
+        <label class="history-filter-field history-filter-field-compact"><span>剧本</span><select id="history-filter-script-op" onchange="applyMeetingHistorySessionFilters()"><option value="__all__">全部</option><option value="gt">大于</option><option value="lt">小于</option><option value="eq">等于</option></select><input id="history-filter-script-value" type="number" min="0" placeholder="行数" oninput="applyMeetingHistorySessionFilters()"></label>
+        <label class="history-filter-field"><span>用户</span><input id="history-filter-user" type="text" placeholder="用户名或昵称" oninput="applyMeetingHistorySessionFilters()"></label>
+        <button type="button" class="history-filter-clear" id="btn-clear-history-filters" onclick="clearMeetingHistorySessionFilters()" disabled>重置筛选</button>
+      </div>
     </div>
     <div class="history-split">
       <aside class="history-list" id="history-list">
@@ -1001,8 +1105,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="card" id="card-flutter">
     <div class="card-title">🎨 前端 Flutter Web</div>
     <div class="monitor-info" id="flutter-monitor">
-      <div><span class="label">部署方式:</span> <span class="val">内嵌到后端 :8001</span></div>
-      <div><span class="label">访问地址:</span> <a id="flutter-app-link" href="http://127.0.0.1:8001/" target="_blank" rel="noopener" style="color:#d4a017">http://127.0.0.1:8001/</a></div>
+      <div><span class="label">部署方式:</span> <span class="val">内嵌到后端 :${BACKEND_PORT}</span></div>
+      <div><span class="label">访问地址:</span> <a id="flutter-app-link" href="${LOCAL_BACKEND_URL}/" target="_blank" rel="noopener" style="color:#d4a017">${LOCAL_BACKEND_URL}/</a></div>
       <div><span class="label">静态文件:</span> <span class="val" id="flutter-static">检测中…</span></div>
       <div><span class="label">运行状态:</span> <span class="val" id="flutter-status-detail">检测中…</span></div>
       <div style="margin-top:10px;color:#666;font-size:11px">
@@ -1028,14 +1132,41 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </div>
 <div class="footer">RoundTable Dev Panel · 使用 <kbd>Ctrl+C</kbd> 停止面板</div>
 <script>
+var DEV_PANEL_PORT = ${JSON.stringify(DEV_PANEL_PORT)};
+var BACKEND_PORT = ${JSON.stringify(BACKEND_PORT)};
 var MEETING_HISTORY_RETENTION_LIMIT = ${MEETING_HISTORY_RETENTION_LIMIT};
+function currentOpsToken() {
+  try {
+    var params = new URLSearchParams(window.location.search || '');
+    return String(params.get('token') || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function withOpsToken(pathname) {
+  var raw = String(pathname || '/');
+  var token = currentOpsToken();
+  if (!token) return raw;
+  var parts = raw.split('#');
+  var hash = parts.length > 1 ? '#' + parts.slice(1).join('#') : '';
+  var pathAndQuery = parts[0];
+  var queryIndex = pathAndQuery.indexOf('?');
+  var basePath = queryIndex >= 0 ? pathAndQuery.slice(0, queryIndex) : pathAndQuery;
+  var query = queryIndex >= 0 ? pathAndQuery.slice(queryIndex + 1) : '';
+  var params = new URLSearchParams(query);
+  if (!params.get('token')) params.set('token', token);
+  var finalQuery = params.toString();
+  return basePath + (finalQuery ? ('?' + finalQuery) : '') + hash;
+}
+
 function panelApiPath(pathname) {
   var suffix = String(pathname || '/');
   if (!suffix.startsWith('/')) suffix = '/' + suffix;
   var currentPath = window.location.pathname || '/';
   if (currentPath === '/ops' || currentPath.startsWith('/ops/')) {
-    if (suffix === '/ops' || suffix.startsWith('/ops/')) return suffix;
-    return '/ops' + suffix;
+    if (suffix === '/ops' || suffix.startsWith('/ops/')) return withOpsToken(suffix);
+    return withOpsToken('/ops' + suffix);
   }
   return suffix;
 }
@@ -1150,7 +1281,7 @@ function backendOrigin() {
   var hostname = window.location.hostname || '127.0.0.1';
   var host = window.location.host || '';
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
-    return protocol + '//' + hostname + ':8001';
+    return protocol + '//' + hostname + ':' + String(BACKEND_PORT);
   }
   if (host) {
     return protocol + '//' + host;
@@ -1187,7 +1318,16 @@ function applyQuickLinks() {
 }
 
 function openAdminPage() {
-  window.open(backendUrl('/admin/'), '_blank', 'noopener');
+  var targetUrl = backendUrl('/admin/');
+  var opened = null;
+  try {
+    opened = window.open(targetUrl, '_blank', 'noopener');
+  } catch (_) {
+    opened = null;
+  }
+  if (!opened) {
+    window.location.href = targetUrl;
+  }
 }
 
 function setOpsStatus(text, color) {
@@ -1264,6 +1404,10 @@ function refreshAdminStats() {
       adminUsers = (results[1] && results[1].users) || [];
       updateAdminStatCards(adminStats);
       renderAdminUsers();
+      if (allMeetingHistoryItems.length) {
+        refreshMeetingHistoryStatusFilterOptions(allMeetingHistoryItems);
+        renderMeetingHistoryList(allMeetingHistoryItems);
+      }
       setOpsStatus('已连接', '#4caf50');
       document.getElementById('ops-auth-note').textContent = '统计已更新：' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
     })
@@ -1403,10 +1547,21 @@ applyQuickLinks();
 
 var activeMeetingHistoryId = '';
 var currentMeetingHistoryRecord = null;
+var allMeetingHistoryItems = [];
+var selectedMeetingHistoryIds = new Set();
 var ALL_MEETING_FILTER_VALUE = '__all__';
 var meetingHistoryFilters = {
   speaker: ALL_MEETING_FILTER_VALUE,
   eventType: ALL_MEETING_FILTER_VALUE,
+};
+var meetingHistorySessionFilters = {
+  topicQuery: '',
+  timeFrom: '',
+  timeTo: '',
+  status: ALL_MEETING_FILTER_VALUE,
+  scriptComparator: ALL_MEETING_FILTER_VALUE,
+  scriptLineCount: '',
+  userQuery: '',
 };
 
 function resetMeetingHistoryFilters() {
@@ -1416,11 +1571,267 @@ function resetMeetingHistoryFilters() {
   };
 }
 
+function resetMeetingHistorySessionFilters() {
+  meetingHistorySessionFilters = {
+    topicQuery: '',
+    timeFrom: '',
+    timeTo: '',
+    status: ALL_MEETING_FILTER_VALUE,
+    scriptComparator: ALL_MEETING_FILTER_VALUE,
+    scriptLineCount: '',
+    userQuery: '',
+  };
+}
+
+function hasActiveMeetingHistorySessionFilters() {
+  return !!(
+    meetingHistorySessionFilters.topicQuery ||
+    meetingHistorySessionFilters.timeFrom ||
+    meetingHistorySessionFilters.timeTo ||
+    (meetingHistorySessionFilters.status && meetingHistorySessionFilters.status !== ALL_MEETING_FILTER_VALUE) ||
+    (meetingHistorySessionFilters.scriptComparator && meetingHistorySessionFilters.scriptComparator !== ALL_MEETING_FILTER_VALUE && meetingHistorySessionFilters.scriptLineCount) ||
+    meetingHistorySessionFilters.userQuery
+  );
+}
+
+function syncMeetingHistorySessionFilterClearButton() {
+  var clearBtn = document.getElementById('btn-clear-history-filters');
+  if (clearBtn) clearBtn.disabled = !hasActiveMeetingHistorySessionFilters();
+}
+
+function syncMeetingHistorySessionFilterControls() {
+  var controlValues = {
+    'history-filter-topic': meetingHistorySessionFilters.topicQuery,
+    'history-filter-time-from': meetingHistorySessionFilters.timeFrom,
+    'history-filter-time-to': meetingHistorySessionFilters.timeTo,
+    'history-filter-status': meetingHistorySessionFilters.status,
+    'history-filter-script-op': meetingHistorySessionFilters.scriptComparator,
+    'history-filter-script-value': meetingHistorySessionFilters.scriptLineCount,
+    'history-filter-user': meetingHistorySessionFilters.userQuery,
+  };
+  Object.keys(controlValues).forEach(function(controlId) {
+    var node = document.getElementById(controlId);
+    if (node) node.value = controlValues[controlId];
+  });
+  syncMeetingHistorySessionFilterClearButton();
+}
+
+function refreshMeetingHistoryStatusFilterOptions(items) {
+  var select = document.getElementById('history-filter-status');
+  if (!select) return;
+  var statuses = Array.from(new Set((Array.isArray(items) ? items : []).map(function(item) {
+    return String(item && item.status || '').trim();
+  }).filter(Boolean))).sort();
+  var currentValue = meetingHistorySessionFilters.status || ALL_MEETING_FILTER_VALUE;
+  select.innerHTML = '<option value="' + ALL_MEETING_FILTER_VALUE + '">全部状态</option>' + statuses.map(function(status) {
+    return '<option value="' + escAttr(status) + '">' + escHtml(meetingStatusLabel(status)) + '</option>';
+  }).join('');
+  if (statuses.indexOf(currentValue) < 0) {
+    meetingHistorySessionFilters.status = ALL_MEETING_FILTER_VALUE;
+    currentValue = ALL_MEETING_FILTER_VALUE;
+  }
+  select.value = currentValue;
+}
+
+function normalizeMeetingSearchValue(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function addMeetingHistorySearchToken(target, value) {
+  var token = String(value || '').trim();
+  if (!token) return;
+  target.add(token);
+}
+
+function collectMeetingHistoryUserTokens(item) {
+  var tokens = new Set();
+  var summary = item && typeof item === 'object' ? item : {};
+  var config = summary.config && typeof summary.config === 'object' ? summary.config : {};
+  ['username', 'user_name', 'display_name', 'nickname', 'owner_username', 'owner_display_name'].forEach(function(key) {
+    addMeetingHistorySearchToken(tokens, summary[key]);
+    addMeetingHistorySearchToken(tokens, config[key]);
+  });
+  var userIds = [];
+  if (summary.user_id != null) userIds.push(Number(summary.user_id));
+  if (config.user_id != null) userIds.push(Number(config.user_id));
+  userIds.forEach(function(userId) {
+    if (!isFinite(userId) || userId <= 0) return;
+    adminUsers.forEach(function(user) {
+      if (Number(user.id || 0) === userId) {
+        addMeetingHistorySearchToken(tokens, user.username);
+        addMeetingHistorySearchToken(tokens, user.display_name);
+      }
+    });
+  });
+  var humanNames = Array.isArray(config.human_names) ? config.human_names.slice() : [];
+  humanNames.forEach(function(name) {
+    addMeetingHistorySearchToken(tokens, name);
+  });
+  if (!humanNames.length && Array.isArray(summary.participants)) {
+    summary.participants.forEach(function(name) {
+      addMeetingHistorySearchToken(tokens, name);
+    });
+  }
+  var normalizedHumanNames = humanNames.map(normalizeMeetingSearchValue).filter(Boolean);
+  if (normalizedHumanNames.length) {
+    adminUsers.forEach(function(user) {
+      var displayName = normalizeMeetingSearchValue(user.display_name);
+      if (displayName && normalizedHumanNames.indexOf(displayName) >= 0) {
+        addMeetingHistorySearchToken(tokens, user.username);
+        addMeetingHistorySearchToken(tokens, user.display_name);
+      }
+    });
+  }
+  return Array.from(tokens);
+}
+
+function buildMeetingHistoryTopicSearchText(item) {
+  var summary = item && typeof item === 'object' ? item : {};
+  var topic = summary.topic && typeof summary.topic === 'object' ? summary.topic : {};
+  var config = summary.config && typeof summary.config === 'object' ? summary.config : {};
+  return [
+    summary.session_id,
+    topic.title,
+    topic.description,
+    topic.category,
+    config.free_topic,
+    config.free_topic_detail,
+  ].map(function(value) {
+    return String(value || '').trim();
+  }).filter(Boolean).join(' ');
+}
+
+function meetingHistoryIntersectsTimeRange(item) {
+  var from = parseMeetingFilterDate(meetingHistorySessionFilters.timeFrom);
+  var to = parseMeetingFilterDate(meetingHistorySessionFilters.timeTo);
+  if (!from && !to) return true;
+  if (from && to && from.getTime() > to.getTime()) {
+    var temp = from;
+    from = to;
+    to = temp;
+  }
+  var start = parseMeetingFilterDate(item && (item.started_at || item.updated_at || item.ended_at));
+  var end = parseMeetingFilterDate(item && (item.ended_at || item.updated_at || item.started_at));
+  if (!start && !end) return false;
+  var lower = start || end;
+  var upper = end || start;
+  if (from && upper && upper.getTime() < from.getTime()) return false;
+  if (to && lower && lower.getTime() > to.getTime()) return false;
+  return true;
+}
+
+function meetingHistoryMatchesSessionFilters(item) {
+  var topicQuery = normalizeMeetingSearchValue(meetingHistorySessionFilters.topicQuery);
+  if (topicQuery && normalizeMeetingSearchValue(buildMeetingHistoryTopicSearchText(item)).indexOf(topicQuery) < 0) {
+    return false;
+  }
+  if (!meetingHistoryIntersectsTimeRange(item)) {
+    return false;
+  }
+  if (meetingHistorySessionFilters.status !== ALL_MEETING_FILTER_VALUE) {
+    if (String(item && item.status || '').trim() !== meetingHistorySessionFilters.status) {
+      return false;
+    }
+  }
+  if (meetingHistorySessionFilters.scriptComparator !== ALL_MEETING_FILTER_VALUE && meetingHistorySessionFilters.scriptLineCount) {
+    var scriptCount = Number(item && item.script_line_count || 0);
+    var compareValue = Number(meetingHistorySessionFilters.scriptLineCount);
+    if (isFinite(compareValue) && compareValue >= 0) {
+      if (meetingHistorySessionFilters.scriptComparator === 'gt' && !(scriptCount > compareValue)) return false;
+      if (meetingHistorySessionFilters.scriptComparator === 'lt' && !(scriptCount < compareValue)) return false;
+      if (meetingHistorySessionFilters.scriptComparator === 'eq' && !(scriptCount === compareValue)) return false;
+    }
+  }
+  var userQuery = normalizeMeetingSearchValue(meetingHistorySessionFilters.userQuery);
+  if (userQuery) {
+    var userSearchText = normalizeMeetingSearchValue(collectMeetingHistoryUserTokens(item).join(' '));
+    if (!userSearchText || userSearchText.indexOf(userQuery) < 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getFilteredMeetingHistoryItems(items) {
+  return (Array.isArray(items) ? items : []).filter(meetingHistoryMatchesSessionFilters);
+}
+
+function buildMeetingHistorySummaryText(totalCount, visibleCount) {
+  if (!totalCount) return '暂无记录';
+  var parts = [totalCount + ' 场会议'];
+  if (typeof visibleCount === 'number' && visibleCount >= 0 && visibleCount !== totalCount) {
+    parts.push('显示 ' + visibleCount + ' 场');
+  }
+  parts.push('已选 ' + selectedMeetingHistoryIds.size + ' 场');
+  return parts.join(' · ');
+}
+
+function closeHistoryExportMenu() {
+  var dropdown = document.getElementById('history-export-dropdown');
+  if (dropdown) dropdown.removeAttribute('open');
+}
+
+function parseMeetingFilterDate(value) {
+  var raw = String(value || '').trim();
+  if (!raw) return null;
+  var parsed = new Date(raw);
+  if (isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
+function applyMeetingHistorySessionFilters() {
+  var topicInput = document.getElementById('history-filter-topic');
+  var timeFromInput = document.getElementById('history-filter-time-from');
+  var timeToInput = document.getElementById('history-filter-time-to');
+  var statusInput = document.getElementById('history-filter-status');
+  var scriptOpInput = document.getElementById('history-filter-script-op');
+  var scriptValueInput = document.getElementById('history-filter-script-value');
+  var userInput = document.getElementById('history-filter-user');
+  var previousActiveId = activeMeetingHistoryId;
+  meetingHistorySessionFilters = {
+    topicQuery: String(topicInput && topicInput.value || '').trim(),
+    timeFrom: String(timeFromInput && timeFromInput.value || '').trim(),
+    timeTo: String(timeToInput && timeToInput.value || '').trim(),
+    status: String(statusInput && statusInput.value || ALL_MEETING_FILTER_VALUE).trim() || ALL_MEETING_FILTER_VALUE,
+    scriptComparator: String(scriptOpInput && scriptOpInput.value || ALL_MEETING_FILTER_VALUE).trim() || ALL_MEETING_FILTER_VALUE,
+    scriptLineCount: String(scriptValueInput && scriptValueInput.value || '').trim(),
+    userQuery: String(userInput && userInput.value || '').trim(),
+  };
+  syncMeetingHistorySessionFilterClearButton();
+  var visibleItems = renderMeetingHistoryList(allMeetingHistoryItems);
+  if (visibleItems.length && previousActiveId !== activeMeetingHistoryId) {
+    openMeetingHistory(activeMeetingHistoryId, true);
+  }
+}
+
+function clearMeetingHistorySessionFilters() {
+  resetMeetingHistorySessionFilters();
+  syncMeetingHistorySessionFilterControls();
+  var previousActiveId = activeMeetingHistoryId;
+  var visibleItems = renderMeetingHistoryList(allMeetingHistoryItems);
+  if (visibleItems.length && previousActiveId !== activeMeetingHistoryId) {
+    openMeetingHistory(activeMeetingHistoryId, true);
+  }
+}
+
 function formatMeetingTime(value) {
   if (!value) return '-';
   var date = new Date(value);
   if (isNaN(date.getTime())) return value;
   return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatMeetingTimeCompact(value) {
+  if (!value) return '-';
+  var date = new Date(value);
+  if (isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 }
 
 function formatMeetingDurationMs(value) {
@@ -1466,6 +1877,119 @@ function meetingDirectionLabel(direction) {
   if (direction === 'inbound') return '前端→后端';
   if (direction === 'internal') return '内部记录';
   return direction || 'unknown';
+}
+
+function meetingUtteranceStatusLabel(status) {
+  var key = String(status || '').trim();
+  var labels = {
+    nominated_only: '仅被点名',
+    skipped: '主动跳过',
+    timed_out: '等待超时',
+    spoke_with_content: '已实质发言',
+    spoke_empty: '空发言/无效输入',
+  };
+  return labels[key] || (key || '未知');
+}
+
+function meetingUtteranceStatusTone(status) {
+  var key = String(status || '').trim();
+  if (key === 'spoke_with_content') return 'ok';
+  if (key === 'nominated_only' || key === 'timed_out') return 'warn';
+  if (key === 'skipped') return 'muted';
+  if (key === 'spoke_empty') return 'fail';
+  return 'muted';
+}
+
+function collectMeetingUtteranceStatuses(summary) {
+  var floorManagerStats = summary && summary.final_stats && summary.final_stats.floor_manager
+    ? summary.final_stats.floor_manager
+    : null;
+  var rawStatuses = floorManagerStats && floorManagerStats.speaker_utterance_statuses && typeof floorManagerStats.speaker_utterance_statuses === 'object'
+    ? floorManagerStats.speaker_utterance_statuses
+    : null;
+  if (!rawStatuses) return [];
+
+  var preferredOrder = Array.isArray(summary && summary.participants) ? summary.participants.slice() : [];
+  var seen = {};
+  var orderedNames = [];
+  preferredOrder.forEach(function(name) {
+    var normalized = String(name || '').trim();
+    if (!normalized || seen[normalized] || !Object.prototype.hasOwnProperty.call(rawStatuses, normalized)) return;
+    seen[normalized] = true;
+    orderedNames.push(normalized);
+  });
+  Object.keys(rawStatuses).sort(function(a, b) {
+    return a.localeCompare(b, 'zh-CN');
+  }).forEach(function(name) {
+    var normalized = String(name || '').trim();
+    if (!normalized || seen[normalized]) return;
+    seen[normalized] = true;
+    orderedNames.push(normalized);
+  });
+
+  return orderedNames.map(function(name) {
+    var status = String(rawStatuses[name] || '').trim();
+    return {
+      name: name,
+      status: status,
+      label: meetingUtteranceStatusLabel(status),
+      tone: meetingUtteranceStatusTone(status),
+    };
+  });
+}
+
+function renderMeetingUtteranceStatusPanel(summary) {
+  var items = collectMeetingUtteranceStatuses(summary);
+  var floorManagerStats = summary && summary.final_stats && summary.final_stats.floor_manager
+    ? summary.final_stats.floor_manager
+    : null;
+  if (!items.length) {
+    return '' +
+      '<div class="history-runtime-panel">' +
+        '<div class="history-runtime-panel-head">' +
+          '<div class="history-runtime-panel-title">发言状态</div>' +
+          '<div class="history-runtime-panel-meta">仅新会话会写入 utterance status</div>' +
+        '</div>' +
+        '<div class="history-status-empty">这场历史记录还没有 speaker_utterance_statuses。旧会话仍可继续看完整剧本、时间线和 closing gate，但不会显示逐角色发言状态。</div>' +
+      '</div>';
+  }
+
+  var counts = {};
+  items.forEach(function(item) {
+    counts[item.label] = (counts[item.label] || 0) + 1;
+  });
+  var summaryChips = Object.keys(counts).sort(function(a, b) {
+    return a.localeCompare(b, 'zh-CN');
+  }).map(function(label) {
+    return '<span class="history-status-summary-chip">' + escHtml(label) + ' · ' + escHtml(String(counts[label])) + '</span>';
+  }).join('');
+
+  var noteParts = [];
+  if (floorManagerStats && Array.isArray(floorManagerStats.spoken_display_names) && floorManagerStats.spoken_display_names.length) {
+    noteParts.push('实质发言：' + floorManagerStats.spoken_display_names.join(' · '));
+  }
+  if (floorManagerStats && Array.isArray(floorManagerStats.missing_ai_display_names) && floorManagerStats.missing_ai_display_names.length) {
+    noteParts.push('未覆盖 AI：' + floorManagerStats.missing_ai_display_names.join(' · '));
+  }
+
+  return '' +
+    '<div class="history-runtime-panel">' +
+      '<div class="history-runtime-panel-head">' +
+        '<div class="history-runtime-panel-title">发言状态</div>' +
+        '<div class="history-runtime-panel-meta">按 summary.final_stats.floor_manager.speaker_utterance_statuses 渲染</div>' +
+      '</div>' +
+      '<div class="history-status-summary">' + summaryChips + '</div>' +
+      '<div class="history-status-grid">' + items.map(function(item) {
+        return '' +
+          '<div class="history-status-card ' + item.tone + '">' +
+            '<div class="history-status-name">' + escHtml(item.name) + '</div>' +
+            '<span class="history-status-pill ' + item.tone + '">' + escHtml(item.label) + '</span>' +
+          '</div>';
+      }).join('') + '</div>' +
+      (noteParts.length
+        ? '<div class="history-status-note">' + escHtml(noteParts.join(' ｜ ')) + '</div>'
+        : '') +
+    '</div>';
 }
 
 function prettyMeetingEventType(entryType) {
@@ -1715,13 +2239,112 @@ function clearMeetingHistoryFilters() {
   if (currentMeetingHistoryRecord) renderMeetingHistoryDetail(currentMeetingHistoryRecord);
 }
 
-function syncMeetingHistoryActions() {
+function normalizeSelectedMeetingHistoryIds(items) {
+  var validIds = new Set((Array.isArray(items) ? items : []).map(function(item) {
+    return item && item.session_id ? item.session_id : '';
+  }).filter(Boolean));
+  selectedMeetingHistoryIds = new Set(Array.from(selectedMeetingHistoryIds).filter(function(sessionId) {
+    return validIds.has(sessionId);
+  }));
+}
+
+function isMeetingHistorySelected(sessionId) {
+  return !!sessionId && selectedMeetingHistoryIds.has(sessionId);
+}
+
+function toggleMeetingHistorySelection(sessionId, forceSelected) {
+  if (!sessionId) return;
+  var shouldSelect = typeof forceSelected === 'boolean'
+    ? forceSelected
+    : !selectedMeetingHistoryIds.has(sessionId);
+  if (shouldSelect) {
+    selectedMeetingHistoryIds.add(sessionId);
+  } else {
+    selectedMeetingHistoryIds.delete(sessionId);
+  }
+  refreshMeetingHistorySelectionUi();
+}
+
+function clearSelectedMeetingHistories() {
+  if (!selectedMeetingHistoryIds.size) return;
+  selectedMeetingHistoryIds.clear();
+  refreshMeetingHistorySelectionUi();
+}
+
+function toggleSelectAllMeetingHistories() {
+  var listEl = document.getElementById('history-list');
+  if (!listEl) return;
+  var sessionIds = Array.from(listEl.querySelectorAll('.history-item[data-session-id]')).map(function(node) {
+    return node.getAttribute('data-session-id') || '';
+  }).filter(Boolean);
+  if (!sessionIds.length) return;
+  var allSelected = sessionIds.every(function(sessionId) { return selectedMeetingHistoryIds.has(sessionId); });
+  if (allSelected) {
+    sessionIds.forEach(function(sessionId) { selectedMeetingHistoryIds.delete(sessionId); });
+  } else {
+    sessionIds.forEach(function(sessionId) { selectedMeetingHistoryIds.add(sessionId); });
+  }
+  refreshMeetingHistorySelectionUi();
+}
+
+function refreshMeetingHistorySelectionUi() {
+  var listEl = document.getElementById('history-list');
+  var itemCount = 0;
+  var visibleSessionIds = [];
+  if (listEl) {
+    var historyNodes = Array.from(listEl.querySelectorAll('.history-item[data-session-id]'));
+    itemCount = historyNodes.length;
+    historyNodes.forEach(function(node) {
+      var sessionId = node.getAttribute('data-session-id') || '';
+      if (sessionId) visibleSessionIds.push(sessionId);
+      var selected = selectedMeetingHistoryIds.has(sessionId);
+      node.classList.toggle('selected', selected);
+      var checkbox = node.querySelector('.history-select-box');
+      if (checkbox) checkbox.checked = selected;
+    });
+  }
+  var summaryEl = document.getElementById('history-summary');
+  if (summaryEl) {
+    var totalCount = Number(listEl && listEl.getAttribute('data-total-count') || 0);
+    var visibleCount = Number(listEl && listEl.getAttribute('data-visible-count') || itemCount);
+    if (totalCount > 0) {
+      summaryEl.textContent = buildMeetingHistorySummaryText(totalCount, visibleCount);
+    }
+  }
+  syncMeetingHistoryActions(itemCount, visibleSessionIds);
+}
+
+function syncMeetingHistoryActions(totalCount, visibleSessionIds) {
+  var sessionIds = Array.isArray(visibleSessionIds)
+    ? visibleSessionIds.slice()
+    : Array.from(document.querySelectorAll('.history-item[data-session-id]')).map(function(node) {
+        return node.getAttribute('data-session-id') || '';
+      }).filter(Boolean);
+  var itemCount = typeof totalCount === 'number' ? totalCount : sessionIds.length;
+  var selectedCount = selectedMeetingHistoryIds.size;
+  var visibleSelectedCount = sessionIds.filter(function(sessionId) {
+    return selectedMeetingHistoryIds.has(sessionId);
+  }).length;
   var deleteBtn = document.getElementById('btn-delete-history');
   if (deleteBtn) deleteBtn.disabled = !activeMeetingHistoryId;
-  var exportMdBtn = document.getElementById('btn-export-md-header');
-  if (exportMdBtn) exportMdBtn.disabled = !activeMeetingHistoryId;
-  var exportJsonBtn = document.getElementById('btn-export-json-header');
-  if (exportJsonBtn) exportJsonBtn.disabled = !activeMeetingHistoryId;
+  var deleteSelectedBtn = document.getElementById('btn-delete-history-selected');
+  if (deleteSelectedBtn) {
+    deleteSelectedBtn.disabled = !selectedCount;
+    deleteSelectedBtn.textContent = selectedCount ? ('🗑 删除所选（' + selectedCount + '）') : '🗑 删除所选';
+  }
+  var selectAllBtn = document.getElementById('btn-select-all-history');
+  if (selectAllBtn) {
+    selectAllBtn.disabled = !itemCount;
+    var allSelected = itemCount > 0 && visibleSelectedCount === itemCount;
+    selectAllBtn.textContent = allSelected ? '☑ 取消全选' : '☑ 全选';
+  }
+  var clearSelectionBtn = document.getElementById('btn-clear-history-selection');
+  if (clearSelectionBtn) clearSelectionBtn.disabled = !selectedCount;
+  var exportDropdown = document.getElementById('history-export-dropdown');
+  if (exportDropdown) {
+    exportDropdown.classList.toggle('disabled', !activeMeetingHistoryId);
+    if (!activeMeetingHistoryId) exportDropdown.removeAttribute('open');
+  }
 }
 
 function toggleHistoryCard(cardName) {
@@ -1809,19 +2432,63 @@ function renderMeetingScriptPackagePanel(recordings, summary) {
     : '当前没有录音附件，可只打包文字剧本。';
   return '' +
     '<div class="history-package-panel">' +
-      '<div class="history-package-title">ZIP 复盘包</div>' +
-      '<div class="history-package-subtitle">默认只打包文字。需要结构化归档或录音时，再勾选附加内容。</div>' +
-      '<div class="history-package-options">' +
-        '<label class="history-package-option"><input id="meeting-package-markdown" type="checkbox" checked> Markdown 剧本</label>' +
-        '<label class="history-package-option"><input id="meeting-package-json" type="checkbox"> JSON 剧本</label>' +
-        '<label class="history-package-option' + (hasRecordings ? '' : ' disabled') + '"><input id="meeting-package-recording-manifest" type="checkbox"' + (hasRecordings ? '' : ' disabled') + '> 录音清单</label>' +
-        '<label class="history-package-option' + (hasRecordings ? '' : ' disabled') + '"><input id="meeting-package-recording-audio" type="checkbox"' + (hasRecordings ? '' : ' disabled') + '> 音频附件</label>' +
-      '</div>' +
-      '<div class="history-package-actions">' +
+      '<div class="history-package-top">' +
+        '<div class="history-package-copy">' +
+          '<div class="history-package-title">ZIP 复盘包</div>' +
+          '<div class="history-package-subtitle">默认只打包文字。需要结构化归档或录音时，再勾选附加内容。</div>' +
+        '</div>' +
         '<div class="history-package-status">' + escHtml(status) + '</div>' +
-        '<button type="button" class="history-export-btn" onclick="downloadMeetingScriptPackage()">下载 ZIP 复盘包</button>' +
+      '</div>' +
+      '<div class="history-package-bottom">' +
+        '<div class="history-package-options">' +
+          '<label class="history-package-option"><input id="meeting-package-markdown" type="checkbox" checked> Markdown 剧本</label>' +
+          '<label class="history-package-option"><input id="meeting-package-json" type="checkbox"> JSON 剧本</label>' +
+          '<label class="history-package-option' + (hasRecordings ? '' : ' disabled') + '"><input id="meeting-package-recording-manifest" type="checkbox"' + (hasRecordings ? '' : ' disabled') + '> 录音清单</label>' +
+          '<label class="history-package-option' + (hasRecordings ? '' : ' disabled') + '"><input id="meeting-package-recording-audio" type="checkbox"' + (hasRecordings ? '' : ' disabled') + '> 音频附件</label>' +
+        '</div>' +
+        '<div class="history-package-actions">' +
+          '<button type="button" class="history-export-btn" onclick="downloadMeetingScriptPackage()">下载 ZIP 复盘包</button>' +
+        '</div>' +
       '</div>' +
     '</div>';
+}
+
+function renderMeetingSummaryStrip(summary, script, recordings) {
+  var recordingCount = Number(summary.recording_count || recordings.length || 0);
+  var recordingDuration = formatMeetingDurationMs(summary.recording_duration_ms);
+  var floorManagerStats = summary && summary.final_stats && summary.final_stats.floor_manager
+    ? summary.final_stats.floor_manager
+    : null;
+  var closingGate = floorManagerStats && floorManagerStats.closing_gate
+    ? floorManagerStats.closing_gate
+    : null;
+  var segments = [
+    { label: 'SESSION', value: summary.session_id || '-' },
+    { label: '开始', value: formatMeetingTime(summary.started_at) },
+    { label: '结束', value: formatMeetingTime(summary.ended_at) },
+    { label: '参与者', value: Array.isArray(summary.participants) ? summary.participants.join(' · ') : '-', wide: true },
+    { label: '事件', value: String(summary.event_count || 0) + ' 条' },
+    { label: '剧本', value: String(summary.script_line_count || script.line_count || 0) + ' 行' },
+    { label: '录音', value: recordingCount + ' 段' + (recordingDuration !== '-' ? (' / ' + recordingDuration) : '') },
+  ];
+  if (closingGate && Array.isArray(closingGate.blockers) && closingGate.blockers.length) {
+    segments.push({
+      label: '收尾闸门',
+      value: closingGate.blockers.join(' ｜ '),
+      wide: true,
+    });
+  }
+  var summaryStrip = '<div class="history-summary-strip">' + segments.map(function(segment) {
+    var titleAttr = segment.value && segment.value !== '-' ? ' title="' + escAttr(segment.value) + '"' : '';
+    return '<div class="history-summary-segment' + (segment.wide ? ' wide' : '') + '"' + titleAttr + '>' +
+      '<span class="history-summary-segment-label">' + escHtml(segment.label) + '</span>' +
+      '<span class="history-summary-segment-value">' + escHtml(segment.value) + '</span>' +
+    '</div>';
+  }).join('') + '</div>';
+  return '<div class="history-runtime-insights">' +
+    '<div>' + summaryStrip + '</div>' +
+    renderMeetingUtteranceStatusPanel(summary) +
+  '</div>';
 }
 
 function summarizeMeetingEvent(event) {
@@ -1950,37 +2617,72 @@ function renderMeetingHistoryList(items) {
   var listEl = document.getElementById('history-list');
   var detailEl = document.getElementById('history-detail');
   var summaryEl = document.getElementById('history-summary');
-  if (!Array.isArray(items) || items.length === 0) {
+  var allItems = Array.isArray(items) ? items : [];
+  refreshMeetingHistoryStatusFilterOptions(allItems);
+  syncMeetingHistorySessionFilterClearButton();
+  if (!allItems.length) {
     listEl.innerHTML = '<div class="history-empty">还没有持久化的会议记录。下一次讨论开始后，这里会自动出现完整时间线。</div>';
     detailEl.innerHTML = '<div class="history-empty">暂无会议记录可查看。</div>';
     summaryEl.textContent = '暂无记录';
     summaryEl.style.color = '#5f6f95';
+    listEl.setAttribute('data-total-count', '0');
+    listEl.setAttribute('data-visible-count', '0');
     activeMeetingHistoryId = '';
     currentMeetingHistoryRecord = null;
-    syncMeetingHistoryActions();
-    return;
+    selectedMeetingHistoryIds.clear();
+    syncMeetingHistoryActions(0, []);
+    return [];
   }
 
-  summaryEl.textContent = items.length + ' 场会议';
-  summaryEl.style.color = '#80cbc4';
-  if (!items.some(function(item) { return item.session_id === activeMeetingHistoryId; })) {
-    activeMeetingHistoryId = items[0].session_id;
-  }
-  syncMeetingHistoryActions();
+  normalizeSelectedMeetingHistoryIds(allItems);
+  var filteredItems = getFilteredMeetingHistoryItems(allItems);
+  listEl.setAttribute('data-total-count', String(allItems.length));
+  listEl.setAttribute('data-visible-count', String(filteredItems.length));
+  summaryEl.textContent = buildMeetingHistorySummaryText(allItems.length, filteredItems.length);
+  summaryEl.style.color = filteredItems.length ? '#80cbc4' : '#f6e3a5';
 
-  listEl.innerHTML = items.map(function(item) {
+  if (!filteredItems.length) {
+    listEl.innerHTML = '<div class="history-empty history-empty-note">当前筛选下没有匹配的会议记录。<button type="button" class="history-filter-clear" onclick="clearMeetingHistorySessionFilters()">清除筛选</button></div>';
+    detailEl.innerHTML = '<div class="history-empty history-empty-note">没有符合当前筛选条件的会议记录。<button type="button" class="history-filter-clear" onclick="clearMeetingHistorySessionFilters()">恢复全部会议</button></div>';
+    activeMeetingHistoryId = '';
+    currentMeetingHistoryRecord = null;
+    syncMeetingHistoryActions(0, []);
+    return [];
+  }
+
+  if (!filteredItems.some(function(item) { return item.session_id === activeMeetingHistoryId; })) {
+    activeMeetingHistoryId = filteredItems[0].session_id;
+  }
+  syncMeetingHistoryActions(filteredItems.length, filteredItems.map(function(item) { return item.session_id; }));
+
+  listEl.innerHTML = filteredItems.map(function(item) {
     var topicTitle = item.topic && item.topic.title ? item.topic.title : (item.config && item.config.free_topic) || item.session_id;
     var encodedSessionId = encodeURIComponent(item.session_id || '');
+    var selected = isMeetingHistorySelected(item.session_id);
     return '' +
-      '<div class="history-item' + (item.session_id === activeMeetingHistoryId ? ' active' : '') + '" data-session-id="' + escHtml(item.session_id) + '" onclick="openMeetingHistory(decodeURIComponent(&quot;' + encodedSessionId + '&quot;))">' +
-        '<div class="history-topic">' + escHtml(topicTitle) + '</div>' +
-        '<div class="history-meta">' +
-          '<span class="history-pill ' + meetingStatusClass(item.status) + '">' + escHtml(meetingStatusLabel(item.status)) + '</span>' +
-          '<span class="history-pill">' + escHtml(String(item.event_count || 0)) + ' 条</span>' +
-          '<span class="history-pill">' + escHtml(formatMeetingTime(item.updated_at)) + '</span>' +
+      '<div class="history-item' + (item.session_id === activeMeetingHistoryId ? ' active' : '') + (selected ? ' selected' : '') + '" data-session-id="' + escAttr(item.session_id) + '" onclick="openMeetingHistory(decodeURIComponent(&quot;' + encodedSessionId + '&quot;))">' +
+        '<div class="history-item-head">' +
+          '<label class="history-select-wrap" title="选择这条会议记录" onclick="event.stopPropagation()">' +
+            '<input class="history-select-box" type="checkbox" ' + (selected ? 'checked ' : '') + 'onchange="toggleMeetingHistorySelection(decodeURIComponent(&quot;' + encodedSessionId + '&quot;), this.checked)">' +
+          '</label>' +
+          '<div class="history-item-body">' +
+            '<div class="history-item-main">' +
+              '<div class="history-item-copy">' +
+                '<div class="history-session-id">' + escHtml(item.session_id || '-') + '</div>' +
+                '<div class="history-topic">' + escHtml(topicTitle) + '</div>' +
+                '<div class="history-item-time">' + escHtml(formatMeetingTimeCompact(item.updated_at || item.started_at)) + '</div>' +
+              '</div>' +
+              '<div class="history-item-side">' +
+                '<span class="history-pill ' + meetingStatusClass(item.status) + '">' + escHtml(meetingStatusLabel(item.status)) + '</span>' +
+                '<span class="history-item-count">' + escHtml(String(item.event_count || 0)) + ' 条</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
         '</div>' +
       '</div>';
   }).join('');
+
+  return filteredItems;
 }
 
 function renderMeetingHistoryDetail(record) {
@@ -1992,21 +2694,12 @@ function renderMeetingHistoryDetail(record) {
   var filteredEvents = events.filter(eventMatchesMeetingHistoryFilters);
   var processIndexMap = buildMeetingProcessIndexMap(events);
   var topicTitle = summary.topic && summary.topic.title ? summary.topic.title : summary.session_id || '未命名会议';
-  var cards = [
-    ['Session ID', summary.session_id || '-'],
-    ['状态', meetingStatusLabel(summary.status)],
-    ['开始时间', formatMeetingTime(summary.started_at)],
-    ['结束时间', formatMeetingTime(summary.ended_at)],
-    ['参与者', Array.isArray(summary.participants) ? summary.participants.join(' · ') : '-'],
-    ['事件总数', String(summary.event_count || 0)],
-    ['剧本行数', String(summary.script_line_count || script.line_count || 0)],
-    ['录音留存', String(summary.recording_count || recordings.length || 0) + ' 段 ｜ ' + formatMeetingDurationMs(summary.recording_duration_ms)],
-  ];
   detailEl.innerHTML = '' +
     '<div class="history-detail-head">' +
-      '<div>' +
+      '<div class="history-head-panel history-head-main">' +
+        '<div class="history-head-kicker">会议主题</div>' +
         '<div class="history-detail-title">' + escHtml(topicTitle) + '</div>' +
-        '<div class="history-meta" style="margin-top:8px">' +
+        '<div class="history-head-meta">' +
           '<span class="history-pill ' + meetingStatusClass(summary.status) + '">' + escHtml(meetingStatusLabel(summary.status)) + '</span>' +
           '<span class="history-pill">最后更新 ' + escHtml(formatMeetingTime(summary.updated_at)) + '</span>' +
         '</div>' +
@@ -2015,9 +2708,7 @@ function renderMeetingHistoryDetail(record) {
         renderMeetingScriptPackagePanel(recordings, summary) +
       '</div>' +
     '</div>' +
-    '<div class="history-summary-grid">' + cards.map(function(card) {
-      return '<div class="history-summary-card"><div class="history-summary-label">' + escHtml(card[0]) + '</div><div class="history-summary-value">' + escHtml(card[1]) + '</div></div>';
-    }).join('') + '</div>' +
+    renderMeetingSummaryStrip(summary, script, recordings) +
     '<div class="history-sections-cards">' +
       // 左侧卡片: 完整剧本
       '<div class="history-card" id="history-card-script">' +
@@ -2081,7 +2772,10 @@ function openMeetingHistory(sessionId, preserveFilters) {
       return panelFetch('/api/meeting-history');
     })
     .then(function(r) { return r.json(); })
-    .then(renderMeetingHistoryList)
+    .then(function(items) {
+      allMeetingHistoryItems = Array.isArray(items) ? items : [];
+      renderMeetingHistoryList(allMeetingHistoryItems);
+    })
     .catch(function(err) {
       detailEl.innerHTML = '<div class="history-empty">读取会议历史失败：' + escHtml((err && err.message) || 'unknown') + '</div>';
     });
@@ -2110,6 +2804,35 @@ function deleteActiveMeetingHistory() {
     });
 }
 
+function deleteSelectedMeetingHistories() {
+  var sessionIds = Array.from(selectedMeetingHistoryIds);
+  if (!sessionIds.length) return;
+  if (!window.confirm('删除后无法恢复，确认删除所选的 ' + sessionIds.length + ' 场会议记录？')) return;
+  Promise.all(sessionIds.map(function(sessionId) {
+    return panelFetch('/api/meeting-history/' + encodeURIComponent(sessionId), { method: 'DELETE' })
+      .then(function(r) {
+        return r.json().then(function(data) {
+          if (!r.ok || !data.ok) throw new Error((data && data.msg) || (data && data.error) || sessionId);
+          return data;
+        });
+      });
+  }))
+    .then(function() {
+      var deletedActive = sessionIds.indexOf(activeMeetingHistoryId) >= 0;
+      sessionIds.forEach(function(sessionId) { selectedMeetingHistoryIds.delete(sessionId); });
+      if (deletedActive) {
+        activeMeetingHistoryId = '';
+        currentMeetingHistoryRecord = null;
+        resetMeetingHistoryFilters();
+      }
+      showToast('已删除所选的 ' + sessionIds.length + ' 场会议记录');
+      return refreshMeetingHistory();
+    })
+    .catch(function(err) {
+      showToast('批量删除失败：' + ((err && err.message) || 'unknown'));
+    });
+}
+
 function pruneMeetingHistory() {
   panelFetch('/api/meeting-history/prune', { method: 'POST' })
     .then(function(r) {
@@ -2133,6 +2856,8 @@ function refreshMeetingHistory() {
   var listEl = document.getElementById('history-list');
   listEl.innerHTML = '<div class="history-empty">正在读取会议历史…</div>';
   document.getElementById('history-summary').textContent = '加载中…';
+  listEl.setAttribute('data-total-count', '0');
+  listEl.setAttribute('data-visible-count', '0');
   syncMeetingHistoryActions();
   return panelFetch('/api/meeting-history')
     .then(function(r) {
@@ -2140,8 +2865,16 @@ function refreshMeetingHistory() {
       return r.json();
     })
     .then(function(items) {
-      renderMeetingHistoryList(items);
-      if (items.length > 0) openMeetingHistory(activeMeetingHistoryId || items[0].session_id, true);
+      allMeetingHistoryItems = Array.isArray(items) ? items : [];
+      var visibleItems = renderMeetingHistoryList(allMeetingHistoryItems);
+      if (visibleItems.length > 0) {
+        if (!activeMeetingHistoryId) {
+          activeMeetingHistoryId = visibleItems[0].session_id;
+        }
+        if (!currentMeetingHistoryRecord || !currentMeetingHistoryRecord.summary || currentMeetingHistoryRecord.summary.session_id !== activeMeetingHistoryId) {
+          openMeetingHistory(activeMeetingHistoryId, true);
+        }
+      }
     })
     .catch(function(err) {
       document.getElementById('history-list').innerHTML = '<div class="history-empty">读取会议历史失败：' + escHtml((err && err.message) || 'unknown') + '</div>';
@@ -2149,6 +2882,7 @@ function refreshMeetingHistory() {
       var summaryEl = document.getElementById('history-summary');
       summaryEl.textContent = '读取失败';
       summaryEl.style.color = '#ef5350';
+      allMeetingHistoryItems = [];
       syncMeetingHistoryActions();
     });
 }
@@ -2397,9 +3131,10 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404); res.end();
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(DEV_PANEL_PORT, '127.0.0.1', () => {
   console.log('\n🕯  RoundTable 开发面板已启动');
-  console.log('   面板地址: http://localhost:' + PORT);
+  console.log('   面板地址: http://localhost:' + DEV_PANEL_PORT);
+  console.log('   后端地址: ' + LOCALHOST_BACKEND_URL);
   console.log('   按 Ctrl+C 退出\n');
 });
 

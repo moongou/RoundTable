@@ -152,6 +152,19 @@ class DiscussionWebSocket {
     }));
   }
 
+  void sendEndDiscussion({
+    required String speaker,
+    String reason = 'button',
+  }) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'end_discussion',
+      'speaker': speaker,
+      'reason': reason,
+    }));
+  }
+
   /// 发送 Push-to-Talk 开始信号
   void sendPushToTalkStart({required String speaker}) {
     if (!_connected || _channel == null) return;

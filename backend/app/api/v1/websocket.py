@@ -510,19 +510,22 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         for agent_name, display_name in agent_display_map.items():
             display_name_to_agent[display_name] = agent_name
 
+        def build_discussion_team() -> SelectorGroupChat:
+            return create_discussion_team(
+                moderator=moderator_agent,
+                characters=[a for a in ai_agents if a is not moderator_agent],
+                humans=human_agents,
+                selector_client=moderator_client,
+                max_turns=max_turns,
+                consume_designated_speaker=consume_session_designated_speaker,
+                on_designation_lifecycle=on_designation_lifecycle,
+                display_name_to_agent=display_name_to_agent,
+                get_human_engagement_level=get_human_engagement_level,
+                thinker_agent_names=[a.name for a in thinker_agents],
+            )
+
         # 创建讨论团队
-        team = create_discussion_team(
-            moderator=moderator_agent,
-            characters=[a for a in ai_agents if a is not moderator_agent],
-            humans=human_agents,
-            selector_client=moderator_client,
-            max_turns=max_turns,
-            consume_designated_speaker=consume_session_designated_speaker,
-            on_designation_lifecycle=on_designation_lifecycle,
-            display_name_to_agent=display_name_to_agent,
-            get_human_engagement_level=get_human_engagement_level,
-            thinker_agent_names=[a.name for a in thinker_agents],
-        )
+        team = build_discussion_team()
 
         # 创建安全过滤器
         safety_filter = SafetyFilter(model_client=character_client)
@@ -530,6 +533,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         # 创建 Floor Manager
         floor_manager = FloorManager(
             team=team,
+            team_factory=build_discussion_team,
             ai_agents=ai_agents,
             human_agents=human_agents,
             safety_filter=safety_filter,
@@ -748,6 +752,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                                 event_seq=linked_event_seq,
                                 detail=detail,
                             )
+                    elif msg_type == "end_discussion":
+                        msg["speaker"] = normalize_display_name(msg.get("speaker", ""))
+                        msg["reason"] = str(msg.get("reason", "") or "").strip()
 
                     if history_store is not None:
                         await history_store.append_entry(
@@ -778,6 +785,22 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         speaker = normalize_display_name(msg.get("speaker", ""))
                         request_id = str(msg.get("request_id", "") or "").strip()
                         await floor_manager.request_interrupt(speaker, request_id=request_id)
+                    elif msg_type == "end_discussion":
+                        speaker = normalize_display_name(msg.get("speaker", ""))
+                        reason = str(msg.get("reason", "") or "button").strip() or "button"
+                        await floor_manager.request_end_discussion(
+                            speaker,
+                            source=reason,
+                        )
+                        await send_phase_telemetry(
+                            {
+                                "source": "frontend",
+                                "phase": "closing",
+                                "reason": f"human_requested_end_{reason}",
+                                "recovery": False,
+                                "speaker": speaker,
+                            }
+                        )
                     elif msg_type == "push_to_talk_start":
                         # PTT 开始 - 标记用户开始发言
                         speaker = normalize_display_name(msg.get("speaker", ""))

@@ -134,7 +134,8 @@ void main() {
     );
   });
 
-  test('pending human turn waits for any queued or active playback', () {
+  test('pending human turn waits only for active or current-speaker playback',
+      () {
     expect(
       ImmersiveSessionScreen.shouldBlockPendingHumanTurn(
         ttsPlaying: false,
@@ -172,7 +173,7 @@ void main() {
         hasQueuedCurrentSpeakerSpeech: false,
         hasQueuedSpeech: true,
       ),
-      isTrue,
+      isFalse,
     );
   });
 
@@ -800,6 +801,34 @@ void main() {
         fallbackText: '补一句。再补一句',
       ),
       ['补一句。', '再补一句'],
+    );
+  });
+
+  test('message tts tail is derived from prior streamed segments', () {
+    expect(
+      ImmersiveSessionScreen.deriveRemainingTtsTextAfterStream(
+        messageText: '同学们好！我是李老师。今天我们来讨论语言学习。',
+        streamedSegments: ['同学们好！', '我是李老师。'],
+      ),
+      '今天我们来讨论语言学习。',
+    );
+
+    expect(
+      ImmersiveSessionScreen.deriveRemainingTtsTextAfterStream(
+        messageText: '同学们好！我是李老师。',
+        streamedSegments: ['同学们好！', '我是李老师。'],
+        fallbackTtsText: '同学们好！我是李老师。',
+      ),
+      '',
+    );
+
+    expect(
+      ImmersiveSessionScreen.deriveRemainingTtsTextAfterStream(
+        messageText: '（兴奋地举手）李老师！这个问题我昨天也想过。',
+        streamedSegments: ['李老师！'],
+        fallbackTtsText: '这个问题我昨天也想过。',
+      ),
+      '这个问题我昨天也想过。',
     );
   });
 

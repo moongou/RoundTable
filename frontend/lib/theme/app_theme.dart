@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import 'app_colors.dart';
 
@@ -14,6 +13,15 @@ class AppTheme {
     'Microsoft YaHei',
     'WenQuanYi Micro Hei',
     'sans-serif',
+  ];
+  static const List<String> calligraphyFontFallback = <String>[
+    'Kaiti SC',
+    'STKaiti',
+    'Songti SC',
+    'STSong',
+    'Source Han Serif SC',
+    'Noto Serif SC',
+    'serif',
   ];
 
   static TextTheme _textThemeWithCjkFallback(Brightness brightness) {
@@ -83,10 +91,11 @@ class AppTheme {
     Color? color,
     FontWeight fontWeight = FontWeight.bold,
   }) {
-    return GoogleFonts.zcoolXiaoWei(
+    return TextStyle(
       fontSize: fontSize,
       color: color ?? AppColors.scrollTitle,
       fontWeight: fontWeight,
+      fontFamilyFallback: calligraphyFontFallback,
     );
   }
 
@@ -95,10 +104,11 @@ class AppTheme {
     Color? color,
     FontWeight fontWeight = FontWeight.bold,
   }) {
-    return GoogleFonts.zcoolXiaoWei(
+    return TextStyle(
       fontSize: fontSize,
       color: color ?? AppColors.warmWhite,
       fontWeight: fontWeight,
+      fontFamilyFallback: calligraphyFontFallback,
     );
   }
 

@@ -56,6 +56,16 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 
 FIRST_CLOSING_PROMPT_MARKER = "收尾前，我想先问问大家"
 SECOND_CLOSING_PROMPT_MARKER = "最后我再问一次"
+GENERIC_NOMINATION_PATTERNS = (
+    re.compile(r"大家怎么看(?:呢)?[？?！!。.]?"),
+    re.compile(r"其他同学呢[？?！!。.]?"),
+    re.compile(r"还有谁想说[？?！!。.]?"),
+    re.compile(r"谁来说说[？?！!。.]?"),
+    re.compile(r"请其他同学说说[？?！!。.]?"),
+    re.compile(r"别的同学怎么看(?:呢)?[？?！!。.]?"),
+    re.compile(r"还有哪位同学[？?！!。.]?"),
+    re.compile(r"谁还想说[？?！!。.]?"),
+)
 
 # 结束讨论的关键词
 TERMINATION_KEYWORDS = ["讨论结束", "END_DISCUSSION", "今天讨论到这里"]
@@ -67,6 +77,10 @@ _designated_next_speaker: Optional[str] = None
 def set_designated_speaker(name: Optional[str]) -> None:
     """设置被指定的下一个发言者。"""
     global _designated_next_speaker
+    previous = _designated_next_speaker
+    if previous and previous != name:
+        logger.info("[TurnScheduler] 覆盖旧指定发言者: %s -> %s", previous, name)
+    _designated_next_speaker = None
     _designated_next_speaker = name
     if name:
         logger.info("[TurnScheduler] 指定下一位发言者: %s", name)
@@ -78,6 +92,14 @@ def get_designated_speaker() -> Optional[str]:
     name = _designated_next_speaker
     _designated_next_speaker = None
     return name
+
+
+def is_generic_nomination(text: str) -> bool:
+    """判断文本是否属于不带明确对象的泛化点名。"""
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact:
+        return False
+    return any(pattern.search(compact) for pattern in GENERIC_NOMINATION_PATTERNS)
 
 
 def _build_participant_alias_map(participant_names: list[str]) -> dict[str, str]:
@@ -96,6 +118,9 @@ def _build_participant_alias_map(participant_names: list[str]) -> dict[str, str]
         stripped = title_pattern.sub("", canonical).strip()
         if stripped:
             aliases.add(stripped)
+            compact = re.sub(r"\s+", "", stripped)
+            if compact:
+                aliases.add(compact)
 
         # 处理中西文复合姓名，支持使用最后一段进行点名（如“阿德勒先生”）。
         for splitter in ("·", "・", ".", " "):
@@ -286,7 +311,7 @@ def create_discussion_team(
     preferred_human_turn_target = 0
     human_turn_min_target = 0
     human_turn_soft_cap = 0
-    base_first_human_invite_after_turns = 2
+    base_first_human_invite_after_turns = 1
     forced_first_human_after_turns = 3
     base_human_reinvite_gap = 3  # Minimum gap between human turns for even distribution
     moderator_soft_cap_ratio = 0.40
@@ -514,7 +539,7 @@ def create_discussion_team(
         if (
             human_name_set
             and not has_human_spoken
-            and len(non_moderator_msgs) >= 2
+            and len(non_moderator_msgs) >= base_first_human_invite_after_turns
             and last_source != moderator.name
         ):
             logger.info("[TurnScheduler] 真人学生尚未发言，优先把老师拉回邀请位")

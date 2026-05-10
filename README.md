@@ -97,8 +97,11 @@ node devpanel.js
 
 ECS 上的同构能力：
 
-- `deploy/deploy_aliyun.sh` 会创建 `roundtable-devpanel` systemd 服务（监听服务器本机 `127.0.0.1:8888`）。
-- 可通过 SSH 隧道访问云上开发面板：`ssh -L 8888:127.0.0.1:8888 root@<ECS_IP>`
+- `deploy/deploy_aliyun.sh` 已支持项目级端口隔离，可通过环境变量设置 `BACKEND_PORT`、`DEVPANEL_PORT`、`PUBLIC_PORT`，并可通过 `ENABLE_PUBLIC_TLS=true` 让公网端口直接走 HTTPS。
+- 推荐做法：每个项目占用独立后端端口，再由 Nginx 统一做代理；如果你希望直接通过域名加端口访问，也可以开启 `EXPOSE_PUBLIC_PORT=true`。
+- RoundTable 当前建议的 ECS 组合是：后端内网端口 `18421`，开发面板 `8921`，外部访问端口 `8421`，公网协议 `HTTPS`。
+- 示例：`BACKEND_PORT=18421 DEVPANEL_PORT=8921 PUBLIC_PORT=8421 EXPOSE_PUBLIC_PORT=true ENABLE_STANDARD_HTTP=false ENABLE_PUBLIC_TLS=true bash deploy/deploy_aliyun.sh`
+- 可通过 SSH 隧道访问云上开发面板：`ssh -L 8921:127.0.0.1:8921 root@<ECS_IP>`
 
 浏览器侧烟测清单：
 

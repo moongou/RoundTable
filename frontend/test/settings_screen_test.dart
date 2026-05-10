@@ -5,7 +5,39 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:roundtable/features/settings/settings_screen.dart';
 import 'package:roundtable/models/config_models.dart';
+import 'package:roundtable/services/api_client.dart';
 import 'package:roundtable/state/settings_provider.dart';
+
+class _FakeSettingsApiClient extends ApiClient {
+  _FakeSettingsApiClient({required this.providerResult})
+      : super(baseUrl: 'http://localhost:8001');
+
+  final ProviderTestResult providerResult;
+  Map<String, dynamic>? lastUpdate;
+
+  @override
+  Future<ProviderTestResult> testProvider({
+    required String providerId,
+    String? apiKey,
+    String? baseUrl,
+    String? model,
+  }) async {
+    return providerResult;
+  }
+
+  @override
+  Future<Map<String, dynamic>> updateConfig(
+      Map<String, dynamic> updates) async {
+    lastUpdate = Map<String, dynamic>.from(updates);
+    return lastUpdate!;
+  }
+
+  @override
+  Future<Map<String, dynamic>> saveConfig(Map<String, dynamic> updates) async {
+    lastUpdate = Map<String, dynamic>.from(updates);
+    return lastUpdate!;
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -467,5 +499,127 @@ void main() {
     expect(find.text('测试连接'), findsNothing);
     expect(find.text('写入 .env'), findsNothing);
     expect(find.text('启用流式语音识别'), findsNothing);
+  });
+
+  testWidgets('ai model settings prefer manual input over tested dropdown',
+      (tester) async {
+    tester.view.physicalSize = const Size(1400, 2200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    SharedPreferences.setMockInitialValues({
+      'server_url': 'http://localhost:8001',
+      'llm_provider': 'deepseek',
+      'asr_provider': 'funasr',
+      'tts_provider': 'edge_tts',
+      'push_to_talk': true,
+      'mic_control_mode': 'hold_ctrl',
+    });
+
+    final fakeClient = _FakeSettingsApiClient(
+      providerResult: const ProviderTestResult(
+        success: true,
+        models: ['verified-alpha', 'verified-beta'],
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWith((ref) => fakeClient),
+          providersProvider.overrideWith(
+            (ref) async => const [
+              ProviderInfo(
+                id: 'deepseek',
+                name: 'DeepSeek',
+                baseUrl: 'https://api.deepseek.com/v1',
+                model: 'legacy-model',
+                hasApiKey: true,
+                isActive: true,
+                needsApiKey: true,
+              ),
+            ],
+          ),
+          speechConfigProvider.overrideWith(
+            (ref) async => const SpeechConfig(
+              asrProviders: [
+                SpeechProviderInfo(
+                  id: 'funasr',
+                  name: 'FunASR',
+                  isActive: true,
+                  available: true,
+                ),
+              ],
+              ttsProviders: [
+                SpeechProviderInfo(
+                  id: 'edge_tts',
+                  name: 'Edge TTS',
+                  isActive: true,
+                  available: true,
+                ),
+              ],
+              pushToTalk: true,
+            ),
+          ),
+          healthStatusProvider.overrideWith(
+            (ref) async => const {
+              'llm': ServiceHealth(
+                name: 'llm',
+                url: 'http://localhost:8001/api/v1/config/health',
+                reachable: true,
+                detail: 'LLM 正常',
+              ),
+            },
+          ),
+          currentConfigProvider.overrideWith(
+            (ref) async => const CurrentConfig(
+              llmProvider: 'deepseek',
+              llmProviderName: 'DeepSeek',
+              apiKeyMasked: 'sk-***',
+              model: 'legacy-model',
+              asrProvider: 'funasr',
+              ttsProvider: 'edge_tts',
+              pushToTalk: true,
+              webSearchEnabled: false,
+              tavilyConfigured: false,
+            ),
+          ),
+        ],
+        child: const MaterialApp(home: SettingsScreen()),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    final scrollable = find.byType(Scrollable).first;
+    final testButton = find.widgetWithText(OutlinedButton, '测试连接');
+    await tester.scrollUntilVisible(testButton, 200, scrollable: scrollable);
+    await tester.tap(testButton);
+    await tester.pumpAndSettle();
+
+    expect(
+        find.byKey(const ValueKey('llm-model-input-deepseek')), findsOneWidget);
+    expect(find.byKey(const ValueKey('llm-model-select-deepseek')),
+        findsOneWidget);
+    expect(find.text('手动输入优先；若留空，则以下方已验证模型为准。'), findsOneWidget);
+
+    final applyButton = find.widgetWithText(OutlinedButton, '应用');
+    await tester.scrollUntilVisible(applyButton, 200, scrollable: scrollable);
+    await tester.tap(applyButton);
+    await tester.pumpAndSettle();
+    expect(fakeClient.lastUpdate?['deepseek_model'], 'verified-alpha');
+
+    await tester.enterText(
+      find.byKey(const ValueKey('llm-model-input-deepseek')),
+      'manual-model',
+    );
+    await tester.pump();
+
+    await tester.tap(applyButton);
+    await tester.pumpAndSettle();
+    expect(fakeClient.lastUpdate?['deepseek_model'], 'manual-model');
   });
 }

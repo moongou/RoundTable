@@ -936,7 +936,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       }
     }
 
-    Navigator.push(
+    await Navigator.push<void>(
       context,
       PageRouteBuilder(
         pageBuilder: (_, a1, a2) => ImmersiveSessionScreen(
@@ -954,6 +954,14 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
         transitionDuration: const Duration(milliseconds: 500),
       ),
     );
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _selectedCharacterIds.clear();
+      _selectedThinkerIds.clear();
+    });
   }
 
   void _showPreflightFailedDialog({
