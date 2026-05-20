@@ -394,6 +394,32 @@ def _normalize_siliconflow_voice(voice: str, character_id: str | None = None) ->
 
 # ── TTS 端点 ──────────────────────────────────────────────────────────────────
 
+# 后端 TTS 音频缓存：避免相同文本+音色+provider 的重复合成，减少本机 CPU 压力。
+# 键: (provider_id, voice, text)  值: (audio_bytes, media_type, suffix, elapsed_ms, attempts)
+_TTS_AUDIO_CACHE: dict[
+    tuple[str, str, str],
+    tuple[bytes, str, str, float, int],
+] = {}
+_TTS_AUDIO_CACHE_MAX = 40  # 最多缓存条目数（40 句 × ~150KB ≈ 6MB）
+# 正在进行中的合成任务：相同 key 的并发请求共享同一个 Future，避免重复合成。
+_TTS_INFLIGHT: dict[tuple[str, str, str], asyncio.Future[tuple[bytes, str, str, float, int]]] = {}
+
+
+def _tts_cache_key(provider_id: str, voice: str, text: str) -> tuple[str, str, str]:
+    return (provider_id, voice, text.strip())
+
+
+def _tts_cache_get(key: tuple[str, str, str]):
+    return _TTS_AUDIO_CACHE.get(key)
+
+
+def _tts_cache_put(key: tuple[str, str, str], value: tuple[bytes, str, str, float, int]) -> None:
+    if len(_TTS_AUDIO_CACHE) >= _TTS_AUDIO_CACHE_MAX:
+        # 淘汰最早插入的条目（简单 FIFO，足够本场景使用）
+        oldest = next(iter(_TTS_AUDIO_CACHE))
+        _TTS_AUDIO_CACHE.pop(oldest, None)
+    _TTS_AUDIO_CACHE[key] = value
+
 
 @router.post("/tts")
 async def text_to_speech(request: TTSRequest) -> Response:
@@ -427,6 +453,53 @@ async def text_to_speech(request: TTSRequest) -> Response:
         len(request.text),
     )
 
+    cache_key = _tts_cache_key(provider_id, voice, request.text)
+
+    # 命中缓存：直接返回，无需重新合成。
+    cached = _tts_cache_get(cache_key)
+    if cached is not None:
+        cached_audio, cached_media_type, cached_suffix, cached_elapsed_ms, cached_attempts = cached
+        logger.debug("TTS cache hit: provider=%s voice=%s text_len=%d", provider_id, voice, len(request.text))
+        return Response(
+            content=cached_audio,
+            media_type=cached_media_type,
+            headers={
+                "Content-Disposition": f"inline; filename=tts_output.{cached_suffix}",
+                "X-Voice-Requested": requested_voice,
+                "X-Voice-Used": voice,
+                "X-TTS-Provider": provider_id,
+                "X-TTS-Attempts": str(cached_attempts),
+                "X-TTS-Elapsed-Ms": str(cached_elapsed_ms),
+                "X-Audio-Normalized": "cache",
+            },
+        )
+
+    # 检查是否有相同 key 的合成任务正在进行，若有则共享结果（避免重复合成）。
+    loop = asyncio.get_event_loop()
+    inflight = _TTS_INFLIGHT.get(cache_key)
+    if inflight is not None:
+        try:
+            audio_data, media_type, suffix, elapsed_ms, attempts = await asyncio.shield(inflight)
+            return Response(
+                content=audio_data,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f"inline; filename=tts_output.{suffix}",
+                    "X-Voice-Requested": requested_voice,
+                    "X-Voice-Used": voice,
+                    "X-TTS-Provider": provider_id,
+                    "X-TTS-Attempts": str(attempts),
+                    "X-TTS-Elapsed-Ms": str(elapsed_ms),
+                    "X-Audio-Normalized": "shared",
+                },
+            )
+        except (Exception, asyncio.CancelledError):
+            pass  # 若共享失败或原始合成取消，回退到独立合成
+
+    # 创建 Future 并注册，让并发请求可以共享本次合成结果。
+    future: asyncio.Future[tuple[bytes, str, str, float, int]] = loop.create_future()
+    _TTS_INFLIGHT[cache_key] = future
+
     try:
         provider = create_tts_provider(request.provider)
         last_error: Exception | None = None
@@ -450,7 +523,12 @@ async def text_to_speech(request: TTSRequest) -> Response:
                     continue
                 break
         if audio_data is None:
-            raise last_error or RuntimeError("unknown tts error")
+            exc = last_error or RuntimeError("unknown tts error")
+            # 用 cancel 代替 set_exception，避免 Python 在 Future 被 GC 时发出
+            # "Future exception was never retrieved" 警告（cancel 不触发该警告）。
+            # 并发等待方会收到 CancelledError，应当回退到各自独立合成。
+            future.cancel()
+            raise exc
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
         media_type, suffix = _detect_audio_content_type(audio_data)
         normalized_audio, normalize_mode = _stabilize_tts_audio(
@@ -460,6 +538,14 @@ async def text_to_speech(request: TTSRequest) -> Response:
         )
         if normalize_mode:
             media_type, suffix = _detect_audio_content_type(normalized_audio)
+
+        result_tuple = (normalized_audio, media_type, suffix, elapsed_ms, attempts)
+        future.set_result(result_tuple)
+        # 仅对云端/外部 TTS 服务跳过本地缓存（本地合成每次有少量差异但开销不高，不跳过）
+        # speed != 1.0 时跳过缓存，避免不同语速的音频错误命中
+        if request.speed == 1.0:
+            _tts_cache_put(cache_key, result_tuple)
+
         return Response(
             content=normalized_audio,
             media_type=media_type,
@@ -473,9 +559,15 @@ async def text_to_speech(request: TTSRequest) -> Response:
                 "X-Audio-Normalized": normalize_mode,
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
+        if not future.done():
+            future.set_exception(e)
         logger.error(f"TTS 合成失败: {e}")
         raise HTTPException(status_code=500, detail=f"语音合成失败: {str(e)}")
+    finally:
+        _TTS_INFLIGHT.pop(cache_key, None)
 
 
 # ── ASR 端点 ─────────────────────────────────────────────────────────────────

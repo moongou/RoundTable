@@ -50,7 +50,9 @@ class ServerTtsService implements TtsService {
   }) : _dio = Dio(BaseOptions(
           baseUrl: Uri.base.origin,
           connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 10),
+          // TTS 合成在本机慢速硬件上可能需要 30-60 秒；
+          // receiveTimeout 控制相邻数据包间隔，设为 60s 以防超时误判。
+          receiveTimeout: const Duration(seconds: 60),
           responseType: ResponseType.bytes,
         ));
 
@@ -171,10 +173,35 @@ class ServerTtsService implements TtsService {
         _lastResponseInfo =
             payload.responseInfo.copyWith(fromPrefetchCache: true);
       } else {
-        _prefetchMiss += 1;
-        payload = await _fetchAudio(text, voice: voice);
-        _lastResponseInfo =
-            payload.responseInfo.copyWith(fromPrefetchCache: false);
+        // 若相同 key 的预取正在进行，等待它完成后直接使用缓存结果，
+        // 避免对后端发起重复合成请求（后端也有 in-flight 去重机制作为补充）。
+        final inFlight = _prefetchInFlight[key];
+        if (inFlight != null) {
+          try {
+            await inFlight;
+            if (_prefetchCache.containsKey(key)) {
+              _prefetchHit += 1;
+              payload = _prefetchCache.remove(key)!;
+              _lastResponseInfo =
+                  payload.responseInfo.copyWith(fromPrefetchCache: true);
+            } else {
+              _prefetchMiss += 1;
+              payload = await _fetchAudio(text, voice: voice);
+              _lastResponseInfo =
+                  payload.responseInfo.copyWith(fromPrefetchCache: false);
+            }
+          } catch (_) {
+            _prefetchMiss += 1;
+            payload = await _fetchAudio(text, voice: voice);
+            _lastResponseInfo =
+                payload.responseInfo.copyWith(fromPrefetchCache: false);
+          }
+        } else {
+          _prefetchMiss += 1;
+          payload = await _fetchAudio(text, voice: voice);
+          _lastResponseInfo =
+              payload.responseInfo.copyWith(fromPrefetchCache: false);
+        }
       }
 
       final blobParts = <JSAny>[payload.bytes.toJS];

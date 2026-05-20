@@ -74,6 +74,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
     send_drop_total = 0
     send_drop_reasons: dict[str, int] = {}
     last_send_drop: dict[str, str] = {}
+    _send_drop_history_last_ts: dict[str, float] = {}
+    _send_drop_history_throttle_sec = 30.0
     human_hand_raise_counts: dict[str, int] = {}
     pending_human_request_ts: dict[str, float] = {}
     pending_human_request_id: dict[str, str] = {}
@@ -173,11 +175,16 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         if ws_closed:
             record_send_drop("ws_closed_guard", event_type)
             if history_store is not None:
-                await history_store.append_entry(
-                    "internal",
-                    "send_drop",
-                    {"reason": "ws_closed_guard", "event_type": event_type},
-                )
+                _now = asyncio.get_running_loop().time()
+                _reason_key = "ws_closed_guard"
+                _last = _send_drop_history_last_ts.get(_reason_key, 0.0)
+                if _now - _last >= _send_drop_history_throttle_sec:
+                    _send_drop_history_last_ts[_reason_key] = _now
+                    await history_store.append_entry(
+                        "internal",
+                        "send_drop",
+                        {"reason": _reason_key, "event_type": event_type},
+                    )
             return False
         nonlocal event_seq
         event_seq += 1
@@ -208,21 +215,30 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             reason = "runtime_after_close" if isinstance(e, RuntimeError) else "websocket_disconnect"
             record_send_drop(reason, event_type)
             if history_store is not None:
-                await history_store.append_entry(
-                    "internal",
-                    "send_drop",
-                    {"reason": reason, "event_type": event_type},
-                )
+                _now = asyncio.get_running_loop().time()
+                _last = _send_drop_history_last_ts.get(reason, 0.0)
+                if _now - _last >= _send_drop_history_throttle_sec:
+                    _send_drop_history_last_ts[reason] = _now
+                    await history_store.append_entry(
+                        "internal",
+                        "send_drop",
+                        {"reason": reason, "event_type": event_type},
+                    )
             ws_closed = True
             return False
         except Exception:
             record_send_drop("send_exception", event_type)
             if history_store is not None:
-                await history_store.append_entry(
-                    "internal",
-                    "send_drop",
-                    {"reason": "send_exception", "event_type": event_type},
-                )
+                _now = asyncio.get_running_loop().time()
+                _reason = "send_exception"
+                _last = _send_drop_history_last_ts.get(_reason, 0.0)
+                if _now - _last >= _send_drop_history_throttle_sec:
+                    _send_drop_history_last_ts[_reason] = _now
+                    await history_store.append_entry(
+                        "internal",
+                        "send_drop",
+                        {"reason": _reason, "event_type": event_type},
+                    )
             ws_closed = True
             logger.debug("send_event failed for type=%s", event_type, exc_info=True)
             return False
@@ -545,6 +561,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             human_queue_scope=session_id,
             thinker_agent_names=[a.name for a in thinker_agents],
             nominal_max_turns=max_turns,
+            is_connected=lambda: not ws_closed,
         )
 
         # 设置 display name 映射（需求4：用于指定发言者解析）

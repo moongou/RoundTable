@@ -29,6 +29,37 @@ DEFAULT_OPENVOICE_URL = LOCAL_SERVICE_DEFAULTS.get("openvoice", {}).get(
     "url", "http://localhost:6707"
 )
 
+# 模块级共享 HTTP 客户端：复用连接池，消除每次合成都新建/关闭连接的开销。
+# 超时设置针对本机 TTS 服务优化：本地推理可能需要 30-60 秒，但连接应很快。
+_TTS_TIMEOUT = httpx.Timeout(connect=5.0, read=90.0, write=10.0, pool=5.0)
+_ASR_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
+_HEALTH_TIMEOUT = httpx.Timeout(5.0)
+
+# 按服务 URL 缓存客户端，避免同一服务被重复初始化。
+_shared_tts_clients: dict[str, httpx.AsyncClient] = {}
+_shared_asr_clients: dict[str, httpx.AsyncClient] = {}
+
+
+def _get_tts_client(base_url: str) -> httpx.AsyncClient:
+    """获取或创建指向指定 URL 的共享 TTS HTTP 客户端。"""
+    if base_url not in _shared_tts_clients:
+        _shared_tts_clients[base_url] = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=_TTS_TIMEOUT,
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+        )
+    return _shared_tts_clients[base_url]
+
+
+def _get_asr_client(base_url: str) -> httpx.AsyncClient:
+    """获取或创建指向指定 URL 的共享 ASR HTTP 客户端。"""
+    if base_url not in _shared_asr_clients:
+        _shared_asr_clients[base_url] = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=_ASR_TIMEOUT,
+            limits=httpx.Limits(max_keepalive_connections=2, max_connections=4),
+        )
+    return _shared_asr_clients[base_url]
 
 class GatewayTTSProvider(TTSProvider):
     """通过各自直连 URL 访问本地 TTS 服务。"""
@@ -70,13 +101,10 @@ class GatewayTTSProvider(TTSProvider):
         payload = {"text": text, "speaker": speaker}
         if speed != 1.0:
             payload["speed"] = speed
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(
-                f"{self.service_url}/synthesize",
-                json=payload,
-            )
-            response.raise_for_status()
-            return response.content
+        client = _get_tts_client(self.service_url)
+        response = await client.post("/synthesize", json=payload)
+        response.raise_for_status()
+        return response.content
 
     def _resolve_speaker(self, voice: str) -> str:
         normalized = (voice or "default").strip()
@@ -133,14 +161,14 @@ class GatewayTTSProvider(TTSProvider):
             "language": "ZH",
             "speed": str(speed),
         }
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(
-                f"{self.openvoice_url}/synthesize",
-                data=data,
-                files=files,
-            )
-            response.raise_for_status()
-            return response.content
+        client = _get_tts_client(self.openvoice_url)
+        response = await client.post(
+            "/synthesize",
+            data=data,
+            files=files,
+        )
+        response.raise_for_status()
+        return response.content
 
     async def synthesize(
         self,
@@ -163,15 +191,15 @@ class GatewayTTSProvider(TTSProvider):
 
     async def is_available(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.service_url}{self.health_path}")
-                if resp.status_code == 200:
-                    content_type = resp.headers.get("content-type", "")
-                    if "application/json" in content_type:
-                        data = resp.json()
-                        if isinstance(data, dict) and "status" in data:
-                            return data.get("status") == "healthy"
-                    return True
+            client = _get_tts_client(self.service_url)
+            resp = await client.get(self.health_path, timeout=_HEALTH_TIMEOUT)
+            if resp.status_code == 200:
+                content_type = resp.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    data = resp.json()
+                    if isinstance(data, dict) and "status" in data:
+                        return data.get("status") == "healthy"
+                return True
             return False
         except Exception:
             return False
@@ -252,37 +280,34 @@ class GatewayASRProvider(ASRProvider):
         normalized_audio, normalized_format = self._normalize_audio_for_service(audio_data, format)
         if not self.service_url:
             raise RuntimeError(f"未配置 {self.service} 服务地址")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.service_url}/transcribe",
-                content=normalized_audio,
-                headers={"Content-Type": f"audio/{normalized_format}"},
-            )
-            if response.status_code != 200:
-                files = {
-                    "audio": (
-                        f"audio.{normalized_format}",
-                        normalized_audio,
-                        f"audio/{normalized_format}",
-                    )
-                }
-                response = await client.post(
-                    f"{self.service_url}/transcribe",
-                    files=files,
+        client = _get_asr_client(self.service_url)
+        response = await client.post(
+            "/transcribe",
+            content=normalized_audio,
+            headers={"Content-Type": f"audio/{normalized_format}"},
+        )
+        if response.status_code != 200:
+            files = {
+                "audio": (
+                    f"audio.{normalized_format}",
+                    normalized_audio,
+                    f"audio/{normalized_format}",
                 )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("text", data.get("result", ""))
+            }
+            response = await client.post("/transcribe", files=files)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("text", data.get("result", ""))
 
     async def is_available(self) -> bool:
         try:
             if not self.service_url:
                 return False
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.service_url}/health")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data.get("status") == "healthy"
+            client = _get_asr_client(self.service_url)
+            resp = await client.get("/health", timeout=_HEALTH_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("status") == "healthy"
             return False
         except Exception:
             return False

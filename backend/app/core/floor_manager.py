@@ -211,6 +211,17 @@ class FloorManager:
     _HUMAN_TURN_MIN_TARGET_AFTER_TWO_SKIPS = 4
     _HUMAN_TURN_MIN_TARGET_AFTER_THREE_SKIPS = 3
     _CLOSING_ATTEMPT_LIMIT = 3
+    # Absolute maximum wall-clock duration for any session (seconds).
+    # After this, the session is force-ended regardless of state.
+    _MAX_SESSION_DURATION_SEC = 1800.0
+    # Maximum consecutive stall recoveries without real progress before force-ending.
+    _MAX_CONSECUTIVE_STALL_RECOVERIES = 8
+    # Minimum interval between send_drop history writes of the same reason (seconds).
+    _SEND_DROP_HISTORY_THROTTLE_SEC = 30.0
+    # Bound how long we wait for a cancelled stream __anext__ task to acknowledge
+    # cancellation. Some model streams can ignore cancellation for a while, and
+    # owner-loop recovery must not block indefinitely on that wait.
+    _PENDING_WAIT_CANCEL_TIMEOUT_SEC = 0.5
 
     def __init__(
         self,
@@ -227,6 +238,7 @@ class FloorManager:
         human_queue_scope: str | None = None,
         thinker_agent_names: Optional[list[str]] = None,
         nominal_max_turns: int = 24,
+        is_connected: Optional[Callable[[], bool]] = None,
     ):
         self.team = team
         self._team_factory = team_factory
@@ -235,6 +247,7 @@ class FloorManager:
         self.safety_filter = safety_filter
         self.human_timeout = human_timeout
         self._nominal_max_turns = max(8, nominal_max_turns)
+        self._is_connected = is_connected
         self._stream_restart_requested = False
         self._set_designated_speaker = designated_speaker_setter or set_designated_speaker
         self.summary_memory = summary_memory
@@ -345,6 +358,10 @@ class FloorManager:
         # Selector stall recovery: track consecutive LLM selector failures
         self._consecutive_selector_stalls = 0
         self._max_consecutive_selector_stalls = 1
+        self._consecutive_stall_recoveries = 0
+
+        # Throttle send_drop history writes per reason
+        self._send_drop_history_last_ts: dict[str, float] = {}
 
         # 暂停状态
         self._paused = False
@@ -1573,6 +1590,12 @@ class FloorManager:
             return
         if self._discussion_end_requested or self.state == FloorState.ENDED:
             return
+
+        if self._paused:
+            logger.info(
+                "[FloorManager] end discussion requested while paused; auto-resuming to finish closing"
+            )
+            self.set_paused(False)
 
         self._end_requested_by_human = speaker_agent
         self._end_request_source = source
@@ -3646,9 +3669,17 @@ class FloorManager:
             return
         task.cancel()
         try:
-            await task
+            await asyncio.wait_for(
+                task,
+                timeout=self._PENDING_WAIT_CANCEL_TIMEOUT_SEC,
+            )
         except (asyncio.CancelledError, StopAsyncIteration):
             pass
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[FloorManager] timed out waiting %.2fs for cancelled team wait task; continuing recovery",
+                self._PENDING_WAIT_CANCEL_TIMEOUT_SEC,
+            )
         except Exception:
             logger.debug("[FloorManager] cancel pending wait task failed", exc_info=True)
 
@@ -3661,6 +3692,7 @@ class FloorManager:
 
     async def _watchdog_loop(self) -> None:
         """Watchdog loop: auto-recover stuck human-turn windows and emit diagnostics."""
+        _connection_lost_at: Optional[float] = None
         while not self._watchdog_stop.is_set():
             await asyncio.sleep(self._stall_check_interval_sec)
 
@@ -3672,6 +3704,66 @@ class FloorManager:
             idle_sec = now - self._last_progress_ts
 
             if self.state in (FloorState.ENDED, FloorState.CLOSING):
+                continue
+
+            # Guard 1: Absolute session duration limit (30 min).
+            # Only applies when run() has started (discussion_started_mono > 0).
+            if self._discussion_started_mono > 0:
+                session_duration_sec = now - self._discussion_started_mono
+                if session_duration_sec >= self._MAX_SESSION_DURATION_SEC:
+                    logger.error(
+                        "[FloorManager] session exceeded max duration %.0fs; force-ending session=%s",
+                        session_duration_sec,
+                        self.session_id,
+                    )
+                    await self._emit_message(
+                        "系统",
+                        "讨论已超过最大时长限制（30分钟），系统自动结束。",
+                        "system",
+                    )
+                    self._discussion_end_requested = True
+                    self._request_stream_restart("max_session_duration")
+                    continue
+
+            # Guard 2: Client connection lost for too long (only during active session)
+            if self._discussion_started_mono > 0 and self._is_connected is not None and not self._is_connected():
+                if _connection_lost_at is None:
+                    _connection_lost_at = now
+                    logger.warning(
+                        "[FloorManager] client connection lost session=%s",
+                        self.session_id,
+                    )
+                elif now - _connection_lost_at >= 30.0:
+                    logger.error(
+                        "[FloorManager] client disconnected for %.0fs; force-ending session=%s",
+                        now - _connection_lost_at,
+                        self.session_id,
+                    )
+                    await self._emit_message(
+                        "系统",
+                        "连接已断开超过30秒，讨论自动结束。",
+                        "system",
+                    )
+                    self._discussion_end_requested = True
+                    self._request_stream_restart("client_disconnected")
+                    continue
+            else:
+                _connection_lost_at = None
+
+            # Guard 3: Consecutive stall recoveries without progress (only during active session)
+            if self._discussion_started_mono > 0 and self._consecutive_stall_recoveries >= self._MAX_CONSECUTIVE_STALL_RECOVERIES:
+                logger.error(
+                    "[FloorManager] %d consecutive stall recoveries without progress; force-ending session=%s",
+                    self._consecutive_stall_recoveries,
+                    self.session_id,
+                )
+                await self._emit_message(
+                    "系统",
+                    "讨论多次停滞无法恢复，系统自动结束。",
+                    "system",
+                )
+                self._discussion_end_requested = True
+                self._request_stream_restart("max_stall_recoveries")
                 continue
 
             if await self._handle_state_dwell_timeout(now=now):
@@ -3788,6 +3880,7 @@ class FloorManager:
         _local_msg_count = 0
         _local_budget_cap = self._nominal_max_turns * 2 + 8
         self._consecutive_selector_stalls = 0
+        self._consecutive_stall_recoveries = 0
 
         try:
             next_task: Optional[str] = self._build_initial_task(topic)
@@ -3953,16 +4046,15 @@ class FloorManager:
                             if result:
                                 yield result
                                 if result.get("event_type") == "message":
+                                    _local_msg_count += 1
+                                    if _local_msg_count >= _local_budget_cap:
+                                        logger.warning(
+                                            "[FloorManager] local message budget exhausted (%d/%d), forcing discussion end",
+                                            _local_msg_count,
+                                            _local_budget_cap,
+                                        )
+                                        self._discussion_end_requested = True
                                     _src = (result.get("data") or {}).get("source", "")
-                                    if _src and _src != "系统":
-                                        _local_msg_count += 1
-                                        if _local_msg_count >= _local_budget_cap:
-                                            logger.warning(
-                                                "[FloorManager] local message budget exhausted (%d/%d), forcing discussion end",
-                                                _local_msg_count,
-                                                _local_budget_cap,
-                                            )
-                                            self._discussion_end_requested = True
                                     if (
                                         _src == "moderator"
                                         and self._expected_next_ai_speaker in self.ai_names
@@ -3977,10 +4069,12 @@ class FloorManager:
                                     break
                             self._touch_progress("run_stream_timeout_flush_stream")
                             restart_after_general_stall = True
+                            self._consecutive_stall_recoveries += 1
                             break
                         now = time.monotonic()
                         self._last_watchdog_action_ts = now
                         self._consecutive_selector_stalls += 1
+                        self._consecutive_stall_recoveries += 1
                         logger.warning(
                             "[FloorManager] team stream stalled while waiting for next event; restarting continuation state=%s stalls=%d",
                             self.state,
@@ -4023,6 +4117,7 @@ class FloorManager:
 
                     # Reset stall counter on successful event
                     self._consecutive_selector_stalls = 0
+                    self._consecutive_stall_recoveries = 0
 
                     if recovered_human_turn_stream_end:
                         saw_events_after_human_turn_recovery = True
@@ -4043,15 +4138,14 @@ class FloorManager:
                         yield result
                         if result.get("event_type") == "message":
                             _src = (result.get("data") or {}).get("source", "")
-                            if _src and _src != "系统":
-                                _local_msg_count += 1
-                                if _local_msg_count >= _local_budget_cap:
-                                    logger.warning(
-                                        "[FloorManager] local message budget exhausted (%d/%d), forcing discussion end",
-                                        _local_msg_count,
-                                        _local_budget_cap,
-                                    )
-                                    self._discussion_end_requested = True
+                            _local_msg_count += 1
+                            if _local_msg_count >= _local_budget_cap:
+                                logger.warning(
+                                    "[FloorManager] local message budget exhausted (%d/%d), forcing discussion end",
+                                    _local_msg_count,
+                                    _local_budget_cap,
+                                )
+                                self._discussion_end_requested = True
                             if (
                                 _src == "moderator"
                                 and self._expected_next_ai_speaker in self.ai_names
@@ -5001,7 +5095,11 @@ class FloorManager:
 
         self._recent_human_skip_pending = False
 
-        # 安全过滤人类输入
+        # 提前记录输入，使看门狗能在安全检查期间检测到待处理的输入，
+        # 防止安全检查慢时系统陷入死锁。如安全检查未通过，后续再弹出。
+        self._remember_submitted_human_input(normalized_name, normalized_text)
+
+        # 安全过滤人类输入（内置超时，超时后默认放行）
         is_safe, reason = await self.safety_filter.check_human_input(normalized_text)
         if not is_safe:
             logger.warning(
@@ -5009,6 +5107,8 @@ class FloorManager:
                 normalized_name,
                 reason,
             )
+            # 安全检查拒绝时，撤回已记录的输入
+            self._pending_submitted_human_inputs.pop(normalized_name, None)
             if self.human_guidance_memory is not None:
                 await self.human_guidance_memory.clear()
             self._pending_human_guidance = False
@@ -5087,7 +5187,7 @@ class FloorManager:
                     self._expected_next_ai_speaker = agent_name
 
         try:
-            self._remember_submitted_human_input(normalized_name, normalized_text)
+            # 注意：_remember_submitted_human_input 已在安全检查前调用，此处不再重复。
             await self._put_human_input(normalized_name, normalized_text)
             self._resume_team_after_human_input()
             if self._should_inline_process_submitted_human_input(normalized_name):
@@ -5102,6 +5202,7 @@ class FloorManager:
                 normalized_name,
                 e,
             )
+            # 覆盖为跳过标记，并确保运行循环能继续
             self._remember_submitted_human_input(normalized_name, "（跳过）")
             await self._put_human_input(normalized_name, "（跳过）")
             self._resume_team_after_human_input()

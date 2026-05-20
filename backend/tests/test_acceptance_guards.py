@@ -183,6 +183,67 @@ class _DiscussionFloorManagerStub:
 
 
 @pytest.mark.asyncio
+async def test_floor_manager_cancel_pending_wait_task_times_out_on_stubborn_stream_wait() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+
+    release_cancel = asyncio.Event()
+
+    async def _stubborn_wait() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_cancel.wait()
+            raise
+
+    task = asyncio.create_task(_stubborn_wait())
+    await asyncio.sleep(0)
+
+    started_at = time.monotonic()
+    await asyncio.wait_for(floor_manager._cancel_pending_wait_task(task), timeout=1.5)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 1.2
+
+    release_cancel.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_request_end_discussion_auto_resumes_when_paused() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
+        human_agents=[SimpleNamespace(name='豆苗')],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            'moderator': '李老师',
+            'explorer': '小探',
+            '豆苗': '豆苗',
+        }
+    )
+    floor_manager.state = FloorState.HUMAN_TURN_WAITING
+    floor_manager.current_speaker = '豆苗'
+    floor_manager._pause_team_for_human_input()
+    floor_manager.set_paused(True)
+
+    await floor_manager.request_end_discussion('豆苗', source='button')
+
+    assert floor_manager._paused is False
+    assert floor_manager._blocked_for_human_input is False
+    assert floor_manager._resume_gate.is_set()
+    assert floor_manager.state == FloorState.CLOSING
+    assert floor_manager._discussion_end_requested is True
+
+
+@pytest.mark.asyncio
 async def test_rolling_summary_memory_injects_recent_three_turns() -> None:
     memory = RollingSummaryMemory()
     await memory.replace_turn_summaries(
