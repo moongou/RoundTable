@@ -211,6 +211,7 @@ class FloorManager:
     _HUMAN_TURN_MIN_TARGET_AFTER_TWO_SKIPS = 4
     _HUMAN_TURN_MIN_TARGET_AFTER_THREE_SKIPS = 3
     _CLOSING_ATTEMPT_LIMIT = 3
+    _MIN_SUBSTANTIVE_TURNS_BEFORE_CLOSING = 18
     # Absolute maximum wall-clock duration for any session (seconds).
     # After this, the session is force-ended regardless of state.
     _MAX_SESSION_DURATION_SEC = 1800.0
@@ -315,6 +316,9 @@ class FloorManager:
         self._recent_display_speakers: list[str] = []
         self._recent_turn_summaries: list[tuple[str, str]] = []
         self._recent_reference_quotes: list[tuple[str, str]] = []
+        self._last_completed_message_key: Optional[tuple[str, str]] = None
+        self._last_completed_message_ts: float = 0.0
+        self._recent_completed_message_ts: dict[tuple[str, str], float] = {}
         self._recent_human_turn_summaries: dict[str, list[str]] = {
             name: [] for name in self.human_names
         }
@@ -332,7 +336,9 @@ class FloorManager:
         self._last_progress_ts = time.monotonic()
         self._last_watchdog_action_ts = 0.0
         self._stall_check_interval_sec = 2.0
-        self._general_stall_timeout_sec = max(30.0, float(human_timeout) * 2.0)
+        # Keep backend recovery below common WebSocket/client idle waits so the
+        # server emits a recovery event before clients conclude the discussion is stuck.
+        self._general_stall_timeout_sec = min(24.0, max(12.0, float(human_timeout) / 4.0))
         self._deferred_human_request_timeout_sec = max(4.0, min(8.0, float(human_timeout) / 2.0))
         self._submitted_human_input_recovery_timeout_sec = 2.0
         # 需求11：用户要求 30 秒未发言自动跳过。与前端倒计时保持一致。
@@ -617,6 +623,77 @@ class FloorManager:
             return text
 
         return text
+
+    def _sanitize_moderator_role_confusion(self, content: str) -> str:
+        """Prevent the moderator from role-playing as a student addressing the teacher."""
+        text = (content or "").strip()
+        if not text:
+            return text
+        text = re.sub(
+            r"^（[^）]{0,30}(?:举手|举起|拍手|跳起来|坐直|身体[^）]{0,12}|前倾)[^）]{0,30}）\s*",
+            "",
+            text,
+        )
+        text = re.sub(
+            r"^\([^)]{0,30}(?:举手|举起|拍手|跳起来|坐直|身体[^)]{0,12}|前倾)[^)]{0,30}\)\s*",
+            "",
+            text,
+        )
+        text = re.sub(
+            r"^[（(][^）)]{0,30}[）)]\s*((?:李老师|老师)[，,、]?\s*我)",
+            r"\1",
+            text,
+        )
+        text = re.sub(
+            r"^(?:李老师|老师)[，,、]?\s*我(?:来|想)?(?:说说|说一下|发言|回答)[！!。,.，、]?\s*",
+            "",
+            text,
+        )
+        text = re.sub(
+            r"^(?:李老师|老师)[，,、]?\s*我(?:还)?(?:有|想问|想补充)",
+            "我们再追问",
+            text,
+        )
+        text = re.sub(
+            r"^(?:李老师|老师)[，,、]?\s*我觉得",
+            "我觉得",
+            text,
+        )
+        return text.strip() or (content or "").strip()
+
+    def _sanitize_human_honorifics(self, content: str) -> str:
+        """Keep real human participants addressed as students, never as thinkers."""
+        text = content or ""
+        for human_agent in self.human_names:
+            display = self._agent_to_display_name.get(human_agent, human_agent)
+            if not display:
+                continue
+            escaped = re.escape(display)
+            text = re.sub(rf"{escaped}\s*先生", f"{display}同学", text)
+            text = re.sub(rf"{escaped}\s*老师", f"{display}同学", text)
+        return text
+
+    def _sanitize_non_moderator_role_confusion(self, source: str, content: str) -> str:
+        """Prevent students/thinkers from taking the teacher's closing role."""
+        text = (content or "").strip()
+        if source == "moderator" or not text:
+            return text
+        closing_or_teacher_role = re.compile(
+            r"(?:大家再见|同学们再见|下课啦|下周见|今天(?:的)?讨论(?:就)?到这里|"
+            r"老师真的|老师很开心|同学们[，,、]?\s*老师)"
+        )
+        if not closing_or_teacher_role.search(text):
+            return text
+
+        parts = [
+            part.strip()
+            for part in re.split(r"(?<=[。！？!?])", text)
+            if part.strip() and not closing_or_teacher_role.search(part)
+        ]
+        cleaned = "".join(parts).strip()
+        if cleaned and len(re.sub(r"\s+", "", cleaned)) >= 12:
+            return cleaned
+        return "我也很受启发，今天的讨论让我看到，不能只看一个表面的结果，还要看背后的过程和选择。"
 
     def _is_discussion_opening_message(self, source: str) -> bool:
         if (
@@ -1167,6 +1244,14 @@ class FloorManager:
                 else f"{state.value} 持续超过 {int(limit_sec)} 秒，系统正在重试调度。"
             )
         await self._emit_message("系统", message, "system")
+        if state == FloorState.SELECTING_SPEAKER and fallback in self.human_names:
+            human_request = await self._make_human_input_requested_event(
+                fallback,
+                reason="moderator_designated_human",
+                clear_designation=False,
+            )
+            if human_request is not None and self._on_human_input_requested:
+                await self._on_human_input_requested(human_request["data"])
         self._request_stream_restart(timeout_reason)
         self._touch_progress(timeout_reason)
         return True
@@ -1191,6 +1276,15 @@ class FloorManager:
         missing_ai_display_names = sorted(
             self._agent_to_display_name.get(name, name) for name in missing_ai_agents
         )
+        min_substantive_turns = (
+            self._MIN_SUBSTANTIVE_TURNS_BEFORE_CLOSING
+            if len(self.all_names) >= 6
+            else 0
+        )
+        remaining_substantive_turns = max(
+            0,
+            min_substantive_turns - self._substantive_turn_count,
+        )
 
         blockers: list[str] = []
         if remaining_human_turns > 0 and not human_budget_exception_allowed:
@@ -1198,6 +1292,10 @@ class FloorManager:
         if missing_ai_display_names:
             blockers.append(
                 "missing_ai_display_names=" + ",".join(missing_ai_display_names)
+            )
+        if remaining_substantive_turns > 0:
+            blockers.append(
+                f"remaining_substantive_turns={remaining_substantive_turns}"
             )
 
         forced_ready_due_to_attempt_limit = bool(blockers) and (
@@ -1214,6 +1312,9 @@ class FloorManager:
             "remaining_human_turns": remaining_human_turns,
             "missing_ai_agents": missing_ai_agents,
             "missing_ai_display_names": missing_ai_display_names,
+            "min_substantive_turns": min_substantive_turns,
+            "total_substantive_turns": self._substantive_turn_count,
+            "remaining_substantive_turns": remaining_substantive_turns,
             "blockers": blockers,
             "closing_attempt_count": self._closing_attempt_count,
             "closing_attempt_limit": self._CLOSING_ATTEMPT_LIMIT,
@@ -1262,14 +1363,15 @@ class FloorManager:
             return False
         return self._non_human_turn_count_before_first_human() < self._FIRST_HUMAN_MIN_WARMUP_TURNS
 
-    def _enforce_expected_ai_speaker(self, source: str) -> bool:
+    def _enforce_expected_ai_speaker(self, source: str, *, release_on_match: bool = True) -> bool:
         expected = self._expected_next_ai_speaker
         if not expected or source not in self.ai_names:
             self._expected_ai_reassertion_key = None
             return False
         if source == expected:
-            self._expected_next_ai_speaker = None
-            self._expected_ai_reassertion_key = None
+            if release_on_match:
+                self._expected_next_ai_speaker = None
+                self._expected_ai_reassertion_key = None
             return False
         if source == "moderator" and expected != "moderator":
             logger.info(
@@ -1304,6 +1406,8 @@ class FloorManager:
         if self._expected_ai_reassertion_key != reassertion_key:
             self._expected_ai_reassertion_key = reassertion_key
             self._set_designated_speaker(expected)
+            self._request_stream_restart(f"expected_ai_mismatch:{expected}")
+            self._touch_progress("expected_ai_mismatch_restart")
         return True
 
     def _is_authorized_human_request_reason(self, reason: str) -> bool:
@@ -2955,7 +3059,7 @@ class FloorManager:
             return f"{prefix}{owner_text}{verb}“{fragment}”{suffix}"
 
         value = re.sub(
-            rf"(?P<prefix>(?:刚才|前面|之前)?)(?P<name>{names_pattern})(?P<honorific>同学|先生)?\s*(?P<verb>说|讲|提到|讲过|说过)[“\"「『](?P<fragment>[^”\"」』]{{1,80}})[”\"」』](?P<suffix>[^。！？!?]{{0,16}})",
+            rf"(?P<prefix>(?:刚才|前面|之前)?)(?P<name>{names_pattern})(?P<honorific>同学|先生)?\s*(?P<verb>说|说到|讲|讲到|提到|讲过|说过)[“\"「『](?P<fragment>[^”\"」』]{{1,80}})[”\"」』](?P<suffix>[^。！？!?]{{0,16}})",
             rewrite_named_direct_quote,
             value,
         )
@@ -3260,11 +3364,44 @@ class FloorManager:
         )
 
     def _should_suppress_ai_while_human_waiting(self, source: str) -> bool:
+        pending_human_speaker = self._normalize_agent_name(
+            self._last_human_input_requested_speaker
+        )
+        has_pending_human_request = pending_human_speaker in self.human_names
         return (
-            self.state == FloorState.HUMAN_TURN_WAITING
+            (
+                self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+                or self._blocked_for_human_input
+                or has_pending_human_request
+            )
             and source in self.ai_names
             and source != "moderator"
         )
+
+    async def _prepare_pending_human_message_state(self, source: str) -> None:
+        """Normalize state before accepting a human message after residual AI output."""
+        if source not in self.human_names:
+            return
+        if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
+            return
+        pending_human_speaker = self._normalize_agent_name(
+            self.current_speaker or self._last_human_input_requested_speaker
+        )
+        if pending_human_speaker in self.human_names and pending_human_speaker != source:
+            return
+        allowed = self._ALLOWED_STATE_TRANSITIONS.get(self.state, frozenset())
+        if FloorState.HUMAN_TURN_WAITING not in allowed and FloorState.SELECTING_SPEAKER in allowed:
+            await self._enter_selecting_speaker(
+                reason="prepare_pending_human_message",
+                recovery=True,
+            )
+        if FloorState.HUMAN_TURN_WAITING in self._ALLOWED_STATE_TRANSITIONS.get(self.state, frozenset()):
+            self.current_speaker = source
+            await self._set_state(
+                FloorState.HUMAN_TURN_WAITING,
+                reason="pending_human_message_recovered",
+                recovery=True,
+            )
 
     async def _sync_ai_turn_without_selection_event(self, source: str, *, reason: str) -> None:
         if source not in self.ai_names:
@@ -4184,7 +4321,17 @@ class FloorManager:
                 if self._discussion_end_requested:
                     break
 
-                if stream_exhausted and not stream_consumed_expected_ai_turn:
+                expected_ai_pending_at_stream_end = (
+                    self._expected_next_ai_speaker in self.ai_names
+                    and self._expected_next_ai_speaker != "moderator"
+                )
+                if stream_exhausted and (
+                    not expected_ai_pending_at_stream_end
+                    and (
+                        not stream_consumed_expected_ai_turn
+                        or self._should_block_moderator_final_closing()
+                    )
+                ):
                     self._schedule_recovery_after_premature_stream_end()
 
                 if stream_exhausted and self._deferred_human_request_speaker:
@@ -4358,6 +4505,19 @@ class FloorManager:
             is_human = speaker in self.human_names
 
             logger.info("[FloorManager] 选择发言者: %s (is_human=%s)", speaker, is_human)
+            expected_ai = self._expected_next_ai_speaker
+            if (
+                expected_ai
+                and speaker in self.ai_names
+                and speaker != expected_ai
+            ):
+                logger.warning(
+                    "[FloorManager] 点名后 selector 选择了非预期发言者，已拦截 speaker=%s expected=%s",
+                    speaker,
+                    expected_ai,
+                )
+                self._set_designated_speaker(expected_ai)
+                return None
             if is_human:
                 request_reason = self._resolve_human_input_request_reason("speaker_selected_human")
                 if not self._is_authorized_human_request_reason(request_reason):
@@ -4402,7 +4562,7 @@ class FloorManager:
             source = self._normalize_agent_name(raw_source)
             content = event.content if hasattr(event, "content") else str(event)
 
-            if self._enforce_expected_ai_speaker(source):
+            if self._enforce_expected_ai_speaker(source, release_on_match=False):
                 return None
 
             if self._should_suppress_ai_while_human_waiting(source):
@@ -4488,6 +4648,7 @@ class FloorManager:
                 return None
 
             if source in self.human_names:
+                await self._prepare_pending_human_message_state(source)
                 self._pending_submitted_human_inputs.pop(source, None)
                 self._last_human_input_requested_speaker = ""
                 self._last_human_input_request_id = ""
@@ -4529,6 +4690,8 @@ class FloorManager:
 
             # 首轮发言兜底规整：避免不当引用
             content = self._sanitize_all_references(source, content)
+            content = self._sanitize_human_honorifics(content)
+            content = self._sanitize_non_moderator_role_confusion(source, content)
             content = self._strip_meta_reasoning_text(content)
             if source in self.ai_names and not content:
                 logger.info("[FloorManager] 丢弃清洗后为空的完整消息: source=%s", source)
@@ -4537,8 +4700,33 @@ class FloorManager:
                 return None
 
             if source == "moderator":
+                content = self._sanitize_moderator_role_confusion(content)
                 content = self._ensure_moderator_explicit_goodbye(content)
             is_final_closing = source == "moderator" and self._is_moderator_final_closing(content)
+            normalized_completed_content = re.sub(r"\s+", "", content or "")
+            completed_key = (source, normalized_completed_content)
+            now_mono = time.monotonic()
+            for old_key, old_ts in list(self._recent_completed_message_ts.items()):
+                if now_mono - old_ts > 30.0:
+                    self._recent_completed_message_ts.pop(old_key, None)
+            if (
+                not is_final_closing
+                and normalized_completed_content
+                and (
+                    (
+                        self._last_completed_message_key == completed_key
+                        and (now_mono - self._last_completed_message_ts) <= 30.0
+                    )
+                    or (now_mono - self._recent_completed_message_ts.get(completed_key, -999.0) <= 30.0)
+                )
+            ):
+                logger.info(
+                    "[FloorManager] 丢弃重复完整消息: source=%s content=%s",
+                    source,
+                    content[:120],
+                )
+                self._pop_streaming_message_tail(source, raw_content)
+                return None
             if is_final_closing and self._should_block_moderator_final_closing():
                 self._closing_attempt_count += 1
                 if self._closing_attempt_count >= self._CLOSING_ATTEMPT_LIMIT:
@@ -4891,6 +5079,8 @@ class FloorManager:
                     remaining_tts_raw = self._strip_meta_reasoning_text(remaining_tts_raw).strip()
                     if remaining_tts_raw:
                         tail = self._sanitize_all_references(source, remaining_tts_raw)
+                        tail = self._sanitize_human_honorifics(tail)
+                        tail = self._sanitize_non_moderator_role_confusion(source, tail)
                         tts_text = await self.safety_filter.filter_or_rewrite(tail)
                         tts_text = self._strip_meta_reasoning_text(tts_text)
                 else:
@@ -4906,6 +5096,10 @@ class FloorManager:
             }
 
             await self._emit_message(source, content, "text", tts_text=tts_text)
+            self._last_completed_message_key = completed_key
+            self._last_completed_message_ts = now_mono
+            if normalized_completed_content:
+                self._recent_completed_message_ts[completed_key] = now_mono
             if not is_non_substantive_turn(content):
                 self._set_speaker_utterance_status(source, SpeakerUtteranceStatus.SPOKE_WITH_CONTENT)
                 if source != "moderator":
@@ -4940,8 +5134,6 @@ class FloorManager:
                     clear_designation=False,
                 )
                 if human_request is not None:
-                    if self._on_human_input_requested:
-                        await self._on_human_input_requested(human_request["data"])
                     self._queue_run_event(message_event)
                     if should_restart_for_boundary_handoff(boundary_handoff_target):
                         self._request_stream_restart(f"designated_speaker_handoff:{boundary_handoff_target}")
@@ -4996,6 +5188,11 @@ class FloorManager:
                 self._human_completed_turn_count += 1
                 self._post_human_feedback_pending = True
                 await self._set_state(FloorState.SELECTING_SPEAKER, reason="human_message_complete")
+            elif source in self.ai_names and self.state == FloorState.AI_SPEAKING:
+                await self._enter_selecting_speaker(
+                    reason="ai_message_complete",
+                    recovery=True,
+                )
             return message_event
 
         # 人类输入请求
