@@ -786,6 +786,12 @@ class FloorManager:
             return None
         display_name = self._agent_to_display_name.get(speaker, speaker)
         topic_label = self._topic_focus_label() or "当前话题"
+        if speaker == "moderator":
+            return (
+                f"继续当前关于{topic_label}的讨论。"
+                f"下一位必须由{display_name}立刻接上，用一到两句话把讨论重新带回主题，"
+                "并明确安排下一位发言者，不要沉默，不要只重复系统提示。"
+            )
         return (
             f"继续当前关于{topic_label}的讨论。"
             f"下一位必须由{display_name}直接发言，马上回应刚才的讨论推进，"
@@ -1007,6 +1013,17 @@ class FloorManager:
         speaker = self._smart_fallback_speaker()
         if speaker:
             self._set_designated_speaker(speaker)
+            if speaker in self.human_names:
+                self._expected_next_ai_speaker = None
+                self._pending_continuation_task = None
+                self._deferred_human_request_speaker = speaker
+                self._deferred_human_request_reason = "moderator_designated_human"
+                self._pending_human_input_reason = self._deferred_human_request_reason
+            elif speaker in self.ai_names:
+                self._expected_next_ai_speaker = speaker
+                self._pending_continuation_task = self._build_targeted_continuation_task(speaker)
+                self._deferred_human_request_speaker = None
+                self._deferred_human_request_reason = ""
             logger.info("[FloorManager] Smart fallback: designated speaker=%s", speaker)
         return speaker
 
@@ -3407,7 +3424,7 @@ class FloorManager:
             fallback = self._smart_fallback_speaker()
             if fallback and fallback not in self.human_names:
                 self._set_designated_speaker(fallback)
-                if fallback in self.ai_names and fallback != "moderator":
+                if fallback in self.ai_names:
                     self._expected_next_ai_speaker = fallback
                     self._pending_continuation_task = self._build_targeted_continuation_task(fallback)
         self._team_rebuild_requested = True
@@ -4858,8 +4875,11 @@ class FloorManager:
                 if fallback_agent and fallback_agent != source:
                     self._set_designated_speaker(fallback_agent)
                     boundary_handoff_target = fallback_agent
-                    if fallback_agent in self.ai_names and fallback_agent != "moderator":
+                    if fallback_agent in self.ai_names:
                         self._expected_next_ai_speaker = fallback_agent
+                        self._pending_continuation_task = self._build_targeted_continuation_task(
+                            fallback_agent
+                        )
                     logger.info(
                         "[FloorManager] 真人手动跳过后，已指定确定性续讲者: %s",
                         fallback_agent,

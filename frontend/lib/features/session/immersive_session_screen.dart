@@ -2956,6 +2956,33 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     }
   }
 
+  String _buildOpeningReflectionPrompt() {
+    final title = widget.topic.title.trim();
+    final description = widget.topic.description.trim();
+    final guideQuestion = widget.topic.guideQuestions
+        .map((item) => item.trim())
+        .firstWhere((item) => item.isNotEmpty, orElse: () => '');
+    final focusRaw = guideQuestion.isNotEmpty
+        ? guideQuestion
+        : (description.isNotEmpty ? description : title);
+    final focus = focusRaw
+        .split(RegExp(r'[。！？!?]'))
+        .map((item) => item.trim())
+        .firstWhere((item) => item.isNotEmpty, orElse: () => focusRaw)
+        .trim();
+    final topicLabel = title.isNotEmpty ? title : '这个问题';
+    final promptSeed =
+        title.runes.fold<int>(0, (sum, rune) => (sum + rune) % 3);
+    switch (promptSeed) {
+      case 0:
+        return '小朋友，我们马上要讨论“$topicLabel”。这个问题和“$focus”有关，先给自己半分钟，把最想说的一点悄悄想清楚，等会儿带着你的发现加入圆桌。';
+      case 1:
+        return '等会儿大家要一起聊“$topicLabel”。它关心的是“$focus”，你可以先静静想一想：如果这件事发生在你身边，你最想提醒大家注意什么？';
+      default:
+        return '欢迎来到今天的圆桌。我们将要讨论“$topicLabel”，核心就在“$focus”。请先留一点安静时间，把自己的观察、感受和理由慢慢组织好。';
+    }
+  }
+
   // 从系统事件获取的完整参与者列表
   List<String> _knownParticipants = [];
 
@@ -4318,12 +4345,6 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       _pendingTeacherReplyEventSeq = null;
     }
     _lastMainTtsQueuedAt = DateTime.now();
-    if (_openingCueState == _OpeningCueState.preparing && mounted) {
-      setState(() {
-        _openingCueState = _OpeningCueState.ready;
-        _openingReadyShownAt = DateTime.now();
-      });
-    }
     _prepareUpcomingPipeline(reason: 'enqueue-tts:$source:$playbackSessionId');
     _scheduleTtsPumpGuard();
     if (!_ttsPlaying) _playNextTts();
@@ -4430,6 +4451,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         includeAsrWarmup: _pendingHumanTurn || item.source != widget.humanName,
       );
 
+      if (_openingCueState == _OpeningCueState.preparing && mounted) {
+        setState(() {
+          _openingCueState = _OpeningCueState.ready;
+          _openingReadyShownAt = DateTime.now();
+        });
+      }
+
       if (_openingCueState == _OpeningCueState.ready) {
         final shownAt = _openingReadyShownAt;
         final elapsed = shownAt == null
@@ -4468,7 +4496,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _buildParticipants();
       }
 
-      if (mounted) {
+      if (mounted && _openingCueState == _OpeningCueState.done) {
         activateSubtitleAtSpeechStart(playbackStarted: false);
       }
       await Future<void>.delayed(ImmersiveSessionScreen.aiSubtitleLeadIn);
@@ -5744,6 +5772,17 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         _openingCueState == _OpeningCueState.preparing && !_discussionEnded;
     final showOpeningStartCue =
         _openingCueState == _OpeningCueState.ready && !_discussionEnded;
+    final showOpeningReflectionCard =
+        (showOpeningPreparingCue || showOpeningStartCue) && !_discussionEnded;
+    final openingReflectionPrompt = _buildOpeningReflectionPrompt();
+    final openingReflectionWidth =
+        min(360.0, max(260.0, size.width * 0.28)).toDouble();
+    final openingReflectionTop = max(
+      MediaQuery.of(context).padding.top + 132,
+      tableCenterY - tableRadius * 0.92,
+    );
+    final openingReflectionFontSize =
+        min(26.0, max(21.0, size.width * 0.018)).toDouble();
     // canSpeakNow：仅当真正轮到用户或已批准发言时才允许操作。
     // pending 阶段只保留呼吸灯提示，不允许提前点亮麦克风。
     final canSpeakNow =
@@ -6024,7 +6063,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                             ],
                           ),
                           child: Text(
-                            showOpeningStartCue ? '开始讨论' : '老师准备中……',
+                            showOpeningStartCue ? '开场马上开始' : '正在准备开场……',
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               color: showOpeningStartCue
@@ -6036,6 +6075,59 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                             ),
                           ),
                         ),
+                      ),
+                    ),
+                  ),
+                ),
+
+              if (showOpeningReflectionCard)
+                Positioned(
+                  top: openingReflectionTop,
+                  left: 18,
+                  width: openingReflectionWidth,
+                  child: IgnorePointer(
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+                      decoration: BoxDecoration(
+                        color: const Color(0xD9121A28),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: showOpeningStartCue
+                              ? const Color(0xFFFFC48B).withValues(alpha: 0.4)
+                              : AppColors.amberGold.withValues(alpha: 0.28),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.2),
+                            blurRadius: 18,
+                            offset: const Offset(0, 8),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            showOpeningStartCue ? '准备好了，一起开始' : '讨论前先想一想',
+                            style: _sessionSansStyle(
+                              color:
+                                  AppColors.amberGold.withValues(alpha: 0.92),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            openingReflectionPrompt,
+                            style: _sessionSerifStyle(
+                              color: Colors.white.withValues(alpha: 0.94),
+                              fontSize: openingReflectionFontSize,
+                              fontWeight: FontWeight.w600,
+                              height: 1.48,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),

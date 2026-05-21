@@ -496,6 +496,31 @@ async function proxyBackendAdminJson(res, requestOptions) {
   res.end(upstream.body || '{}');
 }
 
+async function loadAllThinkersFromBackend() {
+  const pageSize = 100;
+  let page = 1;
+  let total = Infinity;
+  const items = [];
+  while (items.length < total && page <= 10) {
+    const upstream = await requestBackend('GET', '/api/v1/thinkers/?page=' + page + '&size=' + pageSize);
+    if ((upstream.statusCode || 500) >= 400) {
+      const parsed = parseBackendJson(upstream.body);
+      throw new Error(parsed.detail || parsed.error || ('thinkers_proxy_failed_http_' + upstream.statusCode));
+    }
+    const parsed = parseBackendJson(upstream.body);
+    const batch = Array.isArray(parsed.items) ? parsed.items : [];
+    total = Number(parsed.total || batch.length || 0);
+    items.push(...batch);
+    if (batch.length < pageSize) break;
+    page += 1;
+  }
+  return {
+    ok: true,
+    total: items.length,
+    items,
+  };
+}
+
 function safeHistoryId(sessionId) {
   return String(sessionId || '').trim().replace(/[^A-Za-z0-9._-]+/g, '_');
 }
@@ -718,6 +743,233 @@ function resolveMeetingRecording(sessionId, recordingId) {
   return { recording, filePath: resolvedPath };
 }
 
+const THINKERS_PAGE_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RoundTable 思想家图谱</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(circle at top,#182b53 0%,#0c1426 40%,#070d18 100%);color:#eef4ff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+  a{color:inherit}
+  .page{max-width:1320px;margin:0 auto;padding:32px 24px 48px}
+  .hero{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.8fr);gap:18px;align-items:stretch;margin-bottom:22px}
+  .hero-main,.hero-side{border:1px solid rgba(67,103,167,.55);border-radius:22px;background:linear-gradient(160deg,rgba(12,23,45,.94),rgba(19,34,62,.88));box-shadow:0 24px 60px rgba(0,0,0,.24)}
+  .hero-main{padding:28px}
+  .hero-side{padding:22px}
+  .kicker{font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#8fa3cc;font-weight:700}
+  h1{margin:10px 0 14px;font-size:38px;line-height:1.15;color:#fff6d7}
+  .hero-copy{font-size:15px;line-height:1.85;color:#cbd8f4;max-width:860px}
+  .hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+  .hero-btn{display:inline-flex;align-items:center;justify-content:center;height:40px;padding:0 16px;border-radius:999px;border:1px solid rgba(108,138,196,.5);background:rgba(20,36,63,.9);color:#eef4ff;text-decoration:none;font-size:13px;font-weight:600}
+  .hero-btn:hover{border-color:#f4d98b;color:#fff6d7}
+  .hero-side h2{margin:0 0 10px;font-size:16px;color:#fff6d7}
+  .hero-side p{margin:0 0 14px;font-size:13px;line-height:1.8;color:#b4c2e0}
+  .hero-side .stat{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-top:1px solid rgba(67,103,167,.28);font-size:13px;color:#dce8ff}
+  .hero-side .stat strong{color:#fff6d7}
+  .toolbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:18px;padding:14px 16px;border:1px solid rgba(67,103,167,.44);border-radius:18px;background:rgba(10,18,34,.88)}
+  .toolbar-copy{font-size:13px;color:#aebddb;line-height:1.7}
+  .toolbar-copy strong{color:#fff6d7}
+  .toolbar-search{display:flex;align-items:center;gap:10px;min-width:min(100%,360px)}
+  .toolbar-search input{width:100%;height:42px;padding:0 14px;border-radius:14px;border:1px solid rgba(67,103,167,.52);background:rgba(16,28,52,.95);color:#eef4ff;font-size:14px;outline:none}
+  .toolbar-search input::placeholder{color:#7289b4}
+  .domain-nav{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px}
+  .domain-chip{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;border:1px solid rgba(67,103,167,.48);background:rgba(12,21,38,.84);color:#dfe9ff;text-decoration:none;font-size:13px}
+  .domain-chip span{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;padding:0 8px;border-radius:999px;background:rgba(212,160,23,.16);color:#f8dd8b;font-size:11px}
+  .domain-chip:hover{border-color:#f4d98b;color:#fff6d7}
+  .sections{display:flex;flex-direction:column;gap:18px}
+  .section{border:1px solid rgba(67,103,167,.46);border-radius:20px;background:linear-gradient(180deg,rgba(8,16,30,.95),rgba(13,24,45,.92));padding:18px}
+  .section-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .section-title{font-size:24px;color:#fff6d7;font-weight:700}
+  .section-meta{font-size:12px;color:#92a7cf}
+  .thinker-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+  .thinker-card{display:flex;flex-direction:column;gap:14px;height:100%;padding:18px;border-radius:18px;border:1px solid rgba(67,103,167,.45);background:linear-gradient(180deg,rgba(19,31,58,.9),rgba(12,21,38,.96))}
+  .thinker-head{display:flex;gap:14px;align-items:flex-start}
+  .thinker-avatar{width:54px;height:54px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:28px;background:linear-gradient(145deg,rgba(245,201,98,.2),rgba(84,136,235,.14));border:1px solid rgba(244,217,139,.42)}
+  .thinker-name{font-size:21px;font-weight:700;color:#fff}
+  .thinker-era{margin-top:5px;font-size:12px;color:#97acd4}
+  .thinker-description{font-size:13px;line-height:1.75;color:#c4d2ef}
+  .thinker-block{padding:12px 14px;border-radius:14px;background:rgba(9,16,29,.6);border:1px solid rgba(67,103,167,.28)}
+  .thinker-block h3{margin:0 0 8px;font-size:12px;letter-spacing:1.2px;text-transform:uppercase;color:#f8dd8b}
+  .thinker-core{font-size:14px;line-height:1.8;color:#eff4ff}
+  .thinker-bio{font-size:14px;line-height:1.95;color:#d1dcf5}
+  .tag-list{display:flex;flex-wrap:wrap;gap:8px}
+  .tag{display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(31,49,83,.88);border:1px solid rgba(67,103,167,.4);font-size:12px;color:#dfe9ff}
+  .empty-state{display:none;padding:34px 22px;border:1px dashed rgba(67,103,167,.45);border-radius:18px;background:rgba(8,16,30,.7);font-size:14px;line-height:1.8;color:#9fb1d7;text-align:center}
+  .footer-note{margin-top:22px;font-size:12px;color:#87a0cf;text-align:center}
+  @media (max-width: 980px){
+    .hero{grid-template-columns:1fr}
+    .thinker-grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <section class="hero">
+    <div class="hero-main">
+      <div class="kicker">RoundTable Thinkers Atlas</div>
+      <h1>思想家图谱</h1>
+      <div class="hero-copy">这里不再直接展示原始 JSON，而是按思想领域分组呈现所有思想家。每张卡片都补充了核心思想摘要、约 300-600 字的生平与影响简介，以及适合课堂对话的思考切口，方便直接浏览、筛选和教学准备。</div>
+      <div class="hero-actions">
+        <a class="hero-btn" href="/">← 返回开发面板</a>
+        <a class="hero-btn" href="${LOCALHOST_BACKEND_URL}/docs" target="_blank" rel="noopener">查看 API 文档</a>
+      </div>
+    </div>
+    <aside class="hero-side">
+      <h2>阅读方式</h2>
+      <p>先按领域浏览，再用搜索快速定位姓名、时代、简介或核心观念。适合在备课、选角、组局前快速比较思想家的切入角度。</p>
+      <div class="stat"><span>当前状态</span><strong id="thinkers-status">加载中…</strong></div>
+      <div class="stat"><span>领域数</span><strong id="thinkers-domain-count">-</strong></div>
+      <div class="stat"><span>思想家总数</span><strong id="thinkers-total-count">-</strong></div>
+    </aside>
+  </section>
+  <section class="toolbar">
+    <div class="toolbar-copy" id="thinkers-summary"><strong>准备中：</strong> 正在从后端汇总思想家数据。</div>
+    <label class="toolbar-search">
+      <input id="thinker-search" type="search" placeholder="搜索姓名、时代、简介或核心内容">
+    </label>
+  </section>
+  <nav class="domain-nav" id="domain-nav"></nav>
+  <div class="empty-state" id="thinkers-empty">没有找到匹配的思想家，请尝试更短的关键词或切换搜索词。</div>
+  <section class="sections" id="thinker-sections"></section>
+  <div class="footer-note">数据源：/api/thinkers（由开发面板代理 backend/api/v1/thinkers 聚合返回）</div>
+</div>
+<script>
+  var thinkerState = { items: [], query: '' };
+  function escHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+  function normalize(value) {
+    return String(value == null ? '' : value).toLowerCase().trim();
+  }
+  function thinkerText(item) {
+    return [
+      item.display_name || '',
+      item.name || '',
+      item.era || '',
+      item.domain_cn || '',
+      item.description || '',
+      item.core_summary || '',
+      item.biography || '',
+      Array.isArray(item.suggested_questions) ? item.suggested_questions.join(' ') : ''
+    ].join(' ');
+  }
+  function matchesQuery(item, query) {
+    if (!query) return true;
+    return normalize(thinkerText(item)).indexOf(query) >= 0;
+  }
+  function groupByDomain(items) {
+    var groups = {};
+    items.forEach(function(item) {
+      var domain = String(item.domain_cn || item.domain || '综合').trim() || '综合';
+      if (!groups[domain]) groups[domain] = [];
+      groups[domain].push(item);
+    });
+    return Object.keys(groups).sort(function(a, b) {
+      return a.localeCompare(b, 'zh-Hans-CN');
+    }).map(function(domain) {
+      groups[domain].sort(function(a, b) {
+        return String(a.display_name || a.name || '').localeCompare(String(b.display_name || b.name || ''), 'zh-Hans-CN');
+      });
+      return { domain: domain, items: groups[domain] };
+    });
+  }
+  function renderDomainNav(groups) {
+    var nav = document.getElementById('domain-nav');
+    nav.innerHTML = groups.map(function(group) {
+      return '<a class="domain-chip" href="#domain-' + encodeURIComponent(group.domain) + '">' +
+        escHtml(group.domain) + '<span>' + group.items.length + '</span></a>';
+    }).join('');
+  }
+  function renderQuestionTags(questions) {
+    if (!Array.isArray(questions) || !questions.length) return '<span class="tag">适合课堂追问与角色扮演</span>';
+    return questions.slice(0, 3).map(function(question) {
+      return '<span class="tag">' + escHtml(question) + '</span>';
+    }).join('');
+  }
+  function renderThinkerCard(item) {
+    var name = item.display_name || item.name || '未命名思想家';
+    var description = item.description || '这位思想家的代表性观点适合放在课堂对话中展开。';
+    var core = item.core_summary || '核心思想摘要暂未生成。';
+    var biography = item.biography || description;
+    return '' +
+      '<article class="thinker-card">' +
+        '<div class="thinker-head">' +
+          '<div class="thinker-avatar">' + escHtml(item.avatar || '🧠') + '</div>' +
+          '<div>' +
+            '<div class="thinker-name">' + escHtml(name) + '</div>' +
+            '<div class="thinker-era">' + escHtml(item.era || '时代信息待补充') + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="thinker-description">' + escHtml(description) + '</div>' +
+        '<div class="thinker-block"><h3>思想体系核心内容</h3><div class="thinker-core">' + escHtml(core) + '</div></div>' +
+        '<div class="thinker-block"><h3>生平与影响简介</h3><div class="thinker-bio">' + escHtml(biography) + '</div></div>' +
+        '<div class="tag-list">' + renderQuestionTags(item.suggested_questions) + '</div>' +
+      '</article>';
+  }
+  function renderSections(groups) {
+    var container = document.getElementById('thinker-sections');
+    container.innerHTML = groups.map(function(group) {
+      return '' +
+        '<section class="section" id="domain-' + encodeURIComponent(group.domain) + '">' +
+          '<div class="section-head">' +
+            '<div class="section-title">' + escHtml(group.domain) + '</div>' +
+            '<div class="section-meta">共 ' + group.items.length + ' 位思想家</div>' +
+          '</div>' +
+          '<div class="thinker-grid">' + group.items.map(renderThinkerCard).join('') + '</div>' +
+        '</section>';
+    }).join('');
+  }
+  function renderThinkers() {
+    var query = normalize(thinkerState.query);
+    var filtered = thinkerState.items.filter(function(item) { return matchesQuery(item, query); });
+    var groups = groupByDomain(filtered);
+    document.getElementById('thinkers-total-count').textContent = thinkerState.items.length;
+    document.getElementById('thinkers-domain-count').textContent = groups.length;
+    document.getElementById('thinkers-summary').innerHTML =
+      '<strong>当前结果：</strong> 共展示 ' + filtered.length + ' 位思想家，分布在 ' + groups.length + ' 个领域中。';
+    document.getElementById('thinkers-status').textContent = query ? '已筛选' : '已加载';
+    document.getElementById('thinkers-empty').style.display = filtered.length ? 'none' : 'block';
+    renderDomainNav(groups);
+    renderSections(groups);
+  }
+  function loadThinkers() {
+    fetch('/api/thinkers')
+      .then(function(r) {
+        if (!r.ok) {
+          return r.json().catch(function(){ return {}; }).then(function(payload) {
+            throw new Error(payload.detail || payload.error || ('HTTP ' + r.status));
+          });
+        }
+        return r.json();
+      })
+      .then(function(payload) {
+        thinkerState.items = Array.isArray(payload.items) ? payload.items : [];
+        renderThinkers();
+      })
+      .catch(function(err) {
+        document.getElementById('thinkers-status').textContent = '加载失败';
+        document.getElementById('thinkers-summary').innerHTML =
+          '<strong>加载失败：</strong> ' + escHtml((err && err.message) || '无法读取思想家数据');
+        document.getElementById('thinkers-empty').style.display = 'block';
+        document.getElementById('thinkers-empty').textContent = '思想家数据加载失败，请确认后端已启动。';
+      });
+  }
+  document.getElementById('thinker-search').addEventListener('input', function(event) {
+    thinkerState.query = event.target.value || '';
+    renderThinkers();
+  });
+  loadThinkers();
+</script>
+</body>
+</html>`;
+
 // ── Dashboard HTML ────────────────────────────────────────
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -794,9 +1046,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .hw-info .hw-sep{color:#333}
   .hw-opt{font-size:11px;color:#80cbc4;max-width:780px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
   .quick-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:flex-start}
-  .runtime-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}
+  .runtime-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:20px;align-items:start}
   .runtime-col{min-width:0}
   .runtime-col + .runtime-col{border-left:1px solid rgba(15,52,96,0.75);padding-left:20px}
+  .card-title-spacer{margin-left:auto}
   .health-grid{margin-top:10px;background:#0d0d1a;border:1px solid #0f3460;border-radius:8px;overflow:hidden}
   .health-empty{padding:14px;color:#666;text-align:center}
   .history-panel-head{align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
@@ -1010,14 +1263,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <a class="btn-open" id="quick-link-asr" href="${LOCAL_BACKEND_URL}/browser-asr-test.html" target="_blank" rel="noopener">🎙 ASR 测试</a>
       <a class="btn-open" id="quick-link-docs" href="${LOCAL_BACKEND_URL}/docs" target="_blank" rel="noopener">📚 API 文档</a>
       <a class="btn-open" id="quick-link-topics" href="${LOCAL_BACKEND_URL}/api/v1/topics/" target="_blank" rel="noopener">💬 话题列表</a>
-      <a class="btn-open" id="quick-link-thinkers" href="${LOCAL_BACKEND_URL}/api/v1/thinkers/" target="_blank" rel="noopener">🧠 思想家</a>
+      <a class="btn-open" id="quick-link-thinkers" href="/thinkers" target="_blank" rel="noopener">🧠 思想家</a>
       <button class="btn-open" id="btn-hw-detect" onclick="fetchHardware()" style="cursor:pointer">🖥 检测并打开报告</button>
     </div>
   </div>
   <div class="card" id="card-runtime">
     <div class="runtime-split">
       <section class="runtime-col" id="card-backend">
-        <div class="card-title">📟 后端运行日志 (FastAPI :${BACKEND_PORT})</div>
+        <div class="card-title">📟 后端运行日志 (FastAPI :${BACKEND_PORT})<span class="card-title-spacer"></span><button class="btn-danger-subtle" id="btn-clear-backend-log" onclick="clearBackendLog()">🧹 清空</button></div>
         <div class="log-box" id="log-backend"></div>
       </section>
       <section class="runtime-col" id="card-health">
@@ -1118,7 +1371,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="card-title">
       🖥 硬件检测与优化
     </div>
-    <span class="hw-opt" id="hw-opt">点击“开始检测”以生成优化建议</span>
+    <span class="hw-opt" id="hw-opt">点击“检测并打开报告”以读取当前主机配置，并确认已应用的运行时优化。</span>
     <div class="hw-info" id="hw-info" style="display:none;margin-top:10px">
       <span class="hw-chip" id="hw-chip"></span>
       <span class="hw-sep">|</span>
@@ -1173,6 +1426,11 @@ function panelApiPath(pathname) {
 function panelFetch(pathname, options) {
   return fetch(panelApiPath(pathname), options || {});
 }
+function panelPagePath(pathname) {
+  var suffix = String(pathname || '/');
+  if (!suffix.startsWith('/')) suffix = '/' + suffix;
+  return withOpsToken(suffix);
+}
 function ctrl(svc, action) {
   panelFetch('/api/' + action + '/' + svc, {method:'POST'})
     .then(function(r){return r.json()}).then(function(d){
@@ -1186,6 +1444,25 @@ function showToast(msg) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(function(){ t.remove(); }, 3000);
+}
+function clearBackendLog() {
+  var box = document.getElementById('log-backend');
+  if (box) box.innerHTML = '';
+  var btn = document.getElementById('btn-clear-backend-log');
+  if (btn) btn.disabled = true;
+  panelFetch('/api/log/backend/clear', {method:'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d.ok) {
+        showToast(d.msg || '清空后端日志失败');
+      }
+    })
+    .catch(function(){
+      showToast('清空后端日志失败');
+    })
+    .finally(function(){
+      if (btn) btn.disabled = false;
+    });
 }
 var box = document.getElementById('log-backend');
 var es = new EventSource(panelApiPath('/log/backend'));
@@ -1302,13 +1579,14 @@ function applyQuickLinks() {
     ['quick-link-asr', '/browser-asr-test.html'],
     ['quick-link-docs', '/docs'],
     ['quick-link-topics', '/api/v1/topics/'],
-    ['quick-link-thinkers', '/api/v1/thinkers/'],
   ];
   mappings.forEach(function(item) {
     var el = document.getElementById(item[0]);
     if (!el) return;
     el.href = backendUrl(item[1]);
   });
+  var thinkersLink = document.getElementById('quick-link-thinkers');
+  if (thinkersLink) thinkersLink.href = panelPagePath('/thinkers');
 
   var flutterLink = document.getElementById('flutter-app-link');
   if (flutterLink) {
@@ -2923,6 +3201,10 @@ function openHardwareReportWindow() {
 
 function buildHardwareReportBody(hw, tuningText) {
   var hr = hw.hardware_report || {};
+  var rt = hw.runtime_tuning || {};
+  var optimizedSummary = rt.device || rt.workers || rt.prefetch_batch
+    ? '本次检测已读取并应用本机运行时参数，后端后续会按这组设置执行。'
+    : '本次检测只拿到了硬件摘要，未发现可确认的运行时优化结果。';
   return '' +
     '<h1>🖥 RoundTable 硬件检测报告</h1>' +
     '<div class="card">' +
@@ -2938,6 +3220,15 @@ function buildHardwareReportBody(hw, tuningText) {
       '<div class="row"><span class="label">推荐</span>' + escHtml(hr.recommendation || ('建议并行线程: ' + (hw.recommended_workers || '-'))) + '</div>' +
       '<div class="row"><span class="label">已应用优化</span>' + escHtml(tuningText) + '</div>' +
     '</div>' +
+    '<div class="card">' +
+      '<div class="title">当前已落地的运行时参数</div>' +
+      '<div class="row"><span class="label">执行设备</span>' + escHtml(rt.device || '-') + '</div>' +
+      '<div class="row"><span class="label">工作线程</span>' + escHtml(String(rt.workers || '-')) + '</div>' +
+      '<div class="row"><span class="label">TTS 预取</span>' + escHtml(String(rt.prefetch_batch || '-')) + '</div>' +
+      '<div class="row"><span class="label">ASR 预热</span>' + escHtml(String(rt.asr_warmup_interval_ms || '-')) + ' ms</div>' +
+      '<div class="row"><span class="label">TTS 重试</span>' + escHtml(String(rt.tts_retry_delay_ms || '-')) + ' ms</div>' +
+      '<div class="muted">' + escHtml(optimizedSummary) + '</div>' +
+    '</div>' +
     '<div class="muted">数据来源：/api/v1/benchmark/hardware?apply_tuning=true</div>';
 }
 
@@ -2948,8 +3239,15 @@ function fetchHardware() {
   if (!reportWindow) return;
   btn.disabled = true;
   btn.textContent = '检测中...';
-  fetch(backendUrl('/api/v1/benchmark/hardware?apply_tuning=true'))
-    .then(function(r){ return r.json(); })
+  panelFetch('/api/hardware')
+    .then(function(r){
+      if (!r.ok) {
+        return r.json().catch(function(){ return {}; }).then(function(payload) {
+          throw new Error(payload.detail || payload.error || ('HTTP ' + r.status));
+        });
+      }
+      return r.json();
+    })
     .then(function(hw) {
       var el = document.getElementById('hw-info');
       el.style.display = 'flex';
@@ -2959,22 +3257,21 @@ function fetchHardware() {
       document.getElementById('hw-gpu').textContent = hw.mps_available ? 'MPS ✓' + (hw.gpu_cores ? ' ' + hw.gpu_cores + ' cores' : '') : hw.cuda_available ? 'CUDA ✓' : 'CPU only';
 
       var rt = hw.runtime_tuning || {};
-      var hr = hw.hardware_report || {};
-      var tuningText = 'workers=' + (rt.workers || '-') + ', prefetch=' + (rt.prefetch_batch || '-') + ', ASR预热=' + (rt.asr_warmup_interval_ms || '-') + 'ms, 设备=' + (rt.device || '-');
+      var tuningText = '设备=' + (rt.device || '-') + ', workers=' + (rt.workers || '-') + ', prefetch=' + (rt.prefetch_batch || '-') + ', ASR预热=' + (rt.asr_warmup_interval_ms || '-') + 'ms, TTS重试=' + (rt.tts_retry_delay_ms || '-') + 'ms';
 
-      document.getElementById('hw-opt').textContent = '建议并行线程: ' + (hw.recommended_workers || '-') + ' ｜ 已应用: ' + tuningText;
+      document.getElementById('hw-opt').textContent = '已按当前主机完成运行时优化：' + tuningText + ' ｜ 推荐并行线程: ' + (hw.recommended_workers || '-');
       writeHardwareReport(
         reportWindow,
         'RoundTable 硬件检测报告',
         buildHardwareReportBody(hw, tuningText)
       );
     })
-    .catch(function() {
-      document.getElementById('hw-opt').textContent = '硬件检测失败：请确认后端已启动并允许跨域访问';
+    .catch(function(err) {
+      document.getElementById('hw-opt').textContent = '硬件检测失败：' + ((err && err.message) || '请确认后端已启动');
       writeHardwareReport(
         reportWindow,
         'RoundTable 硬件检测报告',
-        '<h1>🖥 RoundTable 硬件检测报告</h1><div class="card"><div class="title">检测失败</div><div class="row">请确认后端已经启动，并且接口 /api/v1/benchmark/hardware 可以正常访问。</div><div class="muted">API: /api/v1/benchmark/hardware?apply_tuning=true</div></div>'
+        '<h1>🖥 RoundTable 硬件检测报告</h1><div class="card"><div class="title">检测失败</div><div class="row">请确认后端已经启动，并且接口 /api/v1/benchmark/hardware 可以正常访问。</div><div class="muted">面板现已改为通过 localhost:${DEV_PANEL_PORT} 代理检测，避免浏览器跨域失败。</div><div class="muted">错误：' + escHtml((err && err.message) || 'unknown') + '</div><div class="muted">API: /api/v1/benchmark/hardware?apply_tuning=true</div></div>'
       );
     })
     .finally(function() {
@@ -2994,9 +3291,32 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(DASHBOARD_HTML);
   }
+  if (pathname === '/thinkers') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(THINKERS_PAGE_HTML);
+  }
   if (pathname === '/api/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(getStatus()));
+  }
+  if (pathname === '/api/thinkers' && req.method === 'GET') {
+    try {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(await loadAllThinkersFromBackend()));
+    } catch (e) {
+      return sendJson(res, 500, { detail: e.message || 'thinkers_proxy_failed' });
+    }
+  }
+  if (pathname === '/api/hardware' && req.method === 'GET') {
+    try {
+      await proxyBackendJson(res, {
+        method: 'GET',
+        path: '/api/v1/benchmark/hardware?apply_tuning=true',
+      });
+      return;
+    } catch (e) {
+      return sendJson(res, 500, { detail: e.message || 'hardware_proxy_failed' });
+    }
   }
   if (pathname === '/api/health') {
     try {
@@ -3109,6 +3429,10 @@ const server = http.createServer(async (req, res) => {
     let result = { ok: false, msg: 'unknown' };
     if (action === 'start' && service === 'backend') result = startBackend();
     else if (action === 'stop' && service === 'backend') result = stopBackend();
+    else if (action === 'log' && service === 'backend' && pathname === '/api/log/backend/clear') {
+      processes.backend.logs = [];
+      result = { ok: true, msg: 'backend_log_cleared' };
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(result));
   }
