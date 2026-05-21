@@ -282,6 +282,18 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     return now.difference(lastActivityAt) < quietPeriod;
   }
 
+  static bool shouldAutoReadHumanReview({
+    required String review,
+    required String lastAutoReadReview,
+    required bool isMuted,
+  }) {
+    final normalizedReview = review.trim();
+    if (isMuted || normalizedReview.isEmpty) {
+      return false;
+    }
+    return normalizedReview != lastAutoReadReview.trim();
+  }
+
   static bool shouldYieldQueuedSpeechForHumanTurn({
     required bool ttsPlaying,
     required bool ttsServiceSpeaking,
@@ -1035,6 +1047,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   String _activeTtsSessionId = '';
   bool _ttsPumpRunning = false;
   bool _humanReviewReadAloudActive = false;
+  String _lastAutoReadHumanReview = '';
   DateTime? _lastMainTtsQueuedAt;
   DateTime? _lastMainTtsCompletedAt;
   int _ttsSpeakerPauseCounter = 0;
@@ -2151,6 +2164,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       );
       if (!mounted || _lastErrorMessage != null) return;
       setState(() {
+        _lastAutoReadHumanReview = '';
         _humanReview = normalized;
         if (_humanReviewOverlayVisible) {
           _humanReviewMuted = false;
@@ -2158,7 +2172,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         }
       });
       if (_humanReviewOverlayVisible && !_humanReviewMuted) {
-        unawaited(_readAloudHumanReview(normalized));
+        _triggerAutoReadHumanReviewIfNeeded(normalized);
       }
     } catch (error) {
       if (kDebugMode) {
@@ -2229,7 +2243,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
 
     if (_humanReview.isNotEmpty) {
       if (!_humanReviewMuted) {
-        unawaited(_readAloudHumanReview(_humanReview));
+        _triggerAutoReadHumanReviewIfNeeded(_humanReview);
       }
       return;
     }
@@ -2244,11 +2258,25 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final normalized = review.trim();
     if (normalized.isEmpty || !mounted) return;
     setState(() {
+      _lastAutoReadHumanReview = normalized == _humanReview ? _lastAutoReadHumanReview : '';
       _humanReview = normalized;
       _humanReviewMuted = false;
       _humanReviewPrefetchStarted = true;
       _isGeneratingHumanReview = false;
     });
+  }
+
+  void _triggerAutoReadHumanReviewIfNeeded(String review) {
+    final normalized = _stripStageDirectionsForSpeech(review).trim();
+    if (!ImmersiveSessionScreen.shouldAutoReadHumanReview(
+      review: normalized,
+      lastAutoReadReview: _lastAutoReadHumanReview,
+      isMuted: _humanReviewMuted,
+    )) {
+      return;
+    }
+    _lastAutoReadHumanReview = normalized;
+    unawaited(_readAloudHumanReview(normalized));
   }
 
   String _subtitlePageCacheKey = '';

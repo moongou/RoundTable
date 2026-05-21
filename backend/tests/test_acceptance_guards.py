@@ -2147,7 +2147,7 @@ def test_floor_manager_rewrites_teacher_self_quote_to_real_owner_from_session_se
 
 
 @pytest.mark.asyncio
-async def test_floor_manager_defers_human_input_request_until_stream_boundary_when_moderator_invites_human() -> None:
+async def test_floor_manager_immediately_requests_human_input_when_moderator_invites_human() -> None:
     designated_updates: list[str | None] = []
     floor_manager = FloorManager(
         team=_TeamStub(),
@@ -2170,11 +2170,20 @@ async def test_floor_manager_defers_human_input_request_until_stream_boundary_wh
     )
 
     assert result is not None
-    assert result['event_type'] == 'message'
-    assert result['data']['source'] == 'moderator'
-    assert floor_manager._deferred_human_request_speaker == '豆苗'
-    assert floor_manager._deferred_human_request_reason == 'moderator_designated_human'
+    assert result['event_type'] == 'human_input_requested'
+    assert result['data']['speaker'] == '豆苗'
+    assert result['data']['reason'] == 'moderator_designated_human'
+    assert floor_manager.state == FloorState.HUMAN_TURN_WAITING
+    assert floor_manager.current_speaker == '豆苗'
+    assert floor_manager._deferred_human_request_speaker is None
+    assert floor_manager._deferred_human_request_reason == ''
     assert designated_updates == ['豆苗']
+
+    inserted_ai = await floor_manager._process_event(
+        TextMessage(source='skeptic', content='那我先替豆苗说一个想法。')
+    )
+
+    assert inserted_ai is None
 
 
 @pytest.mark.asyncio
@@ -2356,9 +2365,10 @@ async def test_floor_manager_forces_first_human_invitation_after_first_warmup_tu
     )
 
     assert result is not None
-    assert result['event_type'] == 'message'
-    assert floor_manager._deferred_human_request_speaker == '豆苗'
-    assert floor_manager._deferred_human_request_reason == 'moderator_designated_human'
+    assert result['event_type'] == 'human_input_requested'
+    assert result['data']['speaker'] == '豆苗'
+    assert result['data']['reason'] == 'moderator_designated_human'
+    assert floor_manager.state == FloorState.HUMAN_TURN_WAITING
     assert any('麦克风交给豆苗' in content for _source, content, _type in emitted_messages)
 
 
@@ -2399,8 +2409,9 @@ async def test_floor_manager_live_like_moderator_praise_still_triggers_first_hum
     )
 
     assert result is not None
-    assert result['event_type'] == 'message'
-    assert '小袁同学' in result['data']['content']
+    assert result['event_type'] == 'human_input_requested'
+    assert result['data']['speaker'] == 'u5c0fu8881'
+    assert result['data']['reason'] == 'moderator_designated_human'
     assert human_requests[-1]['speaker'] == 'u5c0fu8881'
 
 
@@ -3022,8 +3033,9 @@ async def test_floor_manager_blocks_moderator_final_closing_before_human_budget(
     )
 
     assert result is not None
-    assert result['event_type'] == 'message'
-    assert '豆苗同学' in result['data']['content']
+    assert result['event_type'] == 'human_input_requested'
+    assert result['data']['speaker'] == '豆苗'
+    assert result['data']['reason'] == 'moderator_designated_human'
     assert human_requests[-1]['speaker'] == '豆苗'
     assert floor_manager._discussion_end_requested is False
 
@@ -3113,7 +3125,7 @@ async def test_floor_manager_skips_forced_goodbye_when_stream_ends_during_human_
         if event['event_type'] == 'human_input_requested':
             floor_manager._resume_team_after_human_input()
 
-    assert events[0]['event_type'] == 'message'
+    assert events[0]['event_type'] == 'human_input_requested'
     assert any(event['event_type'] == 'human_input_requested' for event in events)
     assert events[-1]['event_type'] == 'ended'
     assert any(
@@ -3192,7 +3204,7 @@ async def test_floor_manager_completes_pending_human_input_when_stream_ends_duri
         if event['event_type'] == 'human_input_requested':
             await floor_manager.submit_human_input('豆苗', '我还想补充一点。')
 
-    assert events[0]['event_type'] == 'message'
+    assert events[0]['event_type'] == 'human_input_requested'
     assert any(event['event_type'] == 'human_input_requested' for event in events)
     assert events[-1]['event_type'] == 'ended'
     assert any(
@@ -3227,7 +3239,7 @@ async def test_floor_manager_restarts_team_stream_after_human_turn_recovery() ->
         if event['event_type'] == 'human_input_requested':
             await floor_manager.submit_human_input('豆苗', '我还想补充一点。')
 
-    assert events[0]['event_type'] == 'message'
+    assert events[0]['event_type'] == 'human_input_requested'
     assert any(event['event_type'] == 'human_input_requested' for event in events)
     assert any(
         event['event_type'] == 'message'
@@ -3235,10 +3247,10 @@ async def test_floor_manager_restarts_team_stream_after_human_turn_recovery() ->
         and event['data']['content'] == '我还想补充一点。'
         for event in events
     )
-    assert any(
+    assert not any(
         event['event_type'] == 'message'
-        and event['data']['source'] == 'skeptic'
-        and event['data']['content'] == '我接着回应一下。'
+        and event['data']['source'] == '系统'
+        and '按跳过处理' in event['data']['content']
         for event in events
     )
     assert floor_manager.team.run_calls >= 2
@@ -3339,7 +3351,8 @@ async def test_floor_manager_moderator_handoff_survives_brevity_and_keeps_tts_al
     assert '豆苗同学' in content
     assert '豆苗同学' in tts_text
     assert tts_text in content
-    assert floor_manager._deferred_human_request_speaker == '豆苗'
+    assert floor_manager.state == FloorState.HUMAN_TURN_WAITING
+    assert floor_manager.current_speaker == '豆苗'
 
 
 @pytest.mark.asyncio
@@ -3435,12 +3448,7 @@ async def test_floor_manager_flushes_stalled_stream_chunks_before_restart() -> N
         if event['event_type'] == 'human_input_requested':
             await floor_manager.submit_human_input('豆苗', '我接着说。')
 
-    assert any(
-        event['event_type'] == 'message'
-        and event['data']['source'] == 'moderator'
-        and '我来接一句' in event['data']['content']
-        for event in events
-    )
+    assert any(event['event_type'] == 'human_input_requested' for event in events)
     assert any(
         event['event_type'] == 'human_input_requested'
         and event['data']['speaker'] == '豆苗'
@@ -3450,7 +3458,7 @@ async def test_floor_manager_flushes_stalled_stream_chunks_before_restart() -> N
 
 
 @pytest.mark.asyncio
-async def test_floor_manager_defers_human_request_until_boundary_after_residual_ai_output() -> None:
+async def test_floor_manager_suppresses_residual_ai_output_after_moderator_handoff_to_human() -> None:
     team = _MultiStreamTeamStub(
         [
             [
@@ -3475,11 +3483,10 @@ async def test_floor_manager_defers_human_request_until_boundary_after_residual_
         if event['event_type'] == 'human_input_requested':
             await floor_manager.submit_human_input('豆苗', '（跳过）')
 
-    assert events[0]['event_type'] == 'message'
-    assert events[0]['data']['source'] == 'moderator'
-    assert any(
-        event['event_type'] == 'stream'
-        and event['data']['source'] == 'skeptic'
+    assert events[0]['event_type'] == 'human_input_requested'
+    assert events[0]['data']['speaker'] == '豆苗'
+    assert not any(
+        event['event_type'] == 'stream' and event['data']['source'] == 'skeptic'
         for event in events
     )
     assert any(
@@ -5414,15 +5421,27 @@ async def test_floor_manager_allows_third_blocked_closing_with_anomaly_marker() 
     first = await floor_manager._process_event(
         TextMessage(source='moderator', content='同学们，今天讨论就到这里，再见。')
     )
+    floor_manager.state = FloorState.AI_SPEAKING
+    floor_manager.current_speaker = 'moderator'
+    floor_manager._last_human_input_requested_speaker = ''
+    floor_manager._deferred_human_request_speaker = None
+    floor_manager._deferred_human_request_reason = ''
+    floor_manager._pending_human_input_reason = 'normal'
     second = await floor_manager._process_event(
         TextMessage(source='moderator', content='同学们，今天讨论就到这里，再见。')
     )
+    floor_manager.state = FloorState.AI_SPEAKING
+    floor_manager.current_speaker = 'moderator'
+    floor_manager._last_human_input_requested_speaker = ''
+    floor_manager._deferred_human_request_speaker = None
+    floor_manager._deferred_human_request_reason = ''
+    floor_manager._pending_human_input_reason = 'normal'
     third = await floor_manager._process_event(
         TextMessage(source='moderator', content='同学们，今天讨论就到这里，再见。')
     )
 
-    assert first is not None and '再见' not in first['data']['content']
-    assert second is not None and '再见' not in second['data']['content']
+    assert first is not None and first['event_type'] == 'human_input_requested'
+    assert second is not None and second['event_type'] == 'human_input_requested'
     assert third is not None and '再见' in third['data']['content']
     gate = floor_manager._closing_gate_status()
     assert gate['closing_attempt_count'] == 3
@@ -5431,7 +5450,7 @@ async def test_floor_manager_allows_third_blocked_closing_with_anomaly_marker() 
 
 
 @pytest.mark.asyncio
-async def test_non_moderator_progress_resets_blocked_closing_attempt_count() -> None:
+async def test_human_progress_resets_blocked_closing_attempt_count() -> None:
     floor_manager = FloorManager(
         team=_TeamStub(),
         ai_agents=[SimpleNamespace(name='moderator'), SimpleNamespace(name='explorer')],
@@ -5448,10 +5467,16 @@ async def test_non_moderator_progress_resets_blocked_closing_attempt_count() -> 
     )
     assert floor_manager._closing_attempt_count == 1
 
-    _ = await floor_manager._process_event(
-        TextMessage(source='explorer', content='我想再补充一个生活里的例子。')
+    floor_manager.current_speaker = '豆苗'
+    floor_manager._last_human_input_requested_speaker = '豆苗'
+    floor_manager.state = FloorState.HUMAN_TURN_WAITING
+
+    progress = await floor_manager._process_event(
+        TextMessage(source='豆苗', content='我想再补充一个生活里的例子。')
     )
 
+    assert progress is not None
+    assert progress['event_type'] == 'message'
     assert floor_manager._closing_attempt_count == 0
 
 

@@ -4812,8 +4812,8 @@ class FloorManager:
                         self._deferred_human_request_reason = "moderator_designated_human"
                         self._pending_human_input_reason = self._deferred_human_request_reason
                         self._expected_next_ai_speaker = None
-                        notify_human_request_speaker = agent_name
-                        notify_human_request_reason = self._deferred_human_request_reason
+                        immediate_human_request_speaker = agent_name
+                        immediate_human_request_reason = self._deferred_human_request_reason
                         if (
                             forced_human_invite
                             or (

@@ -269,6 +269,35 @@ void main() {
     );
   });
 
+  test('human review auto read only runs once per same review', () {
+    expect(
+      ImmersiveSessionScreen.shouldAutoReadHumanReview(
+        review: '你刚才那个比喻很有意思。',
+        lastAutoReadReview: '',
+        isMuted: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldAutoReadHumanReview(
+        review: '你刚才那个比喻很有意思。',
+        lastAutoReadReview: '你刚才那个比喻很有意思。',
+        isMuted: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldAutoReadHumanReview(
+        review: '你刚才那个比喻很有意思。',
+        lastAutoReadReview: '',
+        isMuted: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('concurrent human turn signals merge into one user turn', () {
     expect(
       ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
