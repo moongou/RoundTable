@@ -1,15 +1,15 @@
 /// 浏览器原生语音服务实现
 ///
-/// 使用 Web Speech API（SpeechSynthesis / SpeechRecognition）
-/// 通过 dart:js 和 dart:html 在 Flutter Web 中调用。
+/// 使用 Web Speech API（SpeechSynthesis / SpeechRecognition）。
 ///
 /// 注意：SpeechRecognition 仅 Chrome/Edge 完全支持。
-// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
-import 'dart:html' as html;
 import 'dart:async';
-import 'dart:js' as js;
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
+
+import 'package:web/web.dart' as web;
 
 import 'speech_contract.dart';
 
@@ -42,34 +42,32 @@ class BrowserTtsService implements TtsService {
     await stop();
 
     try {
-      final synth = html.window.speechSynthesis;
-      if (synth == null) return;
-
-      final utterance = html.SpeechSynthesisUtterance(text);
-      utterance.lang = 'zh-CN';
-      utterance.rate = rate;
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
+      final synth = web.window.speechSynthesis;
+      final utterance = web.SpeechSynthesisUtterance(text)
+        ..lang = 'zh-CN'
+        ..rate = rate
+        ..pitch = 1.0
+        ..volume = 1.0;
 
       _isSpeaking = true;
       var started = false;
       final completer = Completer<void>();
 
-      utterance.onStart.listen((_) {
+      utterance.onstart = ((web.Event _) {
         if (started) return;
         started = true;
         onStart?.call();
-      });
+      }).toJS;
 
-      utterance.onEnd.listen((_) {
+      utterance.onend = ((web.Event _) {
         _isSpeaking = false;
         if (!completer.isCompleted) completer.complete();
-      });
+      }).toJS;
 
-      utterance.onError.listen((_) {
+      utterance.onerror = ((web.Event _) {
         _isSpeaking = false;
         if (!completer.isCompleted) completer.completeError('TTS error');
-      });
+      }).toJS;
 
       synth.speak(utterance);
       await completer.future;
@@ -82,7 +80,7 @@ class BrowserTtsService implements TtsService {
   @override
   Future<void> stop() async {
     try {
-      html.window.speechSynthesis?.cancel();
+      web.window.speechSynthesis.cancel();
     } catch (_) {}
     _isSpeaking = false;
   }
@@ -99,7 +97,7 @@ class BrowserAsrService implements AsrService {
   bool _isAvailable = false;
   final StreamController<AsrResult> _controller =
       StreamController<AsrResult>.broadcast();
-  js.JsObject? _recognition;
+  JSObject? _recognition;
   String _lastTranscript = '';
   bool _lastTranscriptIsFinal = false;
   bool _stopRequested = false;
@@ -109,11 +107,22 @@ class BrowserAsrService implements AsrService {
     _checkAvailability();
   }
 
-  String _describeRecognitionError(dynamic event) {
+  String _jsAnyToString(JSAny? value) {
+    if (value == null) {
+      return '';
+    }
     try {
-      final jsEvent = event as js.JsObject?;
-      final errorCode = (jsEvent?['error'] ?? '').toString();
-      final message = (jsEvent?['message'] ?? '').toString().trim();
+      return (value as JSString).toDart;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  String _describeRecognitionError(JSAny? event) {
+    try {
+      final jsEvent = event as JSObject?;
+      final errorCode = _jsAnyToString(jsEvent?['error']);
+      final message = _jsAnyToString(jsEvent?['message']).trim();
       final suffix = message.isEmpty ? '' : '：$message';
       switch (errorCode) {
         case 'not-allowed':
@@ -138,19 +147,17 @@ class BrowserAsrService implements AsrService {
   }
 
   Future<void> _ensureMicrophoneAccess() async {
-    final mediaDevices = html.window.navigator.mediaDevices;
-    if (mediaDevices == null) {
-      throw StateError('当前浏览器不支持麦克风访问');
-    }
-    final stream = await mediaDevices.getUserMedia({'audio': true});
-    stream.getTracks().forEach((track) => track.stop());
+    final stream = await web.window.navigator.mediaDevices
+        .getUserMedia(web.MediaStreamConstraints(audio: true.toJS))
+        .toDart;
+    stream.getTracks().toDart.forEach((track) => track.stop());
   }
 
   void _checkAvailability() {
     try {
-      final context = js.context;
-      _isAvailable = context.hasProperty('webkitSpeechRecognition') ||
-          context.hasProperty('SpeechRecognition');
+      final context = globalContext;
+      _isAvailable = context.has('webkitSpeechRecognition') ||
+          context.has('SpeechRecognition');
     } catch (_) {
       _isAvailable = false;
     }
@@ -215,57 +222,64 @@ class BrowserAsrService implements AsrService {
     try {
       await _ensureMicrophoneAccess();
 
-      final context = js.context;
-      final speechRecognitionCtor =
-          context.hasProperty('webkitSpeechRecognition')
-              ? context['webkitSpeechRecognition']
-              : context['SpeechRecognition'];
+      final context = globalContext;
+      JSFunction? speechRecognitionCtor;
+      try {
+        speechRecognitionCtor = (context.has('webkitSpeechRecognition')
+            ? context['webkitSpeechRecognition']
+            : context['SpeechRecognition']) as JSFunction?;
+      } catch (_) {
+        speechRecognitionCtor = null;
+      }
+      if (speechRecognitionCtor == null) {
+        throw StateError('当前浏览器不支持 SpeechRecognition');
+      }
 
-      _recognition = js.JsObject(speechRecognitionCtor as js.JsFunction);
-      _recognition!['continuous'] = true;
-      _recognition!['interimResults'] = true;
-      _recognition!['lang'] = 'zh-CN';
-      _recognition!['maxAlternatives'] = 1;
+      _recognition = speechRecognitionCtor.callAsConstructor<JSObject>();
+      _recognition!['continuous'] = true.toJS;
+      _recognition!['interimResults'] = true.toJS;
+      _recognition!['lang'] = 'zh-CN'.toJS;
+      _recognition!['maxAlternatives'] = 1.toJS;
       _lastTranscript = '';
       _lastTranscriptIsFinal = false;
       _stopRequested = false;
       _stopCompleter = null;
 
-      // 绑定结果事件
-      _recognition!['onresult'] = js.JsFunction.withThis((_, dynamic event) {
+      _recognition!['onresult'] = ((JSAny? event) {
         try {
-          final jsEvent = event as js.JsObject?;
-          final results = jsEvent?['results'];
-          final len = ((results?['length'] ?? 0) as num).toInt();
-          final startIndex = ((jsEvent?['resultIndex'] ?? 0) as num).toInt();
+          final jsEvent = event as JSObject?;
+          final results = jsEvent?['results'] as JSObject?;
+          final len = ((results?['length'] as JSNumber?)?.toDartInt ?? 0);
+          final startIndex =
+              ((jsEvent?['resultIndex'] as JSNumber?)?.toDartInt ?? 0);
           if (len > 0) {
             for (var i = startIndex; i < len; i++) {
-              final item = results[i];
-              final transcript =
-                  ((item[0]['transcript'] ?? '') as String).trim();
+              final item = results?.getProperty<JSAny?>(i.toJS) as JSObject?;
+              final alt = item?.getProperty<JSAny?>(0.toJS) as JSObject?;
+              final transcript = _jsAnyToString(alt?['transcript']).trim();
               if (transcript.isEmpty) continue;
-              final isFinal = item['isFinal'] == true;
+              final isFinal = (item?['isFinal'] as JSBoolean?)?.toDart ?? false;
               _emitTranscript(transcript, isFinal: isFinal);
             }
           }
         } catch (_) {}
-      });
+      }).toJS;
 
-      _recognition!['onend'] = js.JsFunction.withThis((_, dynamic event) {
+      _recognition!['onend'] = ((JSAny? _) {
         _completeRecognitionCycle(flushPending: true);
-      });
+      }).toJS;
 
-      _recognition!['onerror'] = js.JsFunction.withThis((_, dynamic event) {
-        final jsEvent = event as js.JsObject?;
-        final errorCode = (jsEvent?['error'] ?? '').toString();
+      _recognition!['onerror'] = ((JSAny? event) {
+        final jsEvent = event as JSObject?;
+        final errorCode = _jsAnyToString(jsEvent?['error']);
         final isExpectedAbort = _stopRequested && errorCode == 'aborted';
         _completeRecognitionCycle(flushPending: _stopRequested);
         if (!isExpectedAbort && !_controller.isClosed) {
           _controller.addError(_describeRecognitionError(event));
         }
-      });
+      }).toJS;
 
-      _recognition!.callMethod('start');
+      _recognition!.callMethod<JSAny?>('start'.toJS);
       _isListening = true;
     } catch (e) {
       _completeRecognitionCycle();
@@ -288,7 +302,7 @@ class BrowserAsrService implements AsrService {
     _stopRequested = true;
     final completer = _stopCompleter ??= Completer<void>();
     try {
-      recognition.callMethod('stop');
+      recognition.callMethod<JSAny?>('stop'.toJS);
     } catch (_) {
       _completeRecognitionCycle(flushPending: true);
       return;

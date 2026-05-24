@@ -35,14 +35,16 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 {history}
 
 规则：
-0. 每个新话题开场必须先由老师发言，介绍背景后再点名
+0. 每个新话题开场必须先由老师发言，先交代话题来源、概念/问题定义与背景争议中的基本情况，再点名
 0.1 首轮阶段（老师开场 + 每位同学首次发言）禁止“上一位同学说得对”等互引式表达
 1. **人类学生是讨论的绝对核心**（占讨论重要性30%-50%），所有讨论应以人类学生的观点为中心展开
-2. 人类学生每次发言后，老师应立即点评（总结、补充提问或引导深入）
-3. 一场讨论里，老师一般安排人类学生发言3到6次；如果人类学生是通过举手获得发言，也计入这3到6次
-3.1 老师开场后，通常先让1到2位非人类参与者铺垫，再开始第一次点名人类学生发言；真人学生必须在开场后的前3分钟内获得第一次发言机会
-3.2 在达到建议上限前，人类学生的频率可以稍高；达到建议上限后，除非老师明确点名或人类学生主动举手，一般不要继续主动安排
+2. 人类学生发言后，至少一半轮次要由老师立即肯定、支持式点评；其余轮次可让虚拟同学直接回应、补充、追问，老师负责串联、点名和拉回主题
+2.1 老师的主持要简短，很多时候一句肯定或一句追问就够了，不要长篇讲评
+3. 一场常规讨论里，老师一般要通过**明确点名**把人类学生安排到5到7次发言，默认目标约6次；如果人类学生积极举手，可适当放宽
+3.1 老师开场后，通常先让1到2位非人类参与者铺垫，再开始第一次**明确点名**人类学生发言；真人学生必须在开场后的前2分钟内获得第一次发言机会
+3.2 在达到建议上限前，人类学生的频率可以稍高；达到建议上限后，除非老师明确点名、同学明确把话题交给真人、或人类学生主动举手获准，一般不要继续主动安排
 3.3 如果人类学生已经多次主动举手，说明其参与意愿很强，此时可以放宽到5到10次甚至更多发言，并相应推迟收尾时机
+3.4 除“人类学生主动举手并获准”外，禁止无指向地直接把下一轮给人类学生；必须在最近语境中出现老师/同学/思想家对人类学生的明确指向（点名发言或点名回应）
 4. 不要让同一个人连续发言两次（除老师外）
 5. 优先让还没发言的人先说
 6. 人类学生通常至少间隔2位非人类发言者后可再次安排，但如果讨论需要人类回应则可提前
@@ -54,6 +56,16 @@ MODERATOR_SELECTOR_PROMPT = """你是一个讨论主持人，负责从以下参�
 
 FIRST_CLOSING_PROMPT_MARKER = "收尾前，我想先问问大家"
 SECOND_CLOSING_PROMPT_MARKER = "最后我再问一次"
+GENERIC_NOMINATION_PATTERNS = (
+    re.compile(r"大家怎么看(?:呢)?[？?！!。.]?"),
+    re.compile(r"其他同学呢[？?！!。.]?"),
+    re.compile(r"还有谁想说[？?！!。.]?"),
+    re.compile(r"谁来说说[？?！!。.]?"),
+    re.compile(r"请其他同学说说[？?！!。.]?"),
+    re.compile(r"别的同学怎么看(?:呢)?[？?！!。.]?"),
+    re.compile(r"还有哪位同学[？?！!。.]?"),
+    re.compile(r"谁还想说[？?！!。.]?"),
+)
 
 # 结束讨论的关键词
 TERMINATION_KEYWORDS = ["讨论结束", "END_DISCUSSION", "今天讨论到这里"]
@@ -65,6 +77,10 @@ _designated_next_speaker: Optional[str] = None
 def set_designated_speaker(name: Optional[str]) -> None:
     """设置被指定的下一个发言者。"""
     global _designated_next_speaker
+    previous = _designated_next_speaker
+    if previous and previous != name:
+        logger.info("[TurnScheduler] 覆盖旧指定发言者: %s -> %s", previous, name)
+    _designated_next_speaker = None
     _designated_next_speaker = name
     if name:
         logger.info("[TurnScheduler] 指定下一位发言者: %s", name)
@@ -76,6 +92,14 @@ def get_designated_speaker() -> Optional[str]:
     name = _designated_next_speaker
     _designated_next_speaker = None
     return name
+
+
+def is_generic_nomination(text: str) -> bool:
+    """判断文本是否属于不带明确对象的泛化点名。"""
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact:
+        return False
+    return any(pattern.search(compact) for pattern in GENERIC_NOMINATION_PATTERNS)
 
 
 def _build_participant_alias_map(participant_names: list[str]) -> dict[str, str]:
@@ -94,6 +118,9 @@ def _build_participant_alias_map(participant_names: list[str]) -> dict[str, str]
         stripped = title_pattern.sub("", canonical).strip()
         if stripped:
             aliases.add(stripped)
+            compact = re.sub(r"\s+", "", stripped)
+            if compact:
+                aliases.add(compact)
 
         # 处理中西文复合姓名，支持使用最后一段进行点名（如“阿德勒先生”）。
         for splitter in ("·", "・", ".", " "):
@@ -284,16 +311,16 @@ def create_discussion_team(
     preferred_human_turn_target = 0
     human_turn_min_target = 0
     human_turn_soft_cap = 0
-    first_human_invite_after_turns = 2
+    base_first_human_invite_after_turns = 1
     forced_first_human_after_turns = 3
-    human_reinvite_gap = 3
-    moderator_soft_cap_ratio = 0.42
+    base_human_reinvite_gap = 3  # Minimum gap between human turns for even distribution
+    moderator_soft_cap_ratio = 0.40
     if humans:
-        human_turn_min_target = min(3, max(1, round(nominal_max_turns / 7)))
-        human_turn_soft_cap = 7
+        human_turn_min_target = 5
+        human_turn_soft_cap = max(human_turn_min_target, min(7, round(nominal_max_turns / 3)))
         preferred_human_turn_target = max(
             human_turn_min_target,
-            min(human_turn_soft_cap, round(nominal_max_turns / 5)),
+            min(human_turn_soft_cap, round(nominal_max_turns * 0.27)),
         )
 
     def moderator_led_selector(thread: list) -> Optional[str]:
@@ -431,41 +458,101 @@ def create_discussion_team(
                 return unspoken_thinkers[0]
             if unspoken_non_human:
                 return unspoken_non_human[0]
-            if human_reinvite_due:
-                human_name = preferred_human_name()
-                if human_name:
-                    return human_name
             non_human = non_human_continuation_candidates()
             if non_human:
                 return non_human[0]
             return None
 
+        def peer_response_candidate() -> Optional[str]:
+            non_human = non_human_continuation_candidates()
+            if non_human:
+                return non_human[0]
+            return None
+
+        def classmate_response_candidate() -> Optional[str]:
+            non_human = [
+                name
+                for name in non_human_continuation_candidates()
+                if name not in thinker_name_set
+            ]
+            if non_human:
+                return non_human[0]
+            return None
+
+        def coverage_gap_candidate() -> Optional[str]:
+            if unspoken_thinkers:
+                return unspoken_thinkers[0]
+            if unspoken_non_human:
+                return unspoken_non_human[0]
+            return None
+
         human_cooldown = 2
         since_human = turns_since_last_human()
         human_within_soft_cap = human_turn_count < effective_human_turn_soft_cap
+
+        # Adaptive gap for even distribution: space human turns across the discussion
+        remaining_human_budget = max(1, effective_preferred_human_turn_target - human_turn_count)
+        estimated_remaining_turns = max(1, nominal_max_turns - len(participant_msgs))
+        adaptive_gap = max(
+            base_human_reinvite_gap,
+            min(5, estimated_remaining_turns // max(1, remaining_human_budget + 1)),
+        )
+        # Hand raising: reduce gap when user is actively engaged
+        if engagement_level >= 1:
+            adaptive_gap = max(2, adaptive_gap - engagement_level)
+
         human_reinvite_due = (
             bool(human_name_set)
             and has_human_spoken
             and human_within_soft_cap
             and human_turn_count < effective_preferred_human_turn_target
-            and since_human >= human_reinvite_gap
+            and since_human >= adaptive_gap
         )
 
-        # ── 优先级2：用户刚发言 → 老师点评 ──
+        # ── 优先级2：用户刚发言后，至少一半机会由老师立即肯定式点评 ──
         if last_source in human_name_set:
-            logger.info("[TurnScheduler] 用户 %s 刚发言，安排老师点评", last_source)
+            if first_closing_seen is not None and first_closing_seen <= 1:
+                logger.info("[TurnScheduler] 收尾征询后的真人补充，回到老师完成串联")
+                return moderator.name
+            if human_turn_count % 2 == 1 and last_source != moderator.name:
+                logger.info("[TurnScheduler] 用户 %s 刚发言，本轮回到老师点评", last_source)
+                return moderator.name
+            candidate = classmate_response_candidate()
+            if candidate and candidate != moderator.name:
+                logger.info(
+                    "[TurnScheduler] 用户 %s 刚发言，让虚拟同学立即回应: %s",
+                    last_source,
+                    candidate,
+                )
+                return candidate
+            candidate = peer_response_candidate()
+            if candidate and candidate != moderator.name:
+                logger.info(
+                    "[TurnScheduler] 用户 %s 刚发言，优先让同伴接着回应: %s",
+                    last_source,
+                    candidate,
+                )
+                return candidate
+            logger.info("[TurnScheduler] 用户 %s 刚发言，兜底回到老师串联", last_source)
             return moderator.name
 
         if (
             human_name_set
             and not has_human_spoken
-            and len(non_moderator_msgs) >= 2
+            and len(non_moderator_msgs) >= base_first_human_invite_after_turns
             and last_source != moderator.name
         ):
             logger.info("[TurnScheduler] 真人学生尚未发言，优先把老师拉回邀请位")
             return moderator.name
 
         if human_reinvite_due and last_source != moderator.name:
+            candidate = coverage_gap_candidate()
+            if candidate and candidate != moderator.name:
+                logger.info(
+                    "[TurnScheduler] 真人预算偏低但仍有未发言参与者，先补齐覆盖: %s",
+                    candidate,
+                )
+                return candidate
             logger.info(
                 "[TurnScheduler] 真人学生发言次数仍低于目标，安排老师回到邀请位: %s/%s level=%s",
                 human_turn_count,
@@ -615,31 +702,25 @@ def create_discussion_team(
                     return selected
 
             if latest_source == moderator.name and not is_opening_round and not has_human_spoken:
-                if len(non_moderator_msgs) >= first_human_invite_after_turns:
-                    forced_human = preferred_human_name()
-                    if forced_human:
-                        logger.info(
-                            "[TurnScheduler] 首轮铺垫已达阈值，优先安排真人发言: %s",
-                            forced_human,
-                        )
-                        return forced_human
                 warmup_candidates = non_human_continuation_candidates()
                 if warmup_candidates:
                     selected = warmup_candidates[0]
                     logger.info(
-                        "[TurnScheduler] 老师未明确点名真人，继续由非人类参与者铺垫: %s", selected
+                        "[TurnScheduler] 老师未明确点名真人，继续由非人类参与者铺垫: %s",
+                        selected,
                     )
                     return selected
 
             if latest_source == moderator.name and human_reinvite_due:
                 logger.info(
-                    "[TurnScheduler] 真人发言预算已到，但老师上一句未明确点名真人；保持显式点名原则"
+                    "[TurnScheduler] 真人发言预算偏低，但老师未明确点名真人，继续等待明确授权: %s/%s level=%s",
+                    human_turn_count,
+                    effective_preferred_human_turn_target,
+                    engagement_level,
                 )
                 non_human_candidates = non_human_continuation_candidates()
                 if non_human_candidates:
-                    selected = non_human_candidates[0]
-                    logger.info("[TurnScheduler] 未点名真人时继续非真人讨论: %s", selected)
-                    return selected
+                    return non_human_candidates[0]
 
         # ── 优先级4：人类发言冷却期 ──
         if since_human < human_cooldown:
@@ -648,11 +729,25 @@ def create_discussion_team(
                 n for n in all_names if n not in human_name_set and n != recent_speaker
             ]
             if non_human_candidates:
-                if moderator.name in non_human_candidates:
-                    return moderator.name
+                peer_candidates = [
+                    n for n in non_human_candidates if n != moderator.name
+                ]
+                if peer_candidates:
+                    selected = peer_candidates[0]
+                    logger.info("[TurnScheduler] 人类冷却中，优先继续非主持人: %s", selected)
+                    return selected
                 selected = non_human_candidates[0]
                 logger.info("[TurnScheduler] 人类冷却中，选择: %s", selected)
                 return selected
+
+        if human_name_set:
+            candidate = balancing_candidate()
+            if candidate and candidate not in human_name_set:
+                logger.info("[TurnScheduler] 无显式真人授权，保持真人锁定: %s", candidate)
+                return candidate
+            if moderator.name != last_source:
+                logger.info("[TurnScheduler] 无显式真人授权且无其他候选，回到老师")
+                return moderator.name
 
         # ── 优先级5：交给 LLM 选择 ──
         logger.info("[TurnScheduler] 交由 LLM 选择下一位发言者")

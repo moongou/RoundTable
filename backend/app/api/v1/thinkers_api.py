@@ -72,7 +72,7 @@ def _score_thinker(thinker: dict[str, Any], category: str, text_blob: str) -> fl
 async def recommend_thinkers(
     payload: dict[str, Any] = Body(default_factory=dict),
 ):
-    """根据话题给出 1-3 名最契合的思想家推荐。
+    """根据话题给出 1-10 名最契合的思想家推荐。
 
     请求体字段（全部可选）：
     - title:        话题标题
@@ -81,7 +81,7 @@ async def recommend_thinkers(
     - tags:         话题标签数组
     - guide_questions: 引导问题数组
     - exclude_ids:  已选思想家 ID 列表（不再重复推荐）
-    - limit:        返回数量上限，默认 3，最少 1
+    - limit:        返回数量上限，默认 10，最少 1
 
     返回：[{id, name, avatar, domain, domain_cn, score, reason}]
     """
@@ -92,10 +92,10 @@ async def recommend_thinkers(
     guide_questions = payload.get("guide_questions") or []
     exclude_ids = set(payload.get("exclude_ids") or [])
     try:
-        limit = int(payload.get("limit", 3) or 3)
+        limit = int(payload.get("limit", 10) or 10)
     except (TypeError, ValueError):
-        limit = 3
-    limit = max(1, min(limit, 5))
+        limit = 10
+    limit = max(1, min(limit, 10))
 
     text_blob = " ".join(
         [

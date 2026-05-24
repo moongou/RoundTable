@@ -5,7 +5,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from autogen_core.models import ChatCompletionClient
+
+logger = logging.getLogger(__name__)
+
+# 安全检查最长等待时间（秒）。超时后默认放行，避免卡住整个讨论流程。
+_SAFETY_CHECK_TIMEOUT_SEC = 8.0
 
 SAFETY_CHECK_PROMPT = """你是面向中国小学生讨论的内容安全检查员。
 
@@ -56,12 +64,21 @@ class SafetyFilter:
         try:
             from autogen_core.models import UserMessage
 
-            response = await self.model_client.create([UserMessage(content=prompt, source="user")])
+            response = await asyncio.wait_for(
+                self.model_client.create([UserMessage(content=prompt, source="user")]),
+                timeout=_SAFETY_CHECK_TIMEOUT_SEC,
+            )
             result = response.content.strip()
             if result.startswith("安全"):
                 return True, ""
             else:
                 return False, result
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[SafetyFilter] 安全检查超时（%.1fs），默认视为安全以避免阻断讨论",
+                _SAFETY_CHECK_TIMEOUT_SEC,
+            )
+            return True, ""
         except Exception:
             # 如果安全检查本身失败，默认放行（避免因检查服务故障阻断正常讨论）
             return True, ""

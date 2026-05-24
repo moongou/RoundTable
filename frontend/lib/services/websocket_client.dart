@@ -64,6 +64,7 @@ class DiscussionWebSocket {
   final StreamController<WsEvent> _eventController =
       StreamController<WsEvent>.broadcast();
   bool _connected = false;
+  int _interruptRequestSeq = 0;
 
   /// 事件流
   Stream<WsEvent> get events => _eventController.stream;
@@ -80,6 +81,7 @@ class DiscussionWebSocket {
     List<String> thinkerIds = const [],
     bool observerMode = false,
     int maxTurns = 24,
+    int? userId,
   }) async {
     final uri = Uri.parse('$wsUrl/api/v1/ws/discussion/$sessionId');
     _channel = WebSocketChannel.connect(uri);
@@ -87,14 +89,18 @@ class DiscussionWebSocket {
     _connected = true;
 
     // 发送初始配置
-    _channel!.sink.add(jsonEncode({
+    final config = <String, dynamic>{
       'topic_id': topicId,
       'character_ids': characterIds,
       'thinker_ids': thinkerIds,
       'human_names': humanNames,
       'max_turns': maxTurns,
       'observer_mode': observerMode,
-    }));
+    };
+    if (userId != null) {
+      config['user_id'] = userId;
+    }
+    _channel!.sink.add(jsonEncode(config));
 
     // 监听消息
     _channel!.stream.listen(
@@ -146,6 +152,19 @@ class DiscussionWebSocket {
     }));
   }
 
+  void sendEndDiscussion({
+    required String speaker,
+    String reason = 'button',
+  }) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'end_discussion',
+      'speaker': speaker,
+      'reason': reason,
+    }));
+  }
+
   /// 发送 Push-to-Talk 开始信号
   void sendPushToTalkStart({required String speaker}) {
     if (!_connected || _channel == null) return;
@@ -192,6 +211,27 @@ class DiscussionWebSocket {
     }));
   }
 
+  void sendClientMetric({
+    required String name,
+    required int valueMs,
+    String? speaker,
+    String? phase,
+    int? eventSeq,
+    String? detail,
+  }) {
+    if (!_connected || _channel == null) return;
+
+    _channel!.sink.add(jsonEncode({
+      'type': 'client_metric',
+      'name': name,
+      'value_ms': valueMs,
+      if (speaker != null && speaker.isNotEmpty) 'speaker': speaker,
+      if (phase != null && phase.isNotEmpty) 'phase': phase,
+      if (eventSeq != null) 'event_seq': eventSeq,
+      if (detail != null && detail.isNotEmpty) 'detail': detail,
+    }));
+  }
+
   /// 发送暂停信号
   void sendPause() {
     if (!_connected || _channel == null) return;
@@ -205,12 +245,17 @@ class DiscussionWebSocket {
   }
 
   /// 发送打断请求（举手）
-  void sendInterrupt({required String speaker}) {
+  void sendInterrupt({required String speaker, String? requestId}) {
     if (!_connected || _channel == null) return;
+
+    final resolvedRequestId = (requestId != null && requestId.isNotEmpty)
+        ? requestId
+        : 'int-${DateTime.now().microsecondsSinceEpoch}-${++_interruptRequestSeq}';
 
     _channel!.sink.add(jsonEncode({
       'type': 'interrupt',
       'speaker': speaker,
+      'request_id': resolvedRequestId,
     }));
   }
 

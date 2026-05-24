@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,98 @@ logger = logging.getLogger(__name__)
 THINKERS_DIR = Path(__file__).parent.parent / "thinkers"
 _thinkers_cache: dict[str, dict] | None = None
 _thinkers_by_domain: dict[str, list[dict]] | None = None
+
+
+def _clean_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _normalize_questions(raw_questions: object) -> list[str]:
+    if not isinstance(raw_questions, list):
+        return []
+    questions: list[str] = []
+    for item in raw_questions:
+        question = _clean_text(item)
+        if question:
+            questions.append(question)
+    return questions
+
+
+def _join_focus_points(questions: list[str]) -> str:
+    if not questions:
+        return "如何把抽象的道理放回真实生活里慢慢想清楚"
+    focus_points = [
+        _clean_text(question).rstrip("？?。！!")
+        for question in questions[:3]
+        if _clean_text(question)
+    ]
+    if not focus_points:
+        return "如何把抽象的道理放回真实生活里慢慢想清楚"
+    if len(focus_points) == 1:
+        return focus_points[0]
+    if len(focus_points) == 2:
+        return f"{focus_points[0]}，以及{focus_points[1]}"
+    return f"{focus_points[0]}、{focus_points[1]}，以及{focus_points[2]}"
+
+
+def _extract_core_idea(thinker: dict, *, fallback_domain_cn: str) -> str:
+    system_message = _clean_text(thinker.get("system_message"))
+    if "你的核心思想：" in system_message:
+        system_message = system_message.split("你的核心思想：", 1)[1].strip()
+    system_message = re.sub(r"^You are\s+", "", system_message, flags=re.IGNORECASE)
+    system_message = re.sub(r"^You\s+", "", system_message, flags=re.IGNORECASE)
+    system_message = re.sub(r"^[A-Za-z][A-Za-z0-9\s,'./:;()\-–—]{0,120}$", "", system_message)
+    system_message = _clean_text(system_message)
+    if system_message:
+        if len(system_message) > 88:
+            system_message = system_message[:88].rstrip(" ,;:，；：") + "…"
+        return system_message
+    return f"把{fallback_domain_cn}中的关键问题讲清楚，并把思考重新带回具体生活处境。"
+
+
+def _build_core_summary(thinker: dict, *, fallback_domain_cn: str) -> str:
+    name = _clean_text(thinker.get("name") or thinker.get("display_name") or "这位思想家")
+    focus = _join_focus_points(_normalize_questions(thinker.get("suggested_questions")))
+    core_idea = _extract_core_idea(thinker, fallback_domain_cn=fallback_domain_cn)
+    return (
+        f"{name}常从“{focus}”这些问题切入，强调{fallback_domain_cn}不是死记结论，"
+        f"而是要在真实处境里学会观察、判断、提问与行动。其讨论风格更看重{core_idea}"
+    )
+
+
+def _build_biography(thinker: dict, *, fallback_domain_cn: str) -> str:
+    name = _clean_text(thinker.get("name") or thinker.get("display_name") or "这位思想家")
+    era = _clean_text(thinker.get("era") or "不同时代")
+    description = _clean_text(thinker.get("description"))
+    focus = _join_focus_points(_normalize_questions(thinker.get("suggested_questions")))
+    core_summary = _build_core_summary(thinker, fallback_domain_cn=fallback_domain_cn)
+    intro = (
+        f"{name}通常被放在{era}的{fallback_domain_cn}脉络中来理解。"
+        f"{description or f'在后人眼中，{name}是一位极具代表性的{fallback_domain_cn}思想人物。'}"
+    )
+    impact = (
+        f"如果用今天的眼光回看，{name}最可贵的地方，不只是提出了某几个结论，"
+        f"而是不断提醒人们：面对复杂问题时，要先看清背景、人的处境与行动后果，"
+        f"再决定自己赞成什么、反对什么。"
+    )
+    reflection = (
+        f"{name}尤其会把注意力放在“{focus}”这一类问题上，"
+        f"因为这些问题往往没有唯一标准答案，却最能检验一个人的判断力、同理心与实践能力。"
+    )
+    roundtable = (
+        f"放到圆桌讨论里，{name}带来的价值，是把抽象观念翻译成孩子也能抓住的思考路径："
+        f"{core_summary}。因此，TA不是替大家直接下结论，而是帮助同学们把问题想深一层、想慢一点、想完整一些。"
+    )
+    biography = _clean_text(f"{intro}{impact}{reflection}{roundtable}")
+    if len(biography) < 300:
+        biography = _clean_text(
+            biography
+            + f" 当大家讨论学习、规则、选择、关系或社会现象时，{name}提供的往往不是现成口号，"
+            f"而是一种更有层次的观察方法：先分辨问题，再比较立场，最后把观点落实到现实生活。"
+        )
+    if len(biography) > 600:
+        biography = biography[:600].rstrip("，；：,.!?！？ ") + "。"
+    return biography
 
 
 def load_all_thinkers() -> dict[str, dict]:
@@ -51,6 +144,14 @@ def load_all_thinkers() -> dict[str, dict]:
                     # Inject domain_cn from file header
                     if "domain_cn" not in thinker or not thinker["domain_cn"]:
                         thinker["domain_cn"] = file_domain_cn
+                    thinker["core_summary"] = _build_core_summary(
+                        thinker,
+                        fallback_domain_cn=file_domain_cn,
+                    )
+                    thinker["biography"] = _build_biography(
+                        thinker,
+                        fallback_domain_cn=file_domain_cn,
+                    )
                     _thinkers_cache[tid] = thinker
         except Exception as e:
             logger.error(f"加载思想家文件失败 {yaml_file}: {e}")
@@ -122,7 +223,13 @@ def search_thinkers(query: str, limit: int = 20) -> list[dict]:
         name = t.get("name", "").lower()
         display_name = t.get("display_name", "").lower()
         era = t.get("era", "").lower()
-        domains = [d.lower() for d in t.get("domain", [])]
+        raw_domain = t.get("domain", [])
+        if isinstance(raw_domain, list):
+            domains = [str(d).lower() for d in raw_domain]
+        elif raw_domain:
+            domains = [str(raw_domain).lower()]
+        else:
+            domains = []
 
         if (query_lower in name or
             query_lower in display_name or

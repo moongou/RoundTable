@@ -1,0 +1,19 @@
+# Build outputs
+**/build/
+**/.preview/
+
+# IDE
+.idea/
+*.iml
+
+# Dependencies
+oh_modules/
+node_modules/
+
+# Local configuration
+local.properties
+
+# Signing keys
+signature/*.p12
+signature/*.p7b
+signature/*.cer

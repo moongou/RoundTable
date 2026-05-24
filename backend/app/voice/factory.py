@@ -75,6 +75,16 @@ def create_tts_provider(provider_id: str | None = None) -> TTSProvider:
         return _cloud_tts_provider(pid)
     elif pid == "siliconflow_tts":
         return _cloud_tts_provider(pid)
+    elif pid == "volcengine_tts":
+        from app.voice.volcengine_tts import VolcengineTTSProvider
+
+        return VolcengineTTSProvider(
+            base_url=settings.get_voice_service_url("volcengine_tts"),
+            access_key=settings.volcengine_tts_access_key,
+            secret_key=settings.volcengine_tts_secret_key,
+            model=settings.get_voice_service_model("volcengine_tts"),
+            default_voice=settings.get_tts_voice_for_provider("volcengine_tts"),
+        )
     elif pid in ("vibevoice", "fireredtts", "openvoice"):
         return _local_http_tts_provider(pid)
     elif pid == "browser":
@@ -108,6 +118,16 @@ def create_tts_provider_with_url(provider_id: str, base_url: str = "") -> TTSPro
         return _cloud_tts_provider(provider_id, base_url=url)
     elif provider_id == "siliconflow_tts":
         return _cloud_tts_provider(provider_id, base_url=url)
+    elif provider_id == "volcengine_tts":
+        from app.voice.volcengine_tts import VolcengineTTSProvider
+
+        return VolcengineTTSProvider(
+            base_url=url or settings.get_voice_service_url("volcengine_tts"),
+            access_key=settings.volcengine_tts_access_key,
+            secret_key=settings.volcengine_tts_secret_key,
+            model=settings.get_voice_service_model("volcengine_tts"),
+            default_voice=settings.get_tts_voice_for_provider("volcengine_tts"),
+        )
     elif provider_id in ("vibevoice", "fireredtts", "openvoice"):
         return _local_http_tts_provider(provider_id, base_url=url)
     else:
@@ -150,6 +170,15 @@ def create_asr_provider(provider_id: str | None = None) -> ASRProvider:
             base_url=settings.groq_whisper_base_url,
             api_key=settings.groq_whisper_api_key,
             model=settings.groq_whisper_model,
+        )
+    elif pid == "volcengine_asr":
+        from app.voice.volcengine_asr import VolcengineASRProvider
+
+        return VolcengineASRProvider(
+            base_url=settings.get_voice_service_url("volcengine_asr"),
+            access_key=settings.volcengine_asr_access_key,
+            secret_key=settings.volcengine_asr_secret_key,
+            model=settings.get_voice_service_model("volcengine_asr"),
         )
     elif pid == "capswriter":
         return StandaloneWsAsrProvider(

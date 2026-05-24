@@ -15,10 +15,11 @@ from urllib.parse import urlparse
 
 import httpx
 import websockets
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from websockets.exceptions import InvalidStatus
 
 from app.api.v1.admin_guard import require_management_token
+from app.api.v1.auth_api import get_current_user, get_optional_user
 from app.config import (
     ASR_PROVIDERS,
     LOCAL_SERVICE_DEFAULTS,
@@ -41,8 +42,10 @@ _CLOUD_VOICE_SERVICE_IDS = {
     "openai_whisper",
     "siliconflow_asr",
     "groq_whisper",
+    "volcengine_asr",
     "openai_tts",
     "siliconflow_tts",
+    "volcengine_tts",
 }
 
 _CONFIG_PROFILE_FIELD_NAMES = {
@@ -74,11 +77,18 @@ _CONFIG_PROFILE_FIELD_NAMES = {
     "openai_tts_api_key",
     "openai_tts_base_url",
     "openai_tts_model",
-    "openai_tts_voice",
     "siliconflow_tts_api_key",
     "siliconflow_tts_base_url",
     "siliconflow_tts_model",
-    "siliconflow_tts_voice",
+    "volcengine_asr_access_key",
+    "volcengine_asr_secret_key",
+    "volcengine_asr_base_url",
+    "volcengine_asr_model",
+    "volcengine_tts_access_key",
+    "volcengine_tts_secret_key",
+    "volcengine_tts_base_url",
+    "volcengine_tts_model",
+    "volcengine_tts_voice",
     "tts_voice",
     "cosyvoice_voice",
     "tavily_api_key",
@@ -565,7 +575,7 @@ async def list_providers():
 
         # 自定义提供商：使用用户指定的显示名（若设置过）
         display_name = PROVIDER_NAMES.get(pid, pid)
-        if pid in ("custom1", "custom2"):
+        if pid == "custom1":
             custom_name = (getattr(settings, f"{pid}_display_name", "") or "").strip()
             if custom_name:
                 display_name = custom_name
@@ -579,7 +589,7 @@ async def list_providers():
             "is_active": pid == active_provider,
             "needs_api_key": pid not in ("ollama",),
         }
-        if pid in ("custom1", "custom2"):
+        if pid == "custom1":
             provider_info["is_custom"] = True
             provider_info["display_name"] = display_name
             provider_info["hint"] = (
@@ -1004,7 +1014,7 @@ async def delete_config_profile(
 @router.post("/test-provider")
 async def test_provider(
     body: dict,
-    _auth: None = Depends(require_management_token),
+    _current_user: dict | None = Depends(get_optional_user),
 ):
     """测试 LLM 提供商连接，并尝试获取可用模型列表。
 
@@ -1177,7 +1187,7 @@ async def test_provider(
 @router.post("/test-voice-service")
 async def test_voice_service(
     body: dict,
-    _auth: None = Depends(require_management_token),
+    _current_user: dict | None = Depends(get_optional_user),
 ):
     """测试语音服务连接，尝试获取可用音色/模型列表。
 

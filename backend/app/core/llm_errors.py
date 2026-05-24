@@ -155,6 +155,40 @@ def describe_model_error(exc: BaseException | str) -> ModelErrorInfo:
             recoverable=False,
         )
 
+    if isinstance(
+        exc,
+        (
+            AttributeError,
+            TypeError,
+            NameError,
+            KeyError,
+            IndexError,
+            AssertionError,
+            UnboundLocalError,
+            SyntaxError,
+        ),
+    ) or any(
+        marker in lower
+        for marker in (
+            "object has no attribute",
+            "attributeerror",
+            "typeerror",
+            "nameerror",
+            "keyerror",
+            "indexerror",
+            "assertionerror",
+            "unboundlocalerror",
+            "syntaxerror",
+        )
+    ):
+        return ModelErrorInfo(
+            message="讨论运行时出现内部异常，当前请求没有正确完成。请稍后重试；如果持续出现，请检查最近的代码变更。",
+            technical_detail=detail,
+            kind="internal_runtime_error",
+            recoverable=True,
+            is_model_error=False,
+        )
+
     if any(
         marker in lower
         for marker in (

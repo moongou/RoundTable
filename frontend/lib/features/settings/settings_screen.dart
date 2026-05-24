@@ -39,6 +39,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   final Map<String, TextEditingController> _apiKeyCtrl = {};
   final Map<String, TextEditingController> _baseUrlCtrl = {};
   final Map<String, TextEditingController> _modelCtrl = {};
+  final Map<String, String?> _selectedProviderModel = {};
   final Map<String, ProviderTestResult?> _providerTestResult = {};
   final Map<String, bool> _testingProvider = {};
   final Map<String, bool> _savingProvider = {};
@@ -46,19 +47,18 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   final Map<String, TextEditingController> _voiceUrlCtrl = {};
   final Map<String, TextEditingController> _voiceKeyCtrl = {};
   final Map<String, TextEditingController> _voiceModelCtrl = {};
+  final Map<String, String?> _selectedVoiceModel = {};
   final Map<String, String?> _selectedVoice = {};
   final Map<String, VoiceServiceTestResult?> _voiceTestResult = {};
   final Map<String, bool> _testingVoice = {};
   final Map<String, bool> _savingVoice = {};
 
-  // Web search (Tavily) state
   final TextEditingController _tavilyKeyCtrl = TextEditingController();
   bool _testingTavily = false;
   Map<String, dynamic>? _tavilyTestResult;
 
   bool _healthRefreshing = false;
 
-  // Benchmark state
   bool _benchmarkingAsr = false;
   bool _benchmarkingTts = false;
   bool _benchmarkingLlm = false;
@@ -66,7 +66,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   Map<String, dynamic>? _ttsBenchmark;
   Map<String, dynamic>? _llmBenchmark;
 
-  // ScrollController 保持页面位置不跳动
   final _aiScrollCtrl = ScrollController();
   final _asrScrollCtrl = ScrollController();
   final _ttsScrollCtrl = ScrollController();
@@ -80,13 +79,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   bool _savingConfigProfile = false;
   String? _profileBusyId;
 
-  // Voice service test state
   bool _testingVoiceService = false;
   Map<String, dynamic>? _voiceServiceTestResult;
   bool _runningDeepVoiceTest = false;
   Map<String, dynamic>? _deepVoiceTestResult;
 
-  // Interactive ASR/TTS diagnostics
   AsrService? _interactiveAsrService;
   StreamSubscription<AsrResult>? _interactiveAsrSub;
   TtsService? _interactiveTtsService;
@@ -132,7 +129,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       ..._baseUrlCtrl.values,
       ..._modelCtrl.values,
       ..._voiceUrlCtrl.values,
-      ..._voiceKeyCtrl.values
+      ..._voiceKeyCtrl.values,
+      ..._voiceModelCtrl.values,
     ]) {
       c.dispose();
     }
@@ -144,13 +142,44 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   TextEditingController _bu(ProviderInfo p) => _baseUrlCtrl.putIfAbsent(
       p.id, () => TextEditingController(text: p.baseUrl));
   TextEditingController _mc(ProviderInfo p) =>
-      _modelCtrl.putIfAbsent(p.id, () => TextEditingController(text: p.model));
+      _modelCtrl.putIfAbsent(p.id, () => TextEditingController());
   TextEditingController _vu(SpeechProviderInfo p) =>
       _voiceUrlCtrl.putIfAbsent(p.id, () => TextEditingController(text: p.url));
   TextEditingController _vk(SpeechProviderInfo p) =>
       _voiceKeyCtrl.putIfAbsent(p.id, () => TextEditingController());
-  TextEditingController _vm(SpeechProviderInfo p) => _voiceModelCtrl
-      .putIfAbsent(p.id, () => TextEditingController(text: p.model));
+  TextEditingController _vm(SpeechProviderInfo p) =>
+      _voiceModelCtrl.putIfAbsent(p.id, () => TextEditingController());
+
+  String _pickValidatedModel(
+    List<String> models,
+    Iterable<String?> candidates,
+  ) {
+    for (final candidate in candidates) {
+      final normalized = candidate?.trim() ?? '';
+      if (normalized.isNotEmpty && models.contains(normalized)) {
+        return normalized;
+      }
+    }
+    return models.first;
+  }
+
+  String _effectiveProviderModel(ProviderInfo p) {
+    final manual = _modelCtrl[p.id]?.text.trim() ?? '';
+    if (manual.isNotEmpty) return manual;
+    final selected = _selectedProviderModel[p.id]?.trim() ?? '';
+    if (selected.isNotEmpty) return selected;
+    return p.model.trim();
+  }
+
+  String _effectiveVoiceModel(SpeechProviderInfo p) {
+    final manual = _voiceModelCtrl[p.id]?.text.trim() ?? '';
+    if (manual.isNotEmpty) return manual;
+    final selected = _selectedVoiceModel[p.id]?.trim() ?? '';
+    if (selected.isNotEmpty) return selected;
+    final current = p.model.trim();
+    if (current.isNotEmpty) return current;
+    return p.defaultModel.trim();
+  }
 
   String _resolvedServerUrl(LocalSettings? settings) {
     final resolved = settings?.serverUrl.trim() ?? '';
@@ -166,15 +195,21 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             providerId: p.id,
             apiKey: _apiKeyCtrl[p.id]?.text.trim(),
             baseUrl: _baseUrlCtrl[p.id]?.text.trim(),
-            model: _modelCtrl[p.id]?.text.trim(),
+            model: _effectiveProviderModel(p),
           );
-      setState(() => _providerTestResult[p.id] = result);
-      if (result.success && result.models.isNotEmpty) {
-        final cur = _modelCtrl[p.id]?.text ?? p.model;
-        if (!result.models.contains(cur)) {
-          _mc(p).text = result.models.first;
+      setState(() {
+        _providerTestResult[p.id] = result;
+        if (result.success && result.models.isNotEmpty) {
+          _selectedProviderModel[p.id] = _pickValidatedModel(
+            result.models,
+            [
+              _selectedProviderModel[p.id],
+              _modelCtrl[p.id]?.text,
+              p.model,
+            ],
+          );
         }
-      }
+      });
     } catch (e) {
       setState(() => _providerTestResult[p.id] =
           ProviderTestResult(success: false, models: [], error: e.toString()));
@@ -189,7 +224,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       final updates = <String, dynamic>{};
       final key = _apiKeyCtrl[p.id]?.text.trim() ?? '';
       final url = _baseUrlCtrl[p.id]?.text.trim() ?? '';
-      final mdl = _modelCtrl[p.id]?.text.trim() ?? '';
+      final manualModel = _modelCtrl[p.id]?.text.trim() ?? '';
+      final selectedModel = _selectedProviderModel[p.id]?.trim() ?? '';
+      final mdl = manualModel.isNotEmpty
+          ? manualModel
+          : (selectedModel.isNotEmpty ? selectedModel : p.model.trim());
       final tested = _providerTestResult[p.id];
       final reusingSavedConfig = key.isEmpty &&
           url == p.baseUrl &&
@@ -199,12 +238,18 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           (!p.needsApiKey || p.hasApiKey);
 
       if (!reusingSavedConfig) {
-        if (tested == null || !tested.success || tested.models.isEmpty) {
-          _snackErr('请先点击“测试连接”，并确保返回可用模型后再保存。');
+        if (tested == null || !tested.success) {
+          _snackErr('请先点击“测试连接”，确认连接成功后再保存。');
           return;
         }
-        if (mdl.isEmpty || !tested.models.contains(mdl)) {
-          _snackErr('当前模型不可用，请从下拉中选择已验证模型。');
+        if (mdl.isEmpty) {
+          _snackErr('请输入模型名称，或从下拉中选择一个已验证模型。');
+          return;
+        }
+        if (manualModel.isEmpty &&
+            tested.models.isNotEmpty &&
+            !tested.models.contains(mdl)) {
+          _snackErr('当前模型不可用，请手动输入模型名称，或从下拉中选择已验证模型。');
           return;
         }
       }
@@ -258,15 +303,21 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             service: p.id,
             url: url,
             apiKey: apiKey,
-            model: _voiceModelCtrl[p.id]?.text.trim(),
+            model: _effectiveVoiceModel(p),
             voice: _selectedVoice[p.id],
           );
       setState(() {
         _voiceTestResult[p.id] = result;
-        if (result.success &&
-            result.models.isNotEmpty &&
-            !result.models.contains(_voiceModelCtrl[p.id]?.text.trim())) {
-          _vm(p).text = result.models.first;
+        if (result.success && result.models.isNotEmpty) {
+          _selectedVoiceModel[p.id] = _pickValidatedModel(
+            result.models,
+            [
+              _selectedVoiceModel[p.id],
+              _voiceModelCtrl[p.id]?.text,
+              p.model,
+              p.defaultModel,
+            ],
+          );
         }
         if (result.success &&
             result.voices.isNotEmpty &&
@@ -296,18 +347,36 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
 
     try {
       final tested = _voiceTestResult[p.id];
+      final manualModel = _voiceModelCtrl[p.id]?.text.trim() ?? '';
+      final effectiveModel = _effectiveVoiceModel(p);
       if (p.isCloud && (tested == null || !tested.success)) {
         _snackErr('请先测试连接成功，再应用云端语音配置。');
         return;
       }
-      if (p.isCloud && tested != null && !tested.modelValid) {
-        _snackErr('当前模型不可用，请先测试并选择可用模型。');
+      if (p.isCloud && effectiveModel.isEmpty) {
+        _snackErr('请输入模型名称，或从下拉中选择一个可用模型。');
+        return;
+      }
+      if (p.isCloud &&
+          manualModel.isEmpty &&
+          tested != null &&
+          tested.models.isNotEmpty &&
+          !tested.models.contains(effectiveModel)) {
+        _snackErr('当前模型不可用，请手动输入模型名称，或从下拉中选择可用模型。');
+        return;
+      }
+      if (p.isCloud &&
+          manualModel.isNotEmpty &&
+          tested != null &&
+          !tested.modelValid) {
+        _snackErr('当前模型不可用，请检查手动输入的模型名。');
         return;
       }
 
       final updates = _buildVoiceRuntimeUpdates(
         providerId: p.id,
         isAsr: isAsr,
+        model: effectiveModel,
         voice: voice,
       );
 
@@ -348,7 +417,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       }
       setState(() => _expandedVoiceService = p.isCloud ? p.id : null);
       ref.invalidate(currentConfigProvider);
-      _snack('已切换到 ${p.name}');
+      final isLocalOffline = !p.isCloud && p.id != 'disabled' && !p.available;
+      if (isLocalOffline) {
+        _snack('已切换到 ${p.name}。本地服务当前离线，配置已保存，待服务启动后自动生效。');
+      } else {
+        _snack('已切换到 ${p.name}');
+      }
     } catch (e) {
       _snackErr('切换失败: $e');
     }
@@ -2355,12 +2429,13 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   Map<String, dynamic> _buildVoiceRuntimeUpdates({
     required String providerId,
     required bool isAsr,
+    String? model,
     String? voice,
   }) {
     final updates = <String, dynamic>{};
     final url = _voiceUrlCtrl[providerId]?.text.trim() ?? '';
     final key = _voiceKeyCtrl[providerId]?.text.trim() ?? '';
-    final model = _voiceModelCtrl[providerId]?.text.trim() ?? '';
+    final resolvedModel = model?.trim() ?? '';
 
     const urlMap = {
       'chattts': 'chattts_url',
@@ -2397,7 +2472,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       'openvoice': 'tts_voice',
       'cosyvoice': 'cosyvoice_voice',
       'openai_tts': 'openai_tts_voice',
-      'siliconflow_tts': 'siliconflow_tts_voice',
     };
 
     if (url.isNotEmpty && urlMap.containsKey(providerId)) {
@@ -2406,8 +2480,8 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     if (key.isNotEmpty && keyMap.containsKey(providerId)) {
       updates[keyMap[providerId]!] = key;
     }
-    if (model.isNotEmpty && modelMap.containsKey(providerId)) {
-      updates[modelMap[providerId]!] = model;
+    if (resolvedModel.isNotEmpty && modelMap.containsKey(providerId)) {
+      updates[modelMap[providerId]!] = resolvedModel;
     }
     if (voice != null && voice.isNotEmpty && voiceMap.containsKey(providerId)) {
       updates[voiceMap[providerId]!] = voice;
@@ -3420,9 +3494,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       ProviderInfo p, ProviderTestResult? result, bool testing, bool saving) {
     final active =
         p.id == ref.read(localSettingsProvider).valueOrNull?.llmProvider;
-    final currentModel = _modelCtrl[p.id]?.text.isNotEmpty == true
-        ? _modelCtrl[p.id]!.text
-        : p.model;
+    final currentModel = _effectiveProviderModel(p);
 
     return AnimatedContainer(
       key: ValueKey('llm-provider-panel-${p.id}'),
@@ -3531,9 +3603,18 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         _Field(ctrl: _bu(p), hint: p.baseUrl),
         const SizedBox(height: 8),
         const _Label('模型'),
-        result != null && result.success && result.models.isNotEmpty
-            ? _DropField(items: result.models, ctrl: _mc(p))
-            : _Field(ctrl: _mc(p), hint: p.model),
+        _ModelPreferenceField(
+          inputKey: ValueKey('llm-model-input-${p.id}'),
+          dropdownKey: ValueKey('llm-model-select-${p.id}'),
+          manualCtrl: _mc(p),
+          manualHint: currentModel.isNotEmpty ? currentModel : '手动输入模型名称',
+          items: result != null && result.success
+              ? result.models
+              : const <String>[],
+          selectedValue: _selectedProviderModel[p.id],
+          onSelected: (value) =>
+              setState(() => _selectedProviderModel[p.id] = value),
+        ),
         const SizedBox(height: 10),
         _ProviderActionBar(
           testing: testing,
@@ -3591,9 +3672,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       {required bool isAsr}) {
     final active = p.id == activeId;
     final hasRequiredApiKey = !p.needsApiKey || p.hasApiKey;
+    final isLocalProvider = !p.isCloud && p.id != 'disabled';
     final isOperational =
         p.id != 'disabled' && p.available && hasRequiredApiKey;
-    final selectable = p.id == 'disabled' || isOperational || active;
+    final selectable =
+        p.id == 'disabled' || isOperational || active || isLocalProvider;
     final availColor =
         isOperational ? const Color(0xFF4CAF50) : AppColors.warmWhite;
     final availTip = p.id == 'disabled'
@@ -3602,7 +3685,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             ? '缺少 API Key，当前不可用'
             : isOperational
                 ? '功能正常'
-                : '服务不可用或未启动';
+                : isLocalProvider
+                    ? '服务当前离线，允许先选中并保存，服务启动后即可生效'
+                    : '服务不可用或未启动';
     String subtitleText() {
       if (p.id == 'disabled') {
         return '纯文本模式，不再调用语音能力。';
@@ -3711,9 +3796,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     required bool active,
     required VoidCallback onTap,
   }) {
-    final model = _voiceModelCtrl[p.id]?.text.isNotEmpty == true
-        ? _voiceModelCtrl[p.id]!.text
-        : (p.model.isNotEmpty ? p.model : p.defaultModel);
+    final model = _effectiveVoiceModel(p);
     final statusColor = !p.needsApiKey
         ? Colors.lightBlue
         : p.hasApiKey
@@ -3833,9 +3916,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     required String activeId,
   }) {
     final active = p.id == activeId;
-    final currentModel = _voiceModelCtrl[p.id]?.text.isNotEmpty == true
-        ? _voiceModelCtrl[p.id]!.text
-        : (p.model.isNotEmpty ? p.model : p.defaultModel);
+    final currentModel = _effectiveVoiceModel(p);
     final currentVoice =
         _selectedVoice[p.id] ?? (p.voice.isNotEmpty ? p.voice : p.defaultVoice);
     if (_selectedVoice[p.id] == null && currentVoice.isNotEmpty) {
@@ -3943,9 +4024,18 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           _Field(ctrl: _vu(p), hint: p.url.isNotEmpty ? p.url : p.defaultUrl),
           const SizedBox(height: 8),
           const _Label('模型'),
-          result != null && result.success && result.models.isNotEmpty
-              ? _DropField(items: result.models, ctrl: _vm(p))
-              : _Field(ctrl: _vm(p), hint: currentModel),
+          _ModelPreferenceField(
+            inputKey: ValueKey('speech-model-input-${p.id}'),
+            dropdownKey: ValueKey('speech-model-select-${p.id}'),
+            manualCtrl: _vm(p),
+            manualHint: currentModel.isNotEmpty ? currentModel : '手动输入模型名称',
+            items: result != null && result.success
+                ? result.models
+                : const <String>[],
+            selectedValue: _selectedVoiceModel[p.id],
+            onSelected: (value) =>
+                setState(() => _selectedVoiceModel[p.id] = value),
+          ),
           if (!isAsr) ...[
             const SizedBox(height: 8),
             const _Label('音色'),
@@ -4125,14 +4215,17 @@ class _Field extends StatelessWidget {
   final String hint;
   final bool obscure;
   final bool readOnly;
+  final Key? fieldKey;
   const _Field(
       {required this.ctrl,
       required this.hint,
+      this.fieldKey,
       this.obscure = false,
       this.readOnly = false});
 
   @override
   Widget build(BuildContext context) => TextField(
+        key: fieldKey,
         controller: ctrl,
         style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
         obscureText: obscure,
@@ -4384,59 +4477,89 @@ class _SpeechKeyBadge extends StatelessWidget {
   }
 }
 
-class _DropField extends StatefulWidget {
+class _ModelPreferenceField extends StatelessWidget {
+  final Key inputKey;
+  final Key dropdownKey;
+  final TextEditingController manualCtrl;
+  final String manualHint;
   final List<String> items;
-  final TextEditingController ctrl;
-  const _DropField({required this.items, required this.ctrl});
-  @override
-  State<_DropField> createState() => _DropFieldState();
-}
+  final String? selectedValue;
+  final ValueChanged<String?> onSelected;
 
-class _DropFieldState extends State<_DropField> {
-  late String? _val;
-  @override
-  void initState() {
-    super.initState();
-    _val = widget.items.contains(widget.ctrl.text)
-        ? widget.ctrl.text
-        : widget.items.first;
-    widget.ctrl.text = _val!;
-  }
+  const _ModelPreferenceField({
+    required this.inputKey,
+    required this.dropdownKey,
+    required this.manualCtrl,
+    required this.manualHint,
+    required this.items,
+    required this.selectedValue,
+    required this.onSelected,
+  });
 
   @override
-  Widget build(BuildContext context) => DropdownButtonFormField<String>(
-        initialValue: _val,
-        dropdownColor: AppColors.studyWallLight,
-        style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
-        icon: const Icon(Icons.arrow_drop_down,
-            color: AppColors.amberGold, size: 18),
-        decoration: InputDecoration(
-          border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(9),
-              borderSide:
-                  BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
-          enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(9),
-              borderSide:
-                  BorderSide(color: AppColors.warmGray.withValues(alpha: 0.3))),
-          focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(9),
-              borderSide: const BorderSide(color: AppColors.amberGold)),
-          filled: true,
-          fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          isDense: true,
+  Widget build(BuildContext context) {
+    final dropdownValue = items.contains(selectedValue)
+        ? selectedValue
+        : (items.isNotEmpty ? items.first : null);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _Field(
+          fieldKey: inputKey,
+          ctrl: manualCtrl,
+          hint: manualHint,
         ),
-        items: widget.items
-            .map((m) => DropdownMenuItem(
-                value: m, child: Text(m, style: const TextStyle(fontSize: 12))))
-            .toList(),
-        onChanged: (v) {
-          setState(() => _val = v);
-          if (v != null) widget.ctrl.text = v;
-        },
-      );
+        if (items.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          const Text(
+            '手动输入优先；若留空，则以下方已验证模型为准。',
+            style: TextStyle(
+              color: AppColors.warmGray,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            key: dropdownKey,
+            initialValue: dropdownValue,
+            dropdownColor: AppColors.studyWallLight,
+            style: const TextStyle(color: AppColors.warmWhite, fontSize: 13),
+            icon: const Icon(Icons.arrow_drop_down,
+                color: AppColors.amberGold, size: 18),
+            decoration: InputDecoration(
+              hintText: '从已验证模型中选择',
+              hintStyle:
+                  const TextStyle(color: AppColors.warmGray, fontSize: 12),
+              border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(9),
+                  borderSide: BorderSide(
+                      color: AppColors.warmGray.withValues(alpha: 0.3))),
+              enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(9),
+                  borderSide: BorderSide(
+                      color: AppColors.warmGray.withValues(alpha: 0.3))),
+              focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(9),
+                  borderSide: const BorderSide(color: AppColors.amberGold)),
+              filled: true,
+              fillColor: AppColors.studyWallLight.withValues(alpha: 0.5),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              isDense: true,
+            ),
+            items: items
+                .map((model) => DropdownMenuItem(
+                      value: model,
+                      child: Text(model, style: const TextStyle(fontSize: 12)),
+                    ))
+                .toList(),
+            onChanged: onSelected,
+          ),
+        ],
+      ],
+    );
+  }
 }
 
 class _VoiceDrop extends StatelessWidget {

@@ -12,6 +12,23 @@ void main() {
     );
   });
 
+  test(
+      'ready prompt in auto mode keeps mic on standby instead of auto-starting',
+      () {
+    expect(
+      ImmersiveSessionScreen.humanTurnReadyPrompt(
+        humanName: '豆苗',
+        hotkeyLabel: 'Alt',
+        autoOpenMic: true,
+        isPushToTalk: false,
+      ),
+      allOf(
+        contains('麦克风已经准备好'),
+        isNot(contains('自动开启')),
+      ),
+    );
+  });
+
   test('session voice defaults stay on funasr and edge_tts during boot', () {
     expect(
       ImmersiveSessionScreen.defaultAsrProvider,
@@ -117,7 +134,8 @@ void main() {
     );
   });
 
-  test('pending human turn waits for any queued or active playback', () {
+  test('pending human turn waits only for active or current-speaker playback',
+      () {
     expect(
       ImmersiveSessionScreen.shouldBlockPendingHumanTurn(
         ttsPlaying: false,
@@ -155,7 +173,7 @@ void main() {
         hasQueuedCurrentSpeakerSpeech: false,
         hasQueuedSpeech: true,
       ),
-      isTrue,
+      isFalse,
     );
   });
 
@@ -251,6 +269,35 @@ void main() {
     );
   });
 
+  test('human review auto read only runs once per same review', () {
+    expect(
+      ImmersiveSessionScreen.shouldAutoReadHumanReview(
+        review: '你刚才那个比喻很有意思。',
+        lastAutoReadReview: '',
+        isMuted: false,
+      ),
+      isTrue,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldAutoReadHumanReview(
+        review: '你刚才那个比喻很有意思。',
+        lastAutoReadReview: '你刚才那个比喻很有意思。',
+        isMuted: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldAutoReadHumanReview(
+        review: '你刚才那个比喻很有意思。',
+        lastAutoReadReview: '',
+        isMuted: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('concurrent human turn signals merge into one user turn', () {
     expect(
       ImmersiveSessionScreen.shouldMergeConcurrentHumanTurnSignals(
@@ -324,6 +371,41 @@ void main() {
         pendingHumanTurn: false,
         handApprovedToSpeak: false,
         hasRaisedHand: false,
+      ),
+      isFalse,
+    );
+
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+        completedSpeaker: '豆苗',
+      ),
+      isTrue,
+    );
+  });
+
+  test('raise hand stays dim during one-turn cooldown after user finished', () {
+    // 规则3：用户发言结束后再过一个非人类轮次后举手按钮才可重新启用。
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+        raiseHandCooldownTurns: 1,
+      ),
+      isTrue,
+    );
+    expect(
+      ImmersiveSessionScreen.shouldSuppressRaiseHandRequest(
+        isMyTurn: false,
+        pendingHumanTurn: false,
+        handApprovedToSpeak: false,
+        hasRaisedHand: false,
+        raiseHandCooldownTurns: 0,
       ),
       isFalse,
     );
@@ -748,6 +830,34 @@ void main() {
         fallbackText: '补一句。再补一句',
       ),
       ['补一句。', '再补一句'],
+    );
+  });
+
+  test('message tts tail is derived from prior streamed segments', () {
+    expect(
+      ImmersiveSessionScreen.deriveRemainingTtsTextAfterStream(
+        messageText: '同学们好！我是李老师。今天我们来讨论语言学习。',
+        streamedSegments: ['同学们好！', '我是李老师。'],
+      ),
+      '今天我们来讨论语言学习。',
+    );
+
+    expect(
+      ImmersiveSessionScreen.deriveRemainingTtsTextAfterStream(
+        messageText: '同学们好！我是李老师。',
+        streamedSegments: ['同学们好！', '我是李老师。'],
+        fallbackTtsText: '同学们好！我是李老师。',
+      ),
+      '',
+    );
+
+    expect(
+      ImmersiveSessionScreen.deriveRemainingTtsTextAfterStream(
+        messageText: '（兴奋地举手）李老师！这个问题我昨天也想过。',
+        streamedSegments: ['李老师！'],
+        fallbackTtsText: '这个问题我昨天也想过。',
+      ),
+      '这个问题我昨天也想过。',
     );
   });
 

@@ -126,6 +126,15 @@ async def create_session(request: CreateSessionRequest):
         if not get_thinker(tid):
             raise HTTPException(status_code=404, detail=f"思想家 '{tid}' 不存在")
 
+    # 最多 8 个虚拟角色（不含主持人李老师）
+    non_moderator_chars = [c for c in request.character_ids if c != "moderator"]
+    virtual_count = len(non_moderator_chars) + len(request.thinker_ids)
+    if virtual_count > 8:
+        raise HTTPException(
+            status_code=400,
+            detail=f"虚拟角色最多 8 人（当前选择了 {virtual_count} 人：{len(non_moderator_chars)} 个角色 + {len(request.thinker_ids)} 个思想家），请减少选择",
+        )
+
     # 创建参与者列表
     participants: list[Participant] = []
 

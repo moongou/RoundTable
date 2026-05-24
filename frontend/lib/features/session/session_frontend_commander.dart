@@ -4,6 +4,14 @@ enum HumanTurnCommand {
   defer,
 }
 
+const Set<String> _authorizedHumanRequestReasons = <String>{
+  'moderator_designated_human',
+  'participant_designated_human',
+  'interrupt',
+  // 兼容历史后端/灰度路径：未标注细分原因时会回落为 normal。
+  'normal',
+};
+
 /// Minimal frontend commander that only orchestrates:
 /// 1) human turn activation
 /// 2) auto-skip progression flags
@@ -37,8 +45,17 @@ class SessionFrontendCommander {
 
   HumanTurnCommand onHumanInputRequested({
     required String speaker,
+    required String requestReason,
     required bool hasOngoingSpeechPlayback,
   }) {
+    final normalizedReason = requestReason.trim().toLowerCase();
+    if (!_authorizedHumanRequestReasons.contains(normalizedReason)) {
+      _pendingHumanTurn = false;
+      _pendingHumanSpeaker = '';
+      _pendingSince = null;
+      _handApprovedToSpeak = false;
+      return HumanTurnCommand.none;
+    }
     if (hasOngoingSpeechPlayback) {
       _pendingHumanTurn = true;
       _pendingHumanSpeaker = speaker;

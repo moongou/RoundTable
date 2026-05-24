@@ -1,0 +1,14 @@
+{
+  "name": "roundtable",
+  "version": "1.0.11",
+  "description": "圆桌思辨 - HarmonyOS客户端",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {
+    "@ohos/hvigor-ohos-plugin": "4.0.0"
+  },
+  "devDependencies": {
+    "@ohos/hvigor": "4.0.0"
+  }
+}

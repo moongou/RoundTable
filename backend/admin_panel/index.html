@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>圆桌思辨 — 管理后台</title>
+<style>
+  :root { --bg:#0f0f0f; --card:#1a1a1a; --border:#2a2a2a; --text:#e0e0e0; --muted:#888; --accent:#ff9500; --danger:#e53935; --green:#4caf50; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+  .container { max-width:1100px; margin:0 auto; padding:24px; }
+  h1 { font-size:22px; font-weight:600; margin-bottom:24px; }
+  h2 { font-size:16px; font-weight:600; margin-bottom:12px; }
+
+  .login-box { max-width:400px; margin:120px auto; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:32px; }
+  .login-box input { width:100%; padding:10px 12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin-bottom:12px; }
+  .login-box button { width:100%; padding:10px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  .login-box .err { color:var(--danger); font-size:13px; margin-top:8px; }
+
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:24px; }
+  .stat-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .stat-card .num { font-size:28px; font-weight:700; color:var(--accent); }
+  .stat-card .label { font-size:13px; color:var(--muted); margin-top:4px; }
+
+  .toolbar { display:flex; gap:8px; margin-bottom:16px; align-items:center; }
+  .toolbar input { padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:13px; width:240px; }
+  .toolbar button { padding:8px 16px; background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:8px; font-size:13px; cursor:pointer; white-space:nowrap; }
+  .toolbar button:hover { border-color:var(--accent); }
+
+  .table-wrap { background:var(--card); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; padding:10px 14px; color:var(--muted); font-weight:500; border-bottom:1px solid var(--border); background:#141414; }
+  td { padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.04); }
+  tr:hover td { background:rgba(255,149,0,0.03); }
+  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:rgba(255,149,0,0.15); color:var(--accent); }
+
+  .detail-panel { display:none; position:fixed; inset:0; z-index:100; }
+  .detail-panel.open { display:flex; align-items:center; justify-content:center; }
+  .detail-overlay { position:absolute; inset:0; background:rgba(0,0,0,0.7); }
+  .detail-card { position:relative; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; min-width:520px; max-width:600px; max-height:80vh; overflow-y:auto; }
+  .detail-card .row { display:flex; justify-content:space-between; padding:6px 0; font-size:13px; border-bottom:1px solid rgba(255,255,255,0.04); }
+  .detail-card .row .k { color:var(--muted); }
+  .detail-card .close { position:absolute; top:12px; right:16px; background:none; border:none; color:var(--muted); font-size:20px; cursor:pointer; }
+
+  .events { margin-top:16px; }
+  .event { display:flex; gap:12px; padding:6px 0; font-size:12px; color:var(--muted); border-bottom:1px solid rgba(255,255,255,0.03); }
+
+  .actions { display:flex; gap:8px; }
+  .btn-sm { padding:4px 10px; background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:6px; font-size:12px; cursor:pointer; }
+  .btn-danger { border-color:var(--danger); color:var(--danger); }
+  .btn-danger:hover { background:var(--danger); color:#fff; }
+
+  .empty { text-align:center; color:var(--muted); padding:40px; font-size:14px; }
+  .loading { text-align:center; color:var(--muted); padding:24px; }
+  .toast { position:fixed; top:16px; right:16px; padding:10px 16px; border-radius:8px; font-size:13px; z-index:200; }
+  .toast.ok { background:rgba(76,175,80,0.2); color:var(--green); }
+  .toast.err { background:rgba(229,57,53,0.2); color:var(--danger); }
+
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+
+<!-- login -->
+<div id="loginPage" class="login-box">
+  <h1>圆桌思辨 管理后台</h1>
+  <input id="loginUser" placeholder="用户名" autocomplete="username">
+  <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">
+  <button onclick="doLogin()">登录</button>
+  <div id="loginErr" class="err"></div>
+</div>
+
+<!-- main -->
+<div id="mainPage" class="container hidden">
+  <h1>管理后台</h1>
+  <div class="stats">
+    <div class="stat-card"><div class="num" id="statUsers">-</div><div class="label">总用户数</div></div>
+    <div class="stat-card"><div class="num" id="statActive">-</div><div class="label">7日内活跃</div></div>
+    <div class="stat-card"><div class="num" id="statSessions">-</div><div class="label">总场次</div></div>
+  </div>
+
+  <div class="toolbar">
+    <input id="searchBox" placeholder="搜索用户名或显示名称..." oninput="renderUsers()">
+    <button onclick="exportCSV()">导出 CSV</button>
+    <button onclick="doLogout()" style="margin-left:auto;">退出登录</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>ID</th><th>用户名</th><th>显示名</th><th>注册时间</th><th>最近登录</th><th>场次</th><th>发言</th><th>操作</th>
+      </tr></thead>
+      <tbody id="userTable"></tbody>
+    </table>
+  </div>
+  <div id="emptyState" class="empty hidden">暂无用户数据</div>
+</div>
+
+<!-- detail modal -->
+<div id="detailPanel" class="detail-panel">
+  <div class="detail-overlay" onclick="closeDetail()"></div>
+  <div class="detail-card" id="detailCard"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = location.origin + '/api/v1';
+let token = localStorage.getItem('rt_admin_token');
+let users = [];
+
+if (token) { showMain(); loadAll(); }
+
+async function doLogin() {
+  const u = qs('loginUser').value.trim();
+  const p = qs('loginPass').value;
+  try {
+    const r = await fetch(API+'/auth/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:u,password:p})
+    });
+    if (!r.ok) { const e=await r.json(); throw new Error(e.detail||'登录失败'); }
+    const d = await r.json();
+    token = d.token;
+    localStorage.setItem('rt_admin_token', token);
+    qs('loginErr').textContent = '';
+    showMain();
+    loadAll();
+  } catch(e) { qs('loginErr').textContent = e.message; }
+}
+
+function showMain() { qs('loginPage').classList.add('hidden'); qs('mainPage').classList.remove('hidden'); }
+function doLogout() { localStorage.removeItem('rt_admin_token'); token=null; location.reload(); }
+
+function authHeaders() { return {Authorization:'Bearer '+token,'Content-Type':'application/json'}; }
+
+async function api(url, opts={}) {
+  const r = await fetch(API+url, {...opts, headers:{...authHeaders(),...(opts.headers||{})}});
+  if (!r.ok) { const e=await r.json().catch(()=>({})); throw new Error(e.detail||r.statusText); }
+  return r.json();
+}
+
+async function loadAll() {
+  try {
+    const [usersData, statsData] = await Promise.all([
+      api('/admin/users?limit=500'),
+      api('/admin/stats')
+    ]);
+    users = usersData.users || [];
+    qs('statUsers').textContent = statsData.total_users||0;
+    qs('statActive').textContent = statsData.active_users_7d||0;
+    qs('statSessions').textContent = statsData.total_sessions||0;
+    renderUsers();
+  } catch(e) { toast('加载失败: '+e.message,'err'); if(e.message.includes('401')) doLogout(); }
+}
+
+function renderUsers() {
+  const q = qs('searchBox').value.toLowerCase();
+  const filtered = q ? users.filter(u => (u.username||'').toLowerCase().includes(q) || (u.display_name||'').toLowerCase().includes(q)) : users;
+  const tbody = qs('userTable');
+  if (filtered.length === 0) { tbody.innerHTML = ''; qs('emptyState').classList.remove('hidden'); return; }
+  qs('emptyState').classList.add('hidden');
+  tbody.innerHTML = filtered.map(u => `
+    <tr>
+      <td>${u.id}</td>
+      <td>${esc(u.username)}</td>
+      <td>${esc(u.display_name||'-')}</td>
+      <td>${fmt(u.created_at)}</td>
+      <td>${fmt(u.last_login)||'从未'}</td>
+      <td><span class="badge">${u.session_count||0}</span></td>
+      <td>${u.total_speech_count||0}</td>
+      <td class="actions">
+        <button class="btn-sm" onclick="showDetail(${u.id})">详情</button>
+        <button class="btn-sm btn-danger" onclick="delUser(${u.id},'${esc(u.username)}')">删除</button>
+      </td>
+    </tr>`).join('');
+}
+
+async function showDetail(id) {
+  try {
+    const d = await api('/admin/users/'+id);
+    const u = d.user; const ev = d.events||[];
+    qs('detailCard').innerHTML = `
+      <button class="close" onclick="closeDetail()">&times;</button>
+      <h2>${esc(u.display_name||u.username)}</h2>
+      <div class="row"><span class="k">ID</span><span>${u.id}</span></div>
+      <div class="row"><span class="k">用户名</span><span>${esc(u.username)}</span></div>
+      <div class="row"><span class="k">注册时间</span><span>${fmt(u.created_at)}</span></div>
+      <div class="row"><span class="k">最近登录</span><span>${fmt(u.last_login)||'从未'}</span></div>
+      <div class="row"><span class="k">讨论场次</span><span>${u.session_count||0}</span></div>
+      <div class="row"><span class="k">发言次数</span><span>${u.total_speech_count||0}</span></div>
+      <div class="row"><span class="k">在线时长</span><span>${msfmt(u.total_online_ms||0)}</span></div>
+      <div class="events"><h2 style="margin-top:16px;">最近事件</h2>
+        ${ev.length===0?'<div class="empty">暂无事件</div>':ev.map(e=>`<div class="event"><span>${fmt(e.created_at)}</span><span>${e.event_type}</span><span>${esc(e.event_data||'')}</span></div>`).join('')}
+      </div>`;
+    qs('detailPanel').classList.add('open');
+  } catch(e) { toast('加载详情失败: '+e.message,'err'); }
+}
+
+function closeDetail() { qs('detailPanel').classList.remove('open'); }
+
+async function delUser(id, name) {
+  if (!confirm('确认删除用户 "'+name+'"？\n此操作不可撤销.')) return;
+  try { await api('/admin/users/'+id,{method:'DELETE'}); toast('已删除: '+name,'ok'); loadAll(); }
+  catch(e) { toast('删除失败: '+e.message,'err'); }
+}
+
+function exportCSV() {
+  const h = 'ID,用户名,显示名,注册时间,最近登录,场次,发言次数,在线时长(ms)\n';
+  const rows = users.map(u => [u.id,u.username,u.display_name,u.created_at,u.last_login,u.session_count,u.total_speech_count,u.total_online_ms].map(v=>'"'+(v||'').toString().replace(/"/g,'""')+'"').join(',')).join('\n');
+  const b = new Blob(['﻿'+h+rows],{type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a'); a.href=URL.createObjectURL(b); a.download='roundtable_users.csv'; a.click();
+}
+
+function toast(msg, type) {
+  const t = qs('toast');
+  t.className = 'toast '+type; t.textContent = msg;
+  setTimeout(()=>{ t.className=''; t.textContent=''; }, 2500);
+}
+
+function fmt(s) { if(!s) return ''; try { return new Date(s).toLocaleString('zh-CN'); } catch(e) { return s; } }
+function msfmt(ms) { if(ms<60000) return Math.round(ms/1000)+'秒'; if(ms<3600000) return Math.round(ms/60000)+'分钟'; return (ms/3600000).toFixed(1)+'小时'; }
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function qs(id) { return document.getElementById(id); }
+</script>
+</body>
+</html>

@@ -91,6 +91,26 @@ cd /path/to/RoundTable
 node devpanel.js
 ```
 
+- 面板地址：`http://localhost:8888`
+- 应用地址：`http://localhost:8001`
+- `localhost:8888` 已合并用户统计能力（与 `/admin` 同源数据：总用户、活跃用户、累计场次、用户详情与删除）。
+
+ECS 上的同构能力：
+
+- `deploy/deploy_aliyun.sh` 已支持项目级端口隔离，可通过环境变量设置 `BACKEND_PORT`、`DEVPANEL_PORT`、`PUBLIC_PORT`，并可通过 `ENABLE_PUBLIC_TLS=true` 让公网端口直接走 HTTPS。
+- 推荐做法：每个项目占用独立后端端口，再由 Nginx 统一做代理；如果你希望直接通过域名加端口访问，也可以开启 `EXPOSE_PUBLIC_PORT=true`。
+- RoundTable 当前建议的 ECS 组合是：后端内网端口 `18421`，开发面板 `8921`，外部访问端口 `8421`，公网协议 `HTTPS`。
+- 示例：`BACKEND_PORT=18421 DEVPANEL_PORT=8921 PUBLIC_PORT=8421 EXPOSE_PUBLIC_PORT=true ENABLE_STANDARD_HTTP=false ENABLE_PUBLIC_TLS=true bash deploy/deploy_aliyun.sh`
+- 可通过 SSH 隧道访问云上开发面板：`ssh -L 8921:127.0.0.1:8921 root@<ECS_IP>`
+
+浏览器侧烟测清单：
+
+- [docs/web-smoke-checklist.md](docs/web-smoke-checklist.md)
+
+运维面板使用方法：
+
+- [docs/ops-panel-usage.md](docs/ops-panel-usage.md)
+
 ## 当前实现重点
 
 - 历史详情页可查看完整剧本，并联动真人录音回放。

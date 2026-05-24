@@ -1,0 +1,25 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "sourceOption": {
+      "workers": [
+        "./ets/entryability/EntryAbility.ets"
+      ]
+    }
+  },
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "enable": true
+        }
+      }
+    }
+  ],
+  "targets": [
+    {
+      "name": "default"
+    }
+  ]
+}

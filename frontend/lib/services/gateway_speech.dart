@@ -6,16 +6,16 @@
 /// Local endpoints:
 ///   CapsWriter: ws://localhost:6016/ws
 ///   Vosk:       ws://localhost:6702/stream
-// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 library;
 
-import 'dart:html' as html;
 import 'dart:async';
 import 'dart:convert';
-import 'dart:js' as js;
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:web/web.dart' as web;
 
 import 'speech_contract.dart';
 
@@ -49,19 +49,19 @@ class GatewayStreamingAsrService implements AsrService {
   final StreamController<AsrResult> _controller =
       StreamController<AsrResult>.broadcast();
 
-  html.WebSocket? _ws;
+  web.WebSocket? _ws;
   Completer<void>? _stopCompleter;
   Completer<void>? _finalResultCompleter;
   bool _disposed = false;
   String? _capsWriterTaskId;
   double _capsWriterStartSeconds = 0;
   int? _micSessionId;
-  js.JsFunction? _micStartedCallback;
-  js.JsFunction? _micAudioCallback;
-  js.JsFunction? _micErrorCallback;
+  JSFunction? _micStartedCallback;
+  JSFunction? _micAudioCallback;
+  JSFunction? _micErrorCallback;
 
   // 预热的 WebSocket 连接
-  html.WebSocket? _warmWs;
+  web.WebSocket? _warmWs;
   Timer? _warmupTimer;
 
   GatewayStreamingAsrService({
@@ -70,7 +70,8 @@ class GatewayStreamingAsrService implements AsrService {
     String? wsPath,
     this.wsProtocols = const <String>[],
     this.capsWriterJsonProtocol = false,
-  })  : service = service.trim().isEmpty ? 'vosk' : service.trim().toLowerCase(),
+  })  : service =
+            service.trim().isEmpty ? 'vosk' : service.trim().toLowerCase(),
         gatewayUrl = gatewayUrl != null && gatewayUrl.trim().isNotEmpty
             ? gatewayUrl.trim()
             : _defaultAsrBaseUrl(service),
@@ -81,15 +82,15 @@ class GatewayStreamingAsrService implements AsrService {
     _preWarmConnection();
   }
 
-  html.WebSocket _createWebSocket() {
+  web.WebSocket _createWebSocket() {
     if (wsProtocols.isEmpty) {
-      return html.WebSocket(_buildWsUrl());
+      return web.WebSocket(_buildWsUrl());
     }
-    return html.WebSocket(_buildWsUrl(), wsProtocols);
+    return web.WebSocket(_buildWsUrl(), wsProtocols.first.toJS);
   }
 
   Future<void> _connectWebSocketForStreaming() async {
-    if (_warmWs != null && _warmWs!.readyState == html.WebSocket.OPEN) {
+    if (_warmWs != null && _warmWs!.readyState == web.WebSocket.OPEN) {
       _ws = _warmWs;
       _warmWs = null;
       _warmupTimer?.cancel();
@@ -104,10 +105,11 @@ class GatewayStreamingAsrService implements AsrService {
   }
 
   void _ensureMicBridge() {
-    if (js.context.hasProperty('roundTableStreamingAsrMic')) return;
+    if (globalContext.has('roundTableStreamingAsrMic')) return;
 
-    js.context.callMethod('eval', [
-      r'''
+    globalContext.callMethod<JSAny?>(
+        'eval'.toJS,
+        r'''
 (function () {
   if (window.roundTableStreamingAsrMic) return;
   window.roundTableStreamingAsrMic = {
@@ -211,59 +213,54 @@ class GatewayStreamingAsrService implements AsrService {
   };
 }());
 '''
-    ]);
+            .toJS);
   }
 
   Future<void> _startMicBridge() async {
     _ensureMicBridge();
-    final bridge = js.context['roundTableStreamingAsrMic'] as js.JsObject;
+    final bridge = globalContext['roundTableStreamingAsrMic'] as JSObject;
     final started = Completer<void>();
 
-    _micStartedCallback = js.JsFunction.withThis((thisArg, dynamic sessionId) {
-      if (sessionId is num) {
-        _micSessionId = sessionId.toInt();
+    _micStartedCallback = ((JSAny? sessionId) {
+      final id = (sessionId as JSNumber?)?.toDartInt;
+      if (id != null) {
+        _micSessionId = id;
       }
       if (!started.isCompleted) started.complete();
-    });
+    }).toJS;
 
-    _micAudioCallback = js.JsFunction.withThis((thisArg, dynamic channelData) {
+    _micAudioCallback = ((JSAny? channelData) {
       try {
-        if (channelData is js.JsObject) {
-          final length = (channelData['length'] as num).toInt();
-          if (length <= 0) return;
-          if (capsWriterJsonProtocol) {
-            _sendCapsWriterAudioChunk(channelData, length);
-          } else {
-            _sendPcmAudioChunk(channelData, length);
-          }
-        } else if (channelData is Float32List) {
-          if (capsWriterJsonProtocol) {
-            _sendCapsWriterAudioList(channelData);
-          } else {
-            _sendPcmAudioList(channelData);
-          }
+        final samples = _toFloat32Samples(channelData);
+        if (samples == null || samples.isEmpty) {
+          return;
+        }
+        if (capsWriterJsonProtocol) {
+          _sendCapsWriterAudioList(samples);
+        } else {
+          _sendPcmAudioList(samples);
         }
       } catch (error) {
         if (!_controller.isClosed) {
           _controller.addError('${service.toUpperCase()} 音频块处理失败: $error');
         }
       }
-    });
+    }).toJS;
 
-    _micErrorCallback = js.JsFunction.withThis((thisArg, dynamic error) {
-      final message = '麦克风流初始化失败: ${error?.toString() ?? 'unknown error'}';
+    _micErrorCallback = ((JSAny? error) {
+      final message = '麦克风流初始化失败: ${_jsAnyToString(error) ?? 'unknown error'}';
       if (!started.isCompleted) {
         started.completeError(StateError(message));
       } else if (!_controller.isClosed) {
         _controller.addError(message);
       }
-    });
+    }).toJS;
 
-    bridge.callMethod('start', [
+    bridge.callMethodVarArgs<JSAny?>('start'.toJS, [
       _micStartedCallback,
       _micAudioCallback,
       _micErrorCallback,
-      16000,
+      16000.toJS,
     ]);
 
     await started.future.timeout(const Duration(seconds: 8));
@@ -271,11 +268,10 @@ class GatewayStreamingAsrService implements AsrService {
 
   void _stopMicBridge() {
     final sessionId = _micSessionId;
-    if (sessionId != null &&
-        js.context.hasProperty('roundTableStreamingAsrMic')) {
+    if (sessionId != null && globalContext.has('roundTableStreamingAsrMic')) {
       try {
-        (js.context['roundTableStreamingAsrMic'] as js.JsObject)
-            .callMethod('stop', [sessionId]);
+        (globalContext['roundTableStreamingAsrMic'] as JSObject)
+            .callMethod<JSAny?>('stop'.toJS, sessionId.toJS);
       } catch (_) {}
     }
     _micSessionId = null;
@@ -337,12 +333,50 @@ class GatewayStreamingAsrService implements AsrService {
         .toString();
   }
 
+  String? _jsAnyToString(JSAny? value) {
+    if (value == null) return null;
+    try {
+      return (value as JSString).toDart;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _messageEventText(web.MessageEvent event) =>
+      _jsAnyToString(event.data);
+
+  Float32List? _toFloat32Samples(JSAny? channelData) {
+    if (channelData == null) return null;
+
+    try {
+      return (channelData as JSFloat32Array).toDart;
+    } catch (_) {}
+
+    try {
+      final jsData = channelData as JSObject;
+      final length = (jsData['length'] as JSNumber?)?.toDartInt ?? 0;
+      if (length <= 0) {
+        return null;
+      }
+      final samples = Float32List(length);
+      for (var i = 0; i < length; i++) {
+        final sample =
+            (jsData.getProperty<JSAny?>(i.toJS) as JSNumber?)?.toDartDouble ??
+                0.0;
+        samples[i] = sample;
+      }
+      return samples;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 预热 WebSocket 连接，减少首次录音延迟
   void _preWarmConnection() {
     if (_disposed) return;
     if (_warmWs != null &&
-        (_warmWs!.readyState == html.WebSocket.OPEN ||
-            _warmWs!.readyState == html.WebSocket.CONNECTING)) {
+        (_warmWs!.readyState == web.WebSocket.OPEN ||
+            _warmWs!.readyState == web.WebSocket.CONNECTING)) {
       return;
     }
     try {
@@ -389,7 +423,11 @@ class GatewayStreamingAsrService implements AsrService {
       _ws!.onMessage.listen((event) {
         if (_controller.isClosed) return;
         try {
-          final data = jsonDecode(event.data as String) as Map<String, dynamic>;
+          final payload = _messageEventText(event);
+          if (payload == null || payload.isEmpty) {
+            return;
+          }
+          final data = jsonDecode(payload) as Map<String, dynamic>;
           if (data.containsKey('is_final')) {
             final isFinal = data['is_final'] == true;
             final text = ((data['text_accu'] as String?) ??
@@ -458,16 +496,6 @@ class GatewayStreamingAsrService implements AsrService {
     }
   }
 
-  String _encodeFloat32Base64(js.JsObject channelData, int length) {
-    final byteData = ByteData(length * 4);
-    for (var i = 0; i < length; i++) {
-      final sample =
-          (channelData[i] as num).toDouble().clamp(-1.0, 1.0).toDouble();
-      byteData.setFloat32(i * 4, sample, Endian.little);
-    }
-    return base64Encode(byteData.buffer.asUint8List());
-  }
-
   String _encodeFloat32ListBase64(Float32List channelData) {
     final byteData = ByteData(channelData.length * 4);
     for (var i = 0; i < channelData.length; i++) {
@@ -480,66 +508,38 @@ class GatewayStreamingAsrService implements AsrService {
   String _newCapsWriterTaskId() =>
       'roundtable-${DateTime.now().microsecondsSinceEpoch}';
 
-  void _sendCapsWriterAudioChunk(js.JsObject channelData, int length) {
-    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
-    _capsWriterTaskId ??= _newCapsWriterTaskId();
-    if (_capsWriterStartSeconds <= 0) {
-      _capsWriterStartSeconds = DateTime.now().millisecondsSinceEpoch / 1000.0;
-    }
-
-    _ws!.sendString(jsonEncode({
-      'task_id': _capsWriterTaskId,
-      'seg_duration': 60,
-      'seg_overlap': 4,
-      'is_final': false,
-      'time_start': _capsWriterStartSeconds,
-      'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
-      'source': 'mic',
-      'data': _encodeFloat32Base64(channelData, length),
-      'context': '',
-    }));
-  }
-
   void _sendCapsWriterAudioList(Float32List channelData) {
-    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
+    if (_ws == null || _ws!.readyState != web.WebSocket.OPEN) return;
     if (channelData.isEmpty) return;
     _capsWriterTaskId ??= _newCapsWriterTaskId();
     if (_capsWriterStartSeconds <= 0) {
       _capsWriterStartSeconds = DateTime.now().millisecondsSinceEpoch / 1000.0;
     }
 
-    _ws!.sendString(jsonEncode({
-      'task_id': _capsWriterTaskId,
-      'seg_duration': 60,
-      'seg_overlap': 4,
-      'is_final': false,
-      'time_start': _capsWriterStartSeconds,
-      'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
-      'source': 'mic',
-      'data': _encodeFloat32ListBase64(channelData),
-      'context': '',
-    }));
-  }
-
-  void _sendPcmAudioChunk(js.JsObject channelData, int length) {
-    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
-    final int16Data = Int16List(length);
-    for (var i = 0; i < length; i++) {
-      final sample = (channelData[i] as num).toDouble().clamp(-1.0, 1.0);
-      int16Data[i] = (sample * 32767).round();
-    }
-    _ws!.sendTypedData(int16Data);
+    _ws!.send(
+      jsonEncode({
+        'task_id': _capsWriterTaskId,
+        'seg_duration': 60,
+        'seg_overlap': 4,
+        'is_final': false,
+        'time_start': _capsWriterStartSeconds,
+        'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
+        'source': 'mic',
+        'data': _encodeFloat32ListBase64(channelData),
+        'context': '',
+      }).toJS,
+    );
   }
 
   void _sendPcmAudioList(Float32List channelData) {
-    if (_ws == null || _ws!.readyState != html.WebSocket.OPEN) return;
+    if (_ws == null || _ws!.readyState != web.WebSocket.OPEN) return;
     if (channelData.isEmpty) return;
     final int16Data = Int16List(channelData.length);
     for (var i = 0; i < channelData.length; i++) {
       final sample = channelData[i].clamp(-1.0, 1.0).toDouble();
       int16Data[i] = (sample * 32767).round();
     }
-    _ws!.sendTypedData(int16Data);
+    _ws!.send(int16Data.toJS);
   }
 
   @override
@@ -550,28 +550,30 @@ class GatewayStreamingAsrService implements AsrService {
       _stopMicBridge();
 
       // 发送 eof 获取最终结果
-      if (_ws != null && _ws!.readyState == html.WebSocket.OPEN) {
+      if (_ws != null && _ws!.readyState == web.WebSocket.OPEN) {
         if (service == 'vosk') {
-          _ws!.sendString('eof');
+          _ws!.send('eof'.toJS);
         } else if (capsWriterJsonProtocol) {
           _capsWriterTaskId ??= _newCapsWriterTaskId();
           if (_capsWriterStartSeconds <= 0) {
             _capsWriterStartSeconds =
                 DateTime.now().millisecondsSinceEpoch / 1000.0;
           }
-          _ws!.sendString(jsonEncode({
-            'task_id': _capsWriterTaskId,
-            'seg_duration': 60,
-            'seg_overlap': 4,
-            'is_final': true,
-            'time_start': _capsWriterStartSeconds,
-            'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
-            'source': 'mic',
-            'data': '',
-            'context': '',
-          }));
+          _ws!.send(
+            jsonEncode({
+              'task_id': _capsWriterTaskId,
+              'seg_duration': 60,
+              'seg_overlap': 4,
+              'is_final': true,
+              'time_start': _capsWriterStartSeconds,
+              'time_frame': DateTime.now().millisecondsSinceEpoch / 1000.0,
+              'source': 'mic',
+              'data': '',
+              'context': '',
+            }).toJS,
+          );
         } else {
-          _ws!.sendString(jsonEncode({'type': 'eof'}));
+          _ws!.send(jsonEncode({'type': 'eof'}).toJS);
         }
         await _finalResultCompleter?.future.timeout(
           const Duration(milliseconds: 1800),

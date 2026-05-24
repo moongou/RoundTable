@@ -5,6 +5,18 @@ import 'package:roundtable/models/discussion_models.dart';
 import 'package:roundtable/services/saved_topics_store.dart';
 
 void main() {
+  test('home dev panel entry only appears on localhost hosts', () {
+    expect(shouldShowHomeDevPanelEntry('localhost'), isTrue);
+    expect(shouldShowHomeDevPanelEntry('127.0.0.1'), isTrue);
+    expect(shouldShowHomeDevPanelEntry('::1'), isTrue);
+    expect(shouldShowHomeDevPanelEntry('rainforgrain.top'), isFalse);
+    expect(shouldShowHomeDevPanelEntry('39.97.253.10'), isFalse);
+  });
+
+  test('home dev panel points to localhost 8888', () {
+    expect(resolveHomeDevPanelUrl(), 'http://localhost:8888');
+  });
+
   test('home ASR keeps direct capswriter URL', () {
     expect(
       resolveHomeAsrProviderUrl(
@@ -152,5 +164,28 @@ void main() {
     expect(draft.hasText, isTrue);
     expect(draft.effectiveTitle, '小学生该不该限制刷短视频？');
     expect(draft.effectiveSourceText, contains('很多小学生'));
+  });
+
+  test('home account labels keep phone and nickname fallback text', () {
+    expect(formatHomeAccountPhoneLabel('13912345678'), '登录 13912345678');
+    expect(formatHomeAccountPhoneLabel(''), '登录 未登录');
+
+    expect(formatHomeAccountNicknameLabel('小袁'), '(小袁)');
+    expect(formatHomeAccountNicknameLabel(''), '(同学)');
+  });
+
+  test('home seat title uses nickname in non observer mode', () {
+    expect(
+      formatHomeSeatBadgeTitle(humanName: '小袁', observerMode: false),
+      '小袁的席位',
+    );
+    expect(
+      formatHomeSeatBadgeTitle(humanName: '', observerMode: false),
+      '同学的席位',
+    );
+    expect(
+      formatHomeSeatBadgeTitle(humanName: '任意', observerMode: true),
+      '旁听席',
+    );
   });
 }

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 MEETING_HISTORY_DIR = Path(__file__).resolve().parents[2] / "runtime" / "meeting_history"
-MEETING_HISTORY_RETENTION_LIMIT = 10
+MEETING_HISTORY_RETENTION_LIMIT = 10_000
 MEETING_RECORDINGS_DIRNAME = "recordings"
 MEETING_RECORDINGS_MANIFEST = "recordings.json"
 MEETING_SCRIPT_FILENAME = "script.json"
@@ -179,6 +179,10 @@ def _build_preview(entry_type: str, data: Any) -> str:
             preview = f"轮到 {payload.get('speaker', '')}".strip()
         elif entry_type == "human_input_requested":
             preview = f"等待 {payload.get('speaker', '')} 发言".strip()
+        elif entry_type == "client_metric":
+            preview = (
+                f"指标 {payload.get('name', '')}={payload.get('value_ms', '')}ms"
+            ).strip()
         elif entry_type == "state_change":
             preview = f"状态 {payload.get('old_label', payload.get('old_state', ''))} → {payload.get('new_label', payload.get('new_state', ''))}".strip()
         else:
@@ -187,6 +191,62 @@ def _build_preview(entry_type: str, data: Any) -> str:
         preview = str(payload)
     preview = preview.replace("\n", " ").strip()
     return preview[:180]
+
+
+def _apply_timeout_fallback_from_script(
+    final_stats: Any,
+    script_lines: list[dict[str, Any]],
+) -> Any:
+    stats = _jsonable(final_stats) if final_stats is not None else {}
+    if not isinstance(stats, dict):
+        return stats
+
+    floor_manager = stats.get("floor_manager")
+    if not isinstance(floor_manager, dict):
+        return stats
+
+    human_skip_stats = floor_manager.get("human_skip_stats")
+    if not isinstance(human_skip_stats, dict):
+        return stats
+
+    last_requested_speaker = ""
+    timeout_notice_speakers: list[str] = []
+
+    for line in script_lines:
+        if not isinstance(line, dict):
+            continue
+        entry_type = str(line.get("entry_type", "") or "").strip()
+        if entry_type == "human_input_requested":
+            speaker = str(line.get("speaker", "") or "").strip()
+            if speaker:
+                last_requested_speaker = speaker
+            continue
+        if entry_type == "message":
+            speaker = str(line.get("speaker", "") or "").strip()
+            text = str(line.get("text", "") or "").strip()
+            if speaker == "系统" and "系统不会替你跳过" in text:
+                timeout_notice_speakers.append(last_requested_speaker)
+
+    if not timeout_notice_speakers:
+        return stats
+
+    existing_timeout_count = int(human_skip_stats.get("timeout_count") or 0)
+    if len(timeout_notice_speakers) > existing_timeout_count:
+        human_skip_stats["timeout_count"] = len(timeout_notice_speakers)
+
+    speaker_statuses = floor_manager.get("speaker_utterance_statuses")
+    if not isinstance(speaker_statuses, dict):
+        return stats
+
+    for speaker in timeout_notice_speakers:
+        display = str(speaker or "").strip()
+        if not display:
+            continue
+        current = str(speaker_statuses.get(display, "") or "").strip()
+        if current in {"", "nominated_only"}:
+            speaker_statuses[display] = "timed_out"
+
+    return stats
 
 
 def _normalize_script_text(value: str) -> str:
@@ -289,12 +349,50 @@ def _build_script_line(
             line["request_state"] = request_state
         return line
 
+    if entry_type == "client_metric":
+        metric_name = str(payload.get("name", "") or "").strip()
+        value_ms = payload.get("value_ms")
+        if not metric_name or not isinstance(value_ms, int):
+            return None
+        speaker = str(payload.get("speaker", "") or "").strip()
+        phase = str(payload.get("phase", "") or "").strip()
+        detail = str(payload.get("detail", "") or "").strip()
+        linked_event_seq = payload.get("event_seq")
+        line = {
+            **base_line,
+            "kind": "note",
+            "speaker": speaker or "前端指标",
+            "text": f"指标 {metric_name} = {value_ms}ms",
+            "metric_name": metric_name,
+            "metric_value_ms": value_ms,
+        }
+        if phase:
+            line["metric_phase"] = phase
+        if detail:
+            line["metric_detail"] = detail
+        if isinstance(linked_event_seq, int):
+            line["linked_event_seq"] = linked_event_seq
+        return line
+
     if entry_type == "designate_speaker":
         target = str(payload.get("target", "") or payload.get("speaker", "") or "").strip() or "未知角色"
         return {
             **base_line,
             "kind": "note",
             "text": f"指定下一位发言者：{target}",
+        }
+
+    if entry_type == "end_discussion":
+        speaker = str(payload.get("speaker", "") or "").strip() or "用户"
+        reason = str(payload.get("reason", "") or "").strip()
+        text = f"{speaker}请求结束本次讨论"
+        if reason:
+            text = f"{text}（{reason}）"
+        return {
+            **base_line,
+            "kind": "note",
+            "speaker": speaker,
+            "text": text,
         }
 
     if entry_type in {"system", "error", "api_error", "ended", "pause", "resume"}:
@@ -431,6 +529,9 @@ def _export_line_record(line: dict[str, Any], *, index: int) -> dict[str, Any]:
     for key in ("agent_source", "agent_speaker", "request_reason"):
         if line.get(key) is not None:
             record[key] = line.get(key)
+    for key in ("metric_name", "metric_value_ms", "metric_phase", "metric_detail"):
+        if line.get(key) is not None:
+            record[key] = line.get(key)
     recording = line.get("recording")
     if isinstance(recording, dict):
         record["recording"] = recording
@@ -438,6 +539,8 @@ def _export_line_record(line: dict[str, Any], *, index: int) -> dict[str, Any]:
         record["echo_event_seq"] = line.get("echo_event_seq")
     if line.get("echo_timestamp") is not None:
         record["echo_timestamp"] = line.get("echo_timestamp")
+    if line.get("linked_event_seq") is not None:
+        record["linked_event_seq"] = line.get("linked_event_seq")
     return record
 
 
@@ -754,6 +857,27 @@ class MeetingHistoryStore:
             self._summary["updated_at"] = _utc_now_iso()
             self._write_snapshot_locked()
 
+    async def get_review_messages(self) -> list[dict[str, str]]:
+        """Return speech messages in user-review-compatible format."""
+        async with self._lock:
+            lines = list(self._script_lines)
+
+        messages: list[dict[str, str]] = []
+        for line in lines:
+            kind = str(line.get("kind", "") or "").strip()
+            if kind != "speech":
+                continue
+            speaker = str(line.get("speaker", "") or "").strip()
+            text = str(line.get("text", "") or "").strip()
+            if not speaker or not text:
+                continue
+            messages.append({
+                "source": speaker,
+                "content": text,
+                "type": "text",
+            })
+        return messages
+
     async def append_entry(
         self,
         direction: str,
@@ -804,7 +928,10 @@ class MeetingHistoryStore:
             if reason:
                 self._summary["finish_reason"] = reason
             if final_stats is not None:
-                self._summary["final_stats"] = _jsonable(final_stats)
+                self._summary["final_stats"] = _apply_timeout_fallback_from_script(
+                    final_stats,
+                    self._script_lines,
+                )
             self._write_snapshot_locked()
             _prune_meeting_histories(keep_safe_session_id=self.safe_session_id)
 

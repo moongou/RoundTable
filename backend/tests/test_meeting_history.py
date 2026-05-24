@@ -144,3 +144,118 @@ async def test_meeting_history_store_persists_recordings_and_merges_human_echo(t
     assert script["lines"][0]["speaker"] == "豆苗"
     assert script["lines"][0]["recording"]["recording_id"] == recording["recording_id"]
     assert script["lines"][0]["echo_event_seq"] == 12
+
+
+@pytest.mark.asyncio
+async def test_meeting_history_store_backfills_timeout_stats_from_script(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(meeting_history_module, "MEETING_HISTORY_DIR", tmp_path)
+
+    store = MeetingHistoryStore("session-timeout")
+    await store.start(topic={"title": "什么是幸福"}, config={"human_names": ["豆苗"]})
+    await store.append_entry(
+        "outbound",
+        "human_input_requested",
+        {
+            "speaker": " 豆苗",
+            "agent_speaker": "u8c46u82d7",
+            "reason": "interrupt",
+            "request_id": "hr-1",
+            "state": "human_turn_waiting",
+        },
+        event_seq=22,
+    )
+    await store.append_entry(
+        "outbound",
+        "message",
+        {
+            "source": "系统",
+            "content": "豆苗 同学，如果你暂时不想发言，可以手动点“跳过”；系统不会替你跳过。",
+            "msg_type": "system",
+        },
+        event_seq=26,
+    )
+    await store.finish(
+        status="completed",
+        final_stats={
+            "floor_manager": {
+                "human_skip_stats": {
+                    "skip_count": 0,
+                    "timeout_count": 0,
+                    "consecutive_skip_count": 0,
+                    "hand_raise_count": 1,
+                    "participation_insufficient": False,
+                },
+                "speaker_utterance_statuses": {
+                    "豆苗": "nominated_only",
+                },
+            },
+        },
+    )
+
+    summary = json.loads((tmp_path / "session-timeout" / "summary.json").read_text(encoding="utf-8"))
+    floor_stats = summary["final_stats"]["floor_manager"]
+
+    assert floor_stats["human_skip_stats"]["timeout_count"] == 1
+    assert floor_stats["speaker_utterance_statuses"]["豆苗"] == "timed_out"
+
+
+@pytest.mark.asyncio
+async def test_meeting_history_store_does_not_override_spoken_status_when_backfilling_timeout(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(meeting_history_module, "MEETING_HISTORY_DIR", tmp_path)
+
+    store = MeetingHistoryStore("session-timeout-spoken")
+    await store.start(topic={"title": "什么是幸福"}, config={"human_names": ["豆苗"]})
+    await store.append_entry(
+        "outbound",
+        "human_input_requested",
+        {
+            "speaker": "豆苗",
+            "agent_speaker": "u8c46u82d7",
+            "reason": "interrupt",
+            "request_id": "hr-1",
+            "state": "human_turn_waiting",
+        },
+        event_seq=22,
+    )
+    await store.append_entry(
+        "outbound",
+        "message",
+        {
+            "source": "系统",
+            "content": "豆苗 同学，如果你暂时不想发言，可以手动点“跳过”；系统不会替你跳过。",
+            "msg_type": "system",
+        },
+        event_seq=26,
+    )
+    await store.append_entry(
+        "inbound",
+        "human_input",
+        {
+            "speaker": "豆苗",
+            "content": "我觉得幸福是和朋友一起玩。",
+            "request_id": "hr-1",
+        },
+    )
+    await store.finish(
+        status="completed",
+        final_stats={
+            "floor_manager": {
+                "human_skip_stats": {
+                    "skip_count": 0,
+                    "timeout_count": 0,
+                    "consecutive_skip_count": 0,
+                    "hand_raise_count": 1,
+                    "participation_insufficient": False,
+                },
+                "speaker_utterance_statuses": {
+                    "豆苗": "spoke_with_content",
+                },
+            },
+        },
+    )
+
+    summary = json.loads((tmp_path / "session-timeout-spoken" / "summary.json").read_text(encoding="utf-8"))
+    floor_stats = summary["final_stats"]["floor_manager"]
+
+    assert floor_stats["human_skip_stats"]["timeout_count"] == 1
+    assert floor_stats["speaker_utterance_statuses"]["豆苗"] == "spoke_with_content"

@@ -8,6 +8,7 @@ void main() {
 
       final cmd = commander.onHumanInputRequested(
         speaker: '豆苗',
+        requestReason: 'moderator_designated_human',
         hasOngoingSpeechPlayback: true,
       );
 
@@ -22,6 +23,7 @@ void main() {
 
       final cmd = commander.onHumanInputRequested(
         speaker: '豆苗',
+        requestReason: 'moderator_designated_human',
         hasOngoingSpeechPlayback: false,
       );
 
@@ -40,6 +42,7 @@ void main() {
       commander.markHumanTurnActivated(speaker: '豆苗');
       final immediate = commander.onHumanInputRequested(
         speaker: '豆苗',
+        requestReason: 'moderator_designated_human',
         hasOngoingSpeechPlayback: false,
       );
       expect(immediate, HumanTurnCommand.defer);
@@ -48,6 +51,7 @@ void main() {
       now = now.add(const Duration(milliseconds: 600));
       final later = commander.onHumanInputRequested(
         speaker: '豆苗',
+        requestReason: 'moderator_designated_human',
         hasOngoingSpeechPlayback: false,
       );
       expect(later, HumanTurnCommand.activateNow);
@@ -64,6 +68,7 @@ void main() {
 
       final immediate = commander.onHumanInputRequested(
         speaker: '豆苗',
+        requestReason: 'moderator_designated_human',
         hasOngoingSpeechPlayback: false,
       );
       expect(immediate, HumanTurnCommand.defer);
@@ -72,6 +77,7 @@ void main() {
       now = now.add(const Duration(milliseconds: 1300));
       final later = commander.onHumanInputRequested(
         speaker: '豆苗',
+        requestReason: 'moderator_designated_human',
         hasOngoingSpeechPlayback: false,
       );
       expect(later, HumanTurnCommand.activateNow);
@@ -86,6 +92,7 @@ void main() {
 
       commander.onHumanInputRequested(
         speaker: '豆苗',
+        requestReason: 'moderator_designated_human',
         hasOngoingSpeechPlayback: true,
       );
       expect(
@@ -102,6 +109,48 @@ void main() {
         ),
         isTrue,
       );
+    });
+
+    test('accepts legacy normal human input request reason', () {
+      final commander = SessionFrontendCommander();
+
+      final cmd = commander.onHumanInputRequested(
+        speaker: '豆苗',
+        requestReason: 'normal',
+        hasOngoingSpeechPlayback: false,
+      );
+
+      expect(cmd, HumanTurnCommand.activateNow);
+      expect(commander.pendingHumanTurn, isFalse);
+      expect(commander.handApprovedToSpeak, isTrue);
+    });
+
+    test('normalizes request reason before authorization', () {
+      final commander = SessionFrontendCommander();
+
+      final cmd = commander.onHumanInputRequested(
+        speaker: '豆苗',
+        requestReason: '  NORMAL  ',
+        hasOngoingSpeechPlayback: false,
+      );
+
+      expect(cmd, HumanTurnCommand.activateNow);
+      expect(commander.pendingHumanTurn, isFalse);
+      expect(commander.handApprovedToSpeak, isTrue);
+    });
+
+    test('ignores truly unauthorized human input request reasons', () {
+      final commander = SessionFrontendCommander();
+
+      final cmd = commander.onHumanInputRequested(
+        speaker: '豆苗',
+        requestReason: 'unknown_reason',
+        hasOngoingSpeechPlayback: false,
+      );
+
+      expect(cmd, HumanTurnCommand.none);
+      expect(commander.pendingHumanTurn, isFalse);
+      expect(commander.handApprovedToSpeak, isFalse);
     });
   });
 }
