@@ -1,6 +1,6 @@
 [project]
 name = "roundtable"
-version = "1.0.13"
+version = "1.0.14"
 description = "圆桌思辨讨论平台 - 为小学生提供AI引导的思辨训练场"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "python-multipart>=0.0.20",
     "httpx>=0.28.0",
+    "python-pptx>=1.0.2",
 ]
 
 [project.optional-dependencies]

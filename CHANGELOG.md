@@ -7,6 +7,17 @@
 
 ---
 
+## v1.0.14 - 2026-05-24
+
+### 新增功能
+
+- 新增 `backend/scripts/generate_ai_kids_lesson_pptx.py`，可把《小学四年级人工智能奇妙之旅》讲稿 markdown 一键生成可继续编辑文本框内容的 PPTX。
+- 后端依赖新增 `python-pptx`，并补充 `backend/tests/test_generate_ai_kids_lesson_pptx.py`，确保生成课件页数、关键文案和“纯文本框、无图片”输出稳定。
+
+### 验证
+
+- `cd backend && .venv/bin/python -m pytest tests/test_generate_ai_kids_lesson_pptx.py -q`
+
 ## v1.0.13 - 2026-05-10
 
 ### Bug 修复
