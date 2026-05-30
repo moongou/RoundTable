@@ -29,6 +29,38 @@ void main() {
     );
   });
 
+  test('ready prompt keeps the named human cue direct and short', () {
+    expect(
+      ImmersiveSessionScreen.humanTurnReadyPrompt(
+        humanName: '豆苗',
+        hotkeyLabel: 'Alt',
+        autoOpenMic: false,
+        isPushToTalk: false,
+      ),
+      startsWith('李老师：豆苗，你怎么看？'),
+    );
+  });
+
+  test('blank-area cards are centered within the available whitespace', () {
+    expect(
+      ImmersiveSessionScreen.centeredBlankAreaLeft(
+        areaLeft: 24,
+        areaRight: 324,
+        childWidth: 180,
+      ),
+      84,
+    );
+
+    expect(
+      ImmersiveSessionScreen.centeredBlankAreaLeft(
+        areaLeft: 24,
+        areaRight: 180,
+        childWidth: 220,
+      ),
+      24,
+    );
+  });
+
   test('session voice defaults stay on funasr and edge_tts during boot', () {
     expect(
       ImmersiveSessionScreen.defaultAsrProvider,
@@ -752,6 +784,30 @@ void main() {
         '这是一个比较长的用户发言，用来确认分成两页字幕时，保留窗口会被拉长，而不是只有短短三秒就切走。',
       ).inMilliseconds,
       greaterThan(3000),
+    );
+  });
+
+  test('human subtitle switches to floating style with larger type', () {
+    expect(
+      ImmersiveSessionScreen.shouldUseFloatingHumanSubtitle(
+        currentCenterSpeaker: '豆苗',
+        humanName: '豆苗',
+      ),
+      isTrue,
+    );
+    expect(
+      ImmersiveSessionScreen.shouldUseFloatingHumanSubtitle(
+        currentCenterSpeaker: '李老师',
+        humanName: '豆苗',
+      ),
+      isFalse,
+    );
+    expect(
+      ImmersiveSessionScreen.subtitleFontSizeForSpeaker(
+        baseFontSize: 22,
+        isHumanSpeaker: true,
+      ),
+      26,
     );
   });
 

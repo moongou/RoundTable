@@ -255,7 +255,7 @@ String formatHomeSeatBadgeTitle({
 }) {
   if (observerMode) return '旁听席';
   final safeName = humanName.trim().isEmpty ? '同学' : humanName.trim();
-  return '${safeName}的席位';
+  return '$safeName的席位';
 }
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
@@ -415,7 +415,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     final parsed = DateTime.tryParse(text);
     if (parsed == null) return text;
     final local = parsed.toLocal();
-    final two = (int n) => n.toString().padLeft(2, '0');
+    String two(int n) => n.toString().padLeft(2, '0');
     return '${local.year}-${two(local.month)}-${two(local.day)} '
         '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
   }
@@ -427,7 +427,7 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
     if (minutes < 60) return '$minutes 分钟';
     final hours = minutes ~/ 60;
     final remainMinutes = minutes % 60;
-    return '${hours}小时${remainMinutes}分钟';
+    return '$hours小时$remainMinutes分钟';
   }
 
   Future<void> _handleAccountMenuAction(_AccountMenuAction action) async {

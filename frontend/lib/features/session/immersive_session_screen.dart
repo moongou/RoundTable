@@ -80,8 +80,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
   static const String defaultTtsProvider = 'edge_tts';
   static const Duration humanTurnAutoSkipWindow = Duration(seconds: 30);
   static const Duration aiSubtitleLeadIn = Duration.zero;
-  static const Duration openingStartCueMinDuration =
-      Duration(milliseconds: 420);
+  static const Duration openingStartCueMinDuration = Duration(seconds: 12);
   static const int minGoldenQuoteMessages = 4;
   static const int minGoldenQuoteSpeakers = 3;
   static const String teacherDisplayName = '李老师';
@@ -185,7 +184,7 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     required bool autoOpenMic,
     required bool isPushToTalk,
   }) {
-    final teacherCue = '李老师：$humanName，请来谈谈这个话题吧。';
+    final teacherCue = '李老师：$humanName，你怎么看？';
     if (autoOpenMic) {
       return '$teacherCue 麦克风已经准备好，等你准备好后再开始说，也可按 $hotkeyLabel 控制';
     }
@@ -411,6 +410,35 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
         !isRecording &&
         !isCompletingHumanTurn &&
         !isFinalizingSpeech;
+  }
+
+  static double centeredBlankAreaLeft({
+    required double areaLeft,
+    required double areaRight,
+    required double childWidth,
+  }) {
+    final start = min(areaLeft, areaRight);
+    final end = max(areaLeft, areaRight);
+    final availableWidth = max(0.0, end - start);
+    if (availableWidth <= childWidth) {
+      return start;
+    }
+    return start + (availableWidth - childWidth) / 2;
+  }
+
+  static bool shouldUseFloatingHumanSubtitle({
+    required String currentCenterSpeaker,
+    required String humanName,
+  }) {
+    return _canonicalSpeakerName(currentCenterSpeaker) ==
+        _canonicalSpeakerName(humanName);
+  }
+
+  static double subtitleFontSizeForSpeaker({
+    required double baseFontSize,
+    required bool isHumanSpeaker,
+  }) {
+    return isHumanSpeaker ? baseFontSize + 4.0 : baseFontSize;
   }
 
   static String humanTurnIdleReminderText() {
@@ -1953,7 +1981,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     if (items.isEmpty) return;
     _lastPrefetchAt = DateTime.now();
     _scheduleBackgroundTask(() async {
-      await _ttsService.prefetchBatch(items, maxConcurrent: 3);
+      await _ttsService.prefetchBatch(items, maxConcurrent: 4);
     });
     if (kDebugMode) {
       debugPrint('[RuntimePipeline] kickBatchPrefetch items=${items.length}');
@@ -1966,14 +1994,14 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
   }) {
     final now = DateTime.now();
 
-    final upcoming = _collectUpcomingTtsItems(limit: 3);
+    final upcoming = _collectUpcomingTtsItems(limit: 4);
     if (upcoming.isNotEmpty &&
         now.difference(_lastPrefetchAt).inMilliseconds >= 120) {
       _lastPrefetchAt = now;
       _scheduleBackgroundTask(() async {
-        // 开场阶段最常出现"第二句字幕已显示但音频还在合成"导致的停顿。
-        // 提高并发度（2 → 3）后，老师的 1-3 句开场可以并行合成，显著缩短句间空白。
-        await _ttsService.prefetchBatch(upcoming, maxConcurrent: 3);
+        // 开场与紧邻交棒阶段最常出现"第二句字幕已显示但音频还在合成"导致的停顿。
+        // 再把并发度和预取窗口稍微抬高，降低老师开场/点名后的句间空白。
+        await _ttsService.prefetchBatch(upcoming, maxConcurrent: 4);
       });
     }
 
@@ -2258,7 +2286,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final normalized = review.trim();
     if (normalized.isEmpty || !mounted) return;
     setState(() {
-      _lastAutoReadHumanReview = normalized == _humanReview ? _lastAutoReadHumanReview : '';
+      _lastAutoReadHumanReview =
+          normalized == _humanReview ? _lastAutoReadHumanReview : '';
       _humanReview = normalized;
       _humanReviewMuted = false;
       _humanReviewPrefetchStarted = true;
@@ -5760,10 +5789,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     // 需求15：圆桌整体向右移动 100px，左侧留出金句展示区
     final tableCenterX = size.width / 2 + 100;
     final tableCenterY = size.height / 2;
-    // 左侧金句区宽度（从屏幕最左到圆桌左边缘减一点间距）
-    final quoteAreaRight = tableCenterX - tableRadius - 60;
-    // ignore: unused_local_variable
-    final quoteAreaWidth = max(0.0, quoteAreaRight - 24);
+    // 左侧留白区（从屏幕最左到圆桌左边缘减一点间距）
+    final blankAreaLeft = 24.0;
+    final blankAreaRight = tableCenterX - tableRadius - 60;
+    final quoteAreaWidth = max(0.0, blankAreaRight - blankAreaLeft);
     // 需求：老师点评卡比金句侧栏更窄，避免遮挡圆桌/角色图标。
     // 右边缘相对参与者圆环再退 40px，宽度上限 360。
     final reviewCardRightLimit = tableCenterX - (tableRadius + 80) - 40;
@@ -5805,6 +5834,13 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     final openingReflectionPrompt = _buildOpeningReflectionPrompt();
     final openingReflectionWidth =
         min(360.0, max(260.0, size.width * 0.28)).toDouble();
+    final openingReflectionCardWidth =
+        min(openingReflectionWidth, quoteAreaWidth).toDouble();
+    final openingReflectionLeft = ImmersiveSessionScreen.centeredBlankAreaLeft(
+      areaLeft: blankAreaLeft,
+      areaRight: blankAreaRight,
+      childWidth: openingReflectionCardWidth,
+    );
     final openingReflectionTop = max(
       MediaQuery.of(context).padding.top + 132,
       tableCenterY - tableRadius * 0.92,
@@ -5835,12 +5871,40 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         : subtitleAvailable < 220
             ? 18.0
             : 22.0;
+    final showFloatingHumanSubtitle =
+        ImmersiveSessionScreen.shouldUseFloatingHumanSubtitle(
+      currentCenterSpeaker: _centerSpeaker,
+      humanName: widget.humanName,
+    );
+    final floatingHumanSubtitleWidth =
+        min(quoteAreaWidth, min(420.0, max(300.0, quoteAreaWidth * 0.88)))
+            .toDouble();
+    final floatingHumanSubtitleLeft =
+        ImmersiveSessionScreen.centeredBlankAreaLeft(
+      areaLeft: blankAreaLeft,
+      areaRight: blankAreaRight,
+      childWidth: floatingHumanSubtitleWidth,
+    );
+    final effectiveSubtitleFontSize =
+        ImmersiveSessionScreen.subtitleFontSizeForSpeaker(
+      baseFontSize: subtitleFontSize,
+      isHumanSpeaker: showFloatingHumanSubtitle,
+    );
+    final subtitleRenderWidth =
+        showFloatingHumanSubtitle ? floatingHumanSubtitleWidth : subtitleWidth;
+    final subtitleMeasureWidth = max(
+      120.0,
+      subtitleRenderWidth - (showFloatingHumanSubtitle ? 44.0 : 80.0),
+    );
     final subtitleLineCount = _estimateSubtitleLineCount(
       context,
       '$_centerSpeaker：$_centerMessage',
-      maxWidth: subtitleWidth - 80,
-      style: TextStyle(fontSize: subtitleFontSize, height: 1.9),
-      maxLines: 3,
+      maxWidth: subtitleMeasureWidth,
+      style: TextStyle(
+        fontSize: effectiveSubtitleFontSize,
+        height: showFloatingHumanSubtitle ? 1.65 : 1.9,
+      ),
+      maxLines: showFloatingHumanSubtitle ? 4 : 3,
     );
     // 需求：当字幕达到 3 行时，把首行向下移动约 30px，避免遮挡圆桌人物图案。
     // 实现：减少 subtitleBottom（即整体下移），由文字 bottomCenter 对齐自然把首行下移。
@@ -5850,16 +5914,34 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
             ? 40.0
             : 36.0;
     // 行距：3 行时压紧，避免向上溢出
-    final subtitleLineHeight = subtitleLineCount >= 3
-        ? 1.55
-        : subtitleLineCount == 2
-            ? 1.8
-            : 1.7;
+    final subtitleLineHeight = showFloatingHumanSubtitle
+        ? (subtitleLineCount >= 4
+            ? 1.46
+            : subtitleLineCount >= 3
+                ? 1.52
+                : 1.58)
+        : subtitleLineCount >= 3
+            ? 1.55
+            : subtitleLineCount == 2
+                ? 1.8
+                : 1.7;
     // 需求19：若字幕超过 2 行，按 page 自动翻页显示
     _maybeAdvanceSubtitlePage(
       fullText: '$_centerSpeaker：$_centerMessage',
-      maxWidth: subtitleWidth - 80,
+      maxWidth: subtitleMeasureWidth,
       lineHeight: subtitleLineHeight,
+    );
+    final quickFeedbackWidth =
+        min(quoteAreaWidth, min(300.0, max(240.0, quoteAreaWidth * 0.82)))
+            .toDouble();
+    final quickFeedbackLeft = ImmersiveSessionScreen.centeredBlankAreaLeft(
+      areaLeft: blankAreaLeft,
+      areaRight: blankAreaRight,
+      childWidth: quickFeedbackWidth,
+    );
+    final humanSubtitleTop = max(
+      MediaQuery.of(context).padding.top + 212,
+      tableCenterY - 54,
     );
 
     return KeyboardListener(
@@ -6111,8 +6193,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
               if (showOpeningReflectionCard)
                 Positioned(
                   top: openingReflectionTop,
-                  left: 18,
-                  width: openingReflectionWidth,
+                  left: openingReflectionLeft,
+                  width: openingReflectionCardWidth,
                   child: IgnorePointer(
                     child: Container(
                       padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
@@ -6222,8 +6304,8 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                     MediaQuery.of(context).padding.top + 124,
                     tableCenterY - 56,
                   ),
-                  left: 16,
-                  width: min(280.0, size.width * 0.24),
+                  left: quickFeedbackLeft,
+                  width: quickFeedbackWidth,
                   child: IgnorePointer(
                     child: AnimatedSlide(
                       duration: const Duration(milliseconds: 180),
@@ -6483,55 +6565,76 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                 ),
               ),
 
-              // ── 字幕区：直接印在圆桌下方，无黑色背景，仅靠文字描边阴影保证可读 ──
+              // ── 字幕区：AI 保持圆桌下方；真人发言改为左侧留白区居中上浮显示 ──
               if (_centerSpeaker.isNotEmpty && _centerMessage.isNotEmpty)
-                Positioned(
-                  bottom: subtitleBottom + 38,
-                  left: (size.width - subtitleWidth) / 2,
-                  width: subtitleWidth,
-                  child: IgnorePointer(
-                    child: Container(
-                      padding: const EdgeInsets.fromLTRB(40, 12, 40, 12),
-                      child: Align(
-                        alignment: Alignment.bottomCenter,
-                        child: RichText(
-                          textAlign: TextAlign.center,
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                          text: TextSpan(
+                if (showFloatingHumanSubtitle)
+                  Positioned(
+                    top: humanSubtitleTop,
+                    left: floatingHumanSubtitleLeft,
+                    width: floatingHumanSubtitleWidth,
+                    child: IgnorePointer(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 240),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (child, animation) {
+                          final offsetAnimation = Tween<Offset>(
+                            begin: const Offset(0, 0.16),
+                            end: Offset.zero,
+                          ).animate(animation);
+                          return FadeTransition(
+                            opacity: animation,
+                            child: SlideTransition(
+                              position: offsetAnimation,
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: Container(
+                          key: ValueKey<String>(
+                            'human-subtitle:$_centerSpeaker:$_displayedSubtitleMessage',
+                          ),
+                          padding: const EdgeInsets.fromLTRB(22, 18, 22, 20),
+                          decoration: BoxDecoration(
+                            color: const Color(0xD9131B28),
+                            borderRadius: BorderRadius.circular(26),
+                            border: Border.all(
+                              color: const Color(0xFF7FD7C4)
+                                  .withValues(alpha: 0.34),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.18),
+                                blurRadius: 22,
+                                offset: const Offset(0, 14),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              TextSpan(
-                                text: '$_centerSpeaker：',
-                                style: TextStyle(
-                                  color: const Color(0xFF4FC3F7),
-                                  fontSize: subtitleFontSize,
-                                  fontWeight: FontWeight.bold,
-                                  height: subtitleLineHeight,
-                                  fontFamilyFallback: AppTheme.cjkFontFallback,
-                                  // 需求5：去掉黑色背景与大范围黑影，仅保留极细描边保持可读
-                                  shadows: [
-                                    Shadow(
-                                        color: Colors.black
-                                            .withValues(alpha: 0.55),
-                                        blurRadius: 2,
-                                        offset: const Offset(0, 1)),
-                                  ],
+                              Text(
+                                '$_centerSpeaker：',
+                                textAlign: TextAlign.center,
+                                style: _sessionSansStyle(
+                                  color: const Color(0xFF8FE8D3)
+                                      .withValues(alpha: 0.96),
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0.6,
                                 ),
                               ),
-                              TextSpan(
-                                text: _displayedSubtitleMessage,
-                                style: TextStyle(
+                              const SizedBox(height: 10),
+                              Text(
+                                _displayedSubtitleMessage,
+                                textAlign: TextAlign.center,
+                                maxLines: 4,
+                                overflow: TextOverflow.ellipsis,
+                                style: _sessionSerifStyle(
                                   color: Colors.white,
-                                  fontSize: subtitleFontSize,
+                                  fontSize: effectiveSubtitleFontSize,
+                                  fontWeight: FontWeight.w700,
                                   height: subtitleLineHeight,
-                                  fontFamilyFallback: AppTheme.cjkFontFallback,
-                                  shadows: [
-                                    Shadow(
-                                        color: Colors.black
-                                            .withValues(alpha: 0.55),
-                                        blurRadius: 2,
-                                        offset: const Offset(0, 1)),
-                                  ],
                                 ),
                               ),
                             ],
@@ -6539,8 +6642,67 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         ),
                       ),
                     ),
+                  )
+                else
+                  Positioned(
+                    bottom: subtitleBottom + 38,
+                    left: (size.width - subtitleWidth) / 2,
+                    width: subtitleWidth,
+                    child: IgnorePointer(
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(40, 12, 40, 12),
+                        child: Align(
+                          alignment: Alignment.bottomCenter,
+                          child: RichText(
+                            textAlign: TextAlign.center,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            text: TextSpan(
+                              children: [
+                                TextSpan(
+                                  text: '$_centerSpeaker：',
+                                  style: TextStyle(
+                                    color: const Color(0xFF4FC3F7),
+                                    fontSize: effectiveSubtitleFontSize,
+                                    fontWeight: FontWeight.bold,
+                                    height: subtitleLineHeight,
+                                    fontFamilyFallback:
+                                        AppTheme.cjkFontFallback,
+                                    shadows: [
+                                      Shadow(
+                                        color: Colors.black
+                                            .withValues(alpha: 0.55),
+                                        blurRadius: 2,
+                                        offset: const Offset(0, 1),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                TextSpan(
+                                  text: _displayedSubtitleMessage,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: effectiveSubtitleFontSize,
+                                    height: subtitleLineHeight,
+                                    fontFamilyFallback:
+                                        AppTheme.cjkFontFallback,
+                                    shadows: [
+                                      Shadow(
+                                        color: Colors.black
+                                            .withValues(alpha: 0.55),
+                                        blurRadius: 2,
+                                        offset: const Offset(0, 1),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
 
               // ── 轮到我发光指示 ──
               if (_isMyTurn)
