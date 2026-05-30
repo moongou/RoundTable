@@ -687,6 +687,7 @@ def test_floor_manager_discussion_metrics_tracks_shares_and_warnings() -> None:
     floor_manager._human_completed_turn_count = 3
     floor_manager._immediate_post_human_feedback_moderator = 0
     floor_manager._immediate_post_human_feedback_peer = 1
+    floor_manager._speaker_message_count.update({"moderator": 6, "explorer": 1, "豆苗": 3})
 
     metrics = floor_manager.discussion_metrics()
     assert metrics["moderator_turn_share"] == 0.6
@@ -694,6 +695,7 @@ def test_floor_manager_discussion_metrics_tracks_shares_and_warnings() -> None:
     assert metrics["post_human_moderator_feedback_rate"] == 0.0
     warnings_text = "\n".join(metrics["warnings"])
     assert "moderator_turn_share" in warnings_text
+    assert "moderator_share_over_35_percent" in warnings_text
     assert "moderator_nomination_share" not in warnings_text
     assert "post_human_moderator_feedback_rate" not in warnings_text
 
@@ -4894,6 +4896,29 @@ def test_floor_manager_final_praise_does_not_quote_truncated_highlights() -> Non
     assert "提到“" not in closing
     assert "想到“" not in closing
     assert "标准答案是谁定的" in closing
+
+
+def test_floor_manager_final_praise_skips_meta_complaint_highlights() -> None:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name="moderator")],
+        human_agents=[SimpleNamespace(name="豆苗")],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map({"moderator": "老师", "豆苗": "豆苗"})
+    floor_manager._recent_human_turn_summaries["豆苗"] = [
+        "老师，你怎么把麦克风突然就给我了，我还没准备好呢。",
+        "树木也会呼吸、会长大，所以我觉得它们也算是有生命的。",
+    ]
+    floor_manager._speaker_message_count["豆苗"] = 2
+
+    closing = floor_manager._build_grounded_moderator_final_closing("今天到这里。")
+
+    # 元提问/抱怨不应被当成观点夸出来
+    assert "麦克风" not in closing
+    assert "突然就给我" not in closing
+    # 真正的观点应当保留
+    assert "树木也会呼吸" in closing
 
 
 def test_floor_manager_smart_fallback_honors_expected_ai_speaker() -> None:

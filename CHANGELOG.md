@@ -7,6 +7,27 @@
 
 ---
 
+## v1.0.15 - 2026-05-31
+
+### 新增功能
+
+- 新增确定性规则内核 `backend/app/core/discussion_rules.py`，把讨论核心规则抽成可
+  单测的纯函数：开场背景包络(20-40 秒+背景引导)、人类麦克风授权开启、引用接地校验
+  (核对被引片段是否真的出现在该角色历史发言中)、发言均衡告警、收尾点评触发条件。
+  配套 `backend/tests/test_discussion_rules.py` 锁定行为。
+
+### Bug 修复
+
+- 沉浸式讨论中用户发言字幕与开场提醒词改为背景墙无框旁白呈现（去掉文本框/边框），
+  开场与默想引导语改写为更贴合小朋友的口吻。
+- 收尾点评不再把对系统/麦克风/流程的元提问或抱怨（如“你怎么把麦克风突然就给我了”）
+  当作认真的观点夸奖，只保留真正与议题相关的发言要点。
+
+### 验证
+
+- `./backend/.venv/bin/python -m pytest backend/tests/test_discussion_rules.py backend/tests/test_acceptance_guards.py -q`（247 passed）
+- `cd frontend && flutter analyze --no-pub lib/features/session/immersive_session_screen.dart`
+
 ## v1.0.14 - 2026-05-24
 
 ### 新增功能

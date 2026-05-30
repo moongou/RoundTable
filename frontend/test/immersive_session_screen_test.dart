@@ -61,6 +61,18 @@ void main() {
     );
   });
 
+  test('opening reflection narration uses cinematic bare text styling', () {
+    final style = ImmersiveSessionScreen.openingReflectionNarrationStyle(
+      showOpeningStartCue: true,
+      fontSize: 24,
+    );
+
+    expect(style.fontSize, 24);
+    expect(style.fontWeight, FontWeight.w600);
+    expect(style.shadows, isNotNull);
+    expect(style.shadows!.length, greaterThanOrEqualTo(2));
+  });
+
   test('session voice defaults stay on funasr and edge_tts during boot', () {
     expect(
       ImmersiveSessionScreen.defaultAsrProvider,

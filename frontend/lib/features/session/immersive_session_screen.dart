@@ -236,6 +236,34 @@ class ImmersiveSessionScreen extends ConsumerStatefulWidget {
     }
   }
 
+  static TextStyle openingReflectionNarrationStyle({
+    required bool showOpeningStartCue,
+    required double fontSize,
+  }) {
+    final inkColor = showOpeningStartCue
+        ? const Color(0xFFFFD3A3)
+        : Colors.white.withValues(alpha: 0.94);
+    return _sessionSerifStyle(
+      color: inkColor,
+      fontSize: fontSize,
+      fontWeight: FontWeight.w600,
+      height: 1.52,
+    ).copyWith(
+      shadows: [
+        Shadow(
+          color: Colors.black.withValues(alpha: 0.62),
+          blurRadius: 14,
+          offset: const Offset(0, 3),
+        ),
+        Shadow(
+          color: AppColors.amberGold.withValues(alpha: 0.2),
+          blurRadius: 26,
+          offset: Offset.zero,
+        ),
+      ],
+    );
+  }
+
   static bool shouldBlockPendingHumanTurn({
     required bool ttsPlaying,
     required bool ttsServiceSpeaking,
@@ -3032,11 +3060,11 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
         title.runes.fold<int>(0, (sum, rune) => (sum + rune) % 3);
     switch (promptSeed) {
       case 0:
-        return '小朋友，我们马上要讨论“$topicLabel”。这个问题和“$focus”有关，先给自己半分钟，把最想说的一点悄悄想清楚，等会儿带着你的发现加入圆桌。';
+        return '小朋友，我们马上要一起聊“$topicLabel”啦！这件事和“$focus”有关哦。先悄悄给自己半分钟，想一想你最想说的那句话，等会儿带着你的小发现加入大家～';
       case 1:
-        return '等会儿大家要一起聊“$topicLabel”。它关心的是“$focus”，你可以先静静想一想：如果这件事发生在你身边，你最想提醒大家注意什么？';
+        return '等一下我们要围在一起聊“$topicLabel”～它说的是“$focus”。你可以先闭上眼睛想一想：要是这件事就在你身边发生，你最想提醒小伙伴们注意什么呀？';
       default:
-        return '欢迎来到今天的圆桌。我们将要讨论“$topicLabel”，核心就在“$focus”。请先留一点安静时间，把自己的观察、感受和理由慢慢组织好。';
+        return '欢迎来到今天的圆桌，小朋友！我们要聊的是“$topicLabel”，最有意思的地方就在“$focus”。先安安静静想一会儿，把你看到的、感觉到的、还有为什么这么想，慢慢理一理～';
     }
   }
 
@@ -6147,42 +6175,34 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                         duration: const Duration(milliseconds: 220),
                         switchInCurve: Curves.easeOutCubic,
                         switchOutCurve: Curves.easeInCubic,
-                        child: Container(
+                        child: Text(
                           key: ValueKey(
                             showOpeningStartCue
                                 ? 'opening-start'
                                 : 'opening-preparing',
                           ),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 18, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: AppColors.studyWall.withValues(alpha: 0.76),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: showOpeningStartCue
-                                  ? const Color(0xFFFFB37A)
-                                      .withValues(alpha: 0.42)
-                                  : AppColors.amberGold.withValues(alpha: 0.34),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.18),
-                                blurRadius: 10,
+                          showOpeningStartCue ? '马上开始啦，坐好咯～' : '小朋友，马上就开始啦……',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: showOpeningStartCue
+                                ? const Color(0xFFFFC48B)
+                                : AppColors.amberGold.withValues(alpha: 0.95),
+                            fontSize: max(14.0, tableRadius * 0.105),
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.2,
+                            fontFamilyFallback: AppTheme.cjkFontFallback,
+                            shadows: [
+                              Shadow(
+                                color: Colors.black.withValues(alpha: 0.7),
+                                blurRadius: 14,
                                 offset: const Offset(0, 3),
                               ),
+                              Shadow(
+                                color: Colors.black.withValues(alpha: 0.5),
+                                blurRadius: 4,
+                                offset: const Offset(0, 1),
+                              ),
                             ],
-                          ),
-                          child: Text(
-                            showOpeningStartCue ? '开场马上开始' : '正在准备开场……',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: showOpeningStartCue
-                                  ? const Color(0xFFFFC48B)
-                                  : AppColors.amberGold.withValues(alpha: 0.92),
-                              fontSize: max(14.0, tableRadius * 0.105),
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.2,
-                            ),
                           ),
                         ),
                       ),
@@ -6196,49 +6216,36 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                   left: openingReflectionLeft,
                   width: openingReflectionCardWidth,
                   child: IgnorePointer(
-                    child: Container(
-                      padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
-                      decoration: BoxDecoration(
-                        color: const Color(0xD9121A28),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(
-                          color: showOpeningStartCue
-                              ? const Color(0xFFFFC48B).withValues(alpha: 0.4)
-                              : AppColors.amberGold.withValues(alpha: 0.28),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          showOpeningStartCue ? '准备好了，一起开始' : '讨论前先想一想',
+                          style: _sessionSansStyle(
+                            color: AppColors.amberGold.withValues(alpha: 0.9),
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.8,
+                          ).copyWith(
+                            shadows: [
+                              Shadow(
+                                color: Colors.black.withValues(alpha: 0.48),
+                                blurRadius: 10,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
                         ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.2),
-                            blurRadius: 18,
-                            offset: const Offset(0, 8),
+                        const SizedBox(height: 12),
+                        Text(
+                          openingReflectionPrompt,
+                          style: ImmersiveSessionScreen
+                              .openingReflectionNarrationStyle(
+                            showOpeningStartCue: showOpeningStartCue,
+                            fontSize: openingReflectionFontSize,
                           ),
-                        ],
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            showOpeningStartCue ? '准备好了，一起开始' : '讨论前先想一想',
-                            style: _sessionSansStyle(
-                              color:
-                                  AppColors.amberGold.withValues(alpha: 0.92),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.2,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          Text(
-                            openingReflectionPrompt,
-                            style: _sessionSerifStyle(
-                              color: Colors.white.withValues(alpha: 0.94),
-                              fontSize: openingReflectionFontSize,
-                              fontWeight: FontWeight.w600,
-                              height: 1.48,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -6590,55 +6597,64 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
                             ),
                           );
                         },
-                        child: Container(
+                        child: Column(
                           key: ValueKey<String>(
                             'human-subtitle:$_centerSpeaker:$_displayedSubtitleMessage',
                           ),
-                          padding: const EdgeInsets.fromLTRB(22, 18, 22, 20),
-                          decoration: BoxDecoration(
-                            color: const Color(0xD9131B28),
-                            borderRadius: BorderRadius.circular(26),
-                            border: Border.all(
-                              color: const Color(0xFF7FD7C4)
-                                  .withValues(alpha: 0.34),
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Text(
+                              '$_centerSpeaker：',
+                              textAlign: TextAlign.center,
+                              style: _sessionSansStyle(
+                                color: const Color(0xFF8FE8D3)
+                                    .withValues(alpha: 0.98),
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.6,
+                              ).copyWith(
+                                shadows: [
+                                  Shadow(
+                                    color: Colors.black.withValues(alpha: 0.72),
+                                    blurRadius: 12,
+                                    offset: const Offset(0, 2),
+                                  ),
+                                  Shadow(
+                                    color: Colors.black.withValues(alpha: 0.5),
+                                    blurRadius: 3,
+                                    offset: const Offset(0, 1),
+                                  ),
+                                ],
+                              ),
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.18),
-                                blurRadius: 22,
-                                offset: const Offset(0, 14),
+                            const SizedBox(height: 10),
+                            Text(
+                              _displayedSubtitleMessage,
+                              textAlign: TextAlign.center,
+                              maxLines: 6,
+                              overflow: TextOverflow.ellipsis,
+                              style: _sessionSerifStyle(
+                                color: Colors.white,
+                                fontSize: effectiveSubtitleFontSize,
+                                fontWeight: FontWeight.w700,
+                                height: subtitleLineHeight,
+                              ).copyWith(
+                                shadows: [
+                                  Shadow(
+                                    color: Colors.black.withValues(alpha: 0.78),
+                                    blurRadius: 14,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                  Shadow(
+                                    color: Colors.black.withValues(alpha: 0.55),
+                                    blurRadius: 4,
+                                    offset: const Offset(0, 1),
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                '$_centerSpeaker：',
-                                textAlign: TextAlign.center,
-                                style: _sessionSansStyle(
-                                  color: const Color(0xFF8FE8D3)
-                                      .withValues(alpha: 0.96),
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 0.6,
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              Text(
-                                _displayedSubtitleMessage,
-                                textAlign: TextAlign.center,
-                                maxLines: 4,
-                                overflow: TextOverflow.ellipsis,
-                                style: _sessionSerifStyle(
-                                  color: Colors.white,
-                                  fontSize: effectiveSubtitleFontSize,
-                                  fontWeight: FontWeight.w700,
-                                  height: subtitleLineHeight,
-                                ),
-                              ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
                       ),
                     ),

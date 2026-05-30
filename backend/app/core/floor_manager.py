@@ -38,6 +38,10 @@ from autogen_agentchat.messages import (
 from autogen_agentchat.teams import SelectorGroupChat
 
 from app.agents.human_proxy import get_human_queue, put_human_input
+from app.core.discussion_rules import (
+    SpeakerBalanceSnapshot,
+    speaker_balance_warnings,
+)
 from app.core.floor_text_utils import (
     extract_core_viewpoint,
     extract_reference_quote,
@@ -587,6 +591,21 @@ class FloorManager:
         )
         if total_turns >= 8 and missing_count > 0:
             warnings.append(f"missing_ai_count={missing_count}(规则13要求每位虚拟角色至少1次发言)")
+
+        balance_snapshot = SpeakerBalanceSnapshot(
+            counts={
+                self._agent_to_display_name.get(name, name): count
+                for name, count in self._speaker_message_count.items()
+            },
+            moderator_name=self._agent_to_display_name.get("moderator", "moderator"),
+            human_names={self._agent_to_display_name.get(name, name) for name in self.human_names},
+            virtual_names={
+                self._agent_to_display_name.get(name, name)
+                for name in self.ai_names
+                if name != "moderator"
+            },
+        )
+        warnings.extend(speaker_balance_warnings(balance_snapshot))
 
         return {
             "total_substantive_turns": total_turns,
@@ -1747,6 +1766,32 @@ class FloorManager:
             "我也觉得",
             "老师",
         )
+        # 规则 5/8：收尾褒奖只能引用真正的观点，过滤掉对系统/麦克风/流程的元提问、
+        # 抱怨或与议题无关的话（例如“你怎么把麦克风突然就给我了”“怎么说两遍”），
+        # 避免把这些当成“认真的观察”夸出来。
+        meta_markers = (
+            "麦克风",
+            "话筒",
+            "轮到我",
+            "突然就给我",
+            "突然让我",
+            "怎么轮到",
+            "说两遍",
+            "说了两遍",
+            "重复",
+            "卡住",
+            "卡了",
+            "听不清",
+            "听不见",
+            "没声音",
+            "听得到吗",
+            "能听到吗",
+            "怎么操作",
+            "按哪里",
+            "这个软件",
+            "这个系统",
+            "退出",
+        )
         for summary in highlights:
             value = (summary or "").strip(" ，,。！？!?；;:：")
             value = re.sub(r"^我接着刚才的讨论[，,]\s*", "", value)
@@ -1755,6 +1800,8 @@ class FloorManager:
             if not normalized or normalized in seen:
                 continue
             if len(normalized) < 6:
+                continue
+            if any(marker in value for marker in meta_markers):
                 continue
             if any(marker in value for marker in weak_markers) and len(normalized) < 14:
                 continue
