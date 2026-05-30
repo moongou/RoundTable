@@ -749,6 +749,7 @@ def analyze_session(
     *,
     scheduled_interrupt: bool = False,
     attempted_interrupt: bool = False,
+    interrupt_acknowledged: bool = False,
 ) -> dict[str, Any]:
     session_dir = RUNTIME_DIR / session_id
     script = json.loads((session_dir / "script.json").read_text(encoding="utf-8"))
@@ -893,7 +894,11 @@ def analyze_session(
         errors.append({"type": "human_turn_missing", "line": 0, "detail": "未找到真人发言请求"})
     elif delay_sec > 180:
         errors.append({"type": "human_turn_timeout", "line": 0, "detail": f"首个真人请求超过3分钟: {delay_sec:.1f}s"})
-    if scheduled_interrupt and interrupt_request_count <= 0:
+    # interrupt_acknowledged 表示后端已对举手回发了 interrupt 受理事件（approved）。
+    # 当举手者此刻已持有发言权时，后端会受理插话但不会再额外发一条 interrupt 理由的
+    # human_input_requested，因此仅凭 interrupt_request_count 会误报。已受理即视为已honored。
+    interrupt_honored = interrupt_request_count > 0 or interrupt_acknowledged
+    if scheduled_interrupt and not interrupt_honored:
         if attempted_interrupt:
             warnings.append(
                 {
@@ -904,7 +909,7 @@ def analyze_session(
             )
         else:
             errors.append({"type": "interrupt_not_honored", "line": 0, "detail": "本轮已模拟真人举手，但历史记录里没有出现 interrupt 授权的人类请求"})
-    elif attempted_interrupt and interrupt_request_count <= 0:
+    elif attempted_interrupt and not interrupt_honored:
         warnings.append(
             {
                 "type": "interrupt_not_honored_runtime",
@@ -1249,6 +1254,7 @@ def run_round(
         session_id,
         scheduled_interrupt=schedule_interrupt,
         attempted_interrupt=interrupt_sent,
+        interrupt_acknowledged=interrupt_ack_count > 0,
     )
     if report.get("status") == "disconnected" and _session_has_moderator_final_goodbye(session_id):
         _mark_runner_completed_session(session_id, reason="final_goodbye_seen")

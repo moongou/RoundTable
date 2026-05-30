@@ -6256,7 +6256,25 @@ class FloorManager:
             FloorState.HUMAN_TURN_WAITING,
             FloorState.HUMAN_SPEAKING,
         ):
-            logger.info("[FloorManager] %s 已经获得发言权，忽略重复举手", display_speaker)
+            # 举手者此刻已经持有发言权（例如刚被主持人点名）：不再重复授予发言权，
+            # 也不另起一次 human_input_requested，以免产生重复发言。但仍需把这次举手
+            # 记为“已受理的插话”，广播插话事件并把当前轮次归因为 interrupt，
+            # 这样前端/历史记录能看到举手已被响应，而不是被静默吞掉。
+            logger.info(
+                "[FloorManager] %s 已持有发言权，将本次举手记为已受理的插话", display_speaker
+            )
+            self._human_hand_raise_count += 1
+            self._pending_human_input_reason = "interrupt"
+            if self._human_hand_raise_notifier is not None:
+                self._human_hand_raise_notifier(speaker_agent_name)
+            if self._on_interrupt:
+                moderator_display = self._agent_to_display_name.get("moderator", "李老师")
+                await self._on_interrupt(
+                    display_speaker,
+                    self.current_speaker or "",
+                    moderator_display,
+                    request_id,
+                )
             return
 
         logger.info(f"打断请求: {display_speaker} 请求发言 (当前发言者: {self.current_speaker})")

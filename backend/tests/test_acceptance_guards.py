@@ -6416,8 +6416,15 @@ async def test_request_interrupt_notifies_callback_with_request_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_interrupt_is_ignored_when_human_turn_is_already_waiting() -> None:
+async def test_request_interrupt_is_acknowledged_when_human_turn_is_already_waiting() -> None:
     hand_raises: list[str] = []
+    interrupt_calls: list[tuple[str, str, str, str]] = []
+
+    async def _on_interrupt(
+        interrupter: str, interrupted: str, moderator: str, request_id: str
+    ) -> None:
+        interrupt_calls.append((interrupter, interrupted, moderator, request_id))
+
     floor_manager = FloorManager(
         team=_TeamStub(),
         ai_agents=[SimpleNamespace(name="moderator")],
@@ -6429,11 +6436,15 @@ async def test_request_interrupt_is_ignored_when_human_turn_is_already_waiting()
     floor_manager.set_display_name_map({"moderator": "李老师", "豆苗": "豆苗"})
     floor_manager.current_speaker = "豆苗"
     floor_manager.state = FloorState.HUMAN_TURN_WAITING
+    floor_manager.on_interrupt(_on_interrupt)
 
-    await floor_manager.request_interrupt("豆苗")
+    await floor_manager.request_interrupt("豆苗", request_id="int-1")
 
-    assert hand_raises == []
+    # 举手者已经持有发言权：不改变发言状态，但本次举手应被受理并广播，
+    # 而不是被静默吞掉（保证前端/历史记录可见插话已被响应）。
     assert floor_manager.state == FloorState.HUMAN_TURN_WAITING
+    assert hand_raises == ["豆苗"]
+    assert interrupt_calls == [("豆苗", "豆苗", "李老师", "int-1")]
 
 
 def test_turn_scheduler_reasks_closing_question_after_single_new_follow_up() -> None:

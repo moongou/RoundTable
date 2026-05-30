@@ -7,6 +7,23 @@
 
 ---
 
+## v1.0.18 - 2026-06-01
+
+### Bug 修复
+
+- 修复「举手者已经持有发言权时，插话请求被静默吞掉」导致的可观测性缺口。当人类此刻
+  正好被主持人点名（处于 `HUMAN_TURN_WAITING/HUMAN_SPEAKING`）又同时发来 `interrupt`
+  举手时，`FloorManager.request_interrupt` 过去会直接 `return`，既不广播也不计数，致使
+  前端/历史记录看不到这次举手被响应，离线质量审计也会把这类「实际已让人类发言」的轮次
+  误报为 `interrupt_not_honored` 硬错误。
+  - `floor_manager.py`：碰撞分支不再静默返回，改为受理本次举手——累加举手计数、把当前轮
+    归因为 `interrupt`、触发举手通知并广播 `on_interrupt` 受理事件；不重复授予发言权、不
+    另起 `human_input_requested`，因此不会产生重复发言。
+  - 审计脚本 `simulate_10_rounds_quality_audit.py`：荣誉判定改为「出现 interrupt 理由的人类
+    请求 **或** 已收到 interrupt 受理事件」即视为已honored，消除上述误报，同时保留对真正
+    被忽略插话的检测能力。
+  - 更新插话受理回归用例，断言碰撞场景下举手被受理并广播（而非静默忽略）。
+
 ## v1.0.17 - 2026-06-01
 
 ### Bug 修复
