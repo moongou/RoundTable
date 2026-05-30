@@ -15,9 +15,60 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+_AUTOGEN_SHUTDOWN_FILTER_INSTALLED = False
+
 # Flutter Web 构建产物目录
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 ADMIN_PANEL_DIR = Path(__file__).resolve().parent.parent / "admin_panel"
+
+
+class _AutogenShutdownNoiseFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.name.startswith("autogen_core"):
+            return True
+        if not record.getMessage().startswith("Error processing publish message"):
+            return True
+        exc_type = record.exc_info[0] if record.exc_info else None
+        return not (exc_type is not None and issubclass(exc_type, asyncio.CancelledError))
+
+
+def _is_autogen_run_context_pending(context: dict) -> bool:
+    message = str(context.get("message") or "")
+    if "Task was destroyed but it is pending" not in message:
+        return False
+    task = context.get("task") or context.get("future")
+    get_coro = getattr(task, "get_coro", None)
+    if not callable(get_coro):
+        return False
+    coro = get_coro()
+    code = getattr(coro, "cr_code", None)
+    filename = str(getattr(code, "co_filename", ""))
+    qualname = str(getattr(coro, "__qualname__", ""))
+    return "autogen_core" in filename and qualname == "RunContext._run"
+
+
+def _install_autogen_shutdown_noise_guards() -> None:
+    global _AUTOGEN_SHUTDOWN_FILTER_INSTALLED
+    if not _AUTOGEN_SHUTDOWN_FILTER_INSTALLED:
+        logging.getLogger("autogen_core").addFilter(_AutogenShutdownNoiseFilter())
+        _AUTOGEN_SHUTDOWN_FILTER_INSTALLED = True
+
+    loop = asyncio.get_running_loop()
+    if getattr(loop, "_roundtable_autogen_shutdown_handler", False):
+        return
+    previous_handler = loop.get_exception_handler()
+
+    def _handle_loop_exception(active_loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        if _is_autogen_run_context_pending(context):
+            logger.debug("suppressed AutoGen RunContext pending-task shutdown noise")
+            return
+        if previous_handler is not None:
+            previous_handler(active_loop, context)
+            return
+        active_loop.default_exception_handler(context)
+
+    setattr(loop, "_roundtable_autogen_shutdown_handler", True)
+    loop.set_exception_handler(_handle_loop_exception)
 
 
 async def _startup_preload():
@@ -90,6 +141,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # Startup
     print(f"RoundTable 启动中... LLM 提供商: {settings.llm_provider}")
+    _install_autogen_shutdown_noise_guards()
 
     # 后台预加载（不阻塞启动）
     asyncio.create_task(_startup_preload())

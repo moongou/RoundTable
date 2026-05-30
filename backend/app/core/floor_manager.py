@@ -48,7 +48,11 @@ from app.core.floor_text_utils import (
 from app.core.llm_errors import describe_model_error
 from app.core.rolling_summary_memory import HumanResponseGuidanceMemory, RollingSummaryMemory
 from app.core.safety_filter import SafetyFilter
-from app.core.turn_scheduler import create_discussion_team, set_designated_speaker, parse_speaker_designation
+from app.core.turn_scheduler import (
+    create_discussion_team,
+    set_designated_speaker,
+    parse_speaker_designation,
+)
 from app.core.turn_scheduler import is_generic_nomination
 
 logger = logging.getLogger(__name__)
@@ -90,7 +94,7 @@ class FloorManager:
     """
 
     _STREAM_SENTENCE_ENDINGS = frozenset("。！？!?；;")
-    _STREAM_CLOSING_CHARS = frozenset('"\'”’）)]】》」』')
+    _STREAM_CLOSING_CHARS = frozenset("\"'”’）)]】》」』")
     _META_REASONING_PATTERNS = (
         re.compile(r"</?think>", re.IGNORECASE),
         re.compile(
@@ -109,9 +113,9 @@ class FloorManager:
         re.compile(r"（([^）\n]{1,220})）"),
     )
     _MODERATOR_REGULAR_SENTENCE_LIMIT = 1
-    _MODERATOR_INVITE_SENTENCE_LIMIT = 2
+    _MODERATOR_INVITE_SENTENCE_LIMIT = 1
     _MODERATOR_CLOSING_SENTENCE_LIMIT = 2
-    _MODERATOR_OPENING_SENTENCE_LIMIT = 6
+    _MODERATOR_OPENING_SENTENCE_LIMIT = 2
     _FIRST_HUMAN_MIN_WARMUP_TURNS = 1
     _FIRST_HUMAN_MAX_WAIT_SEC = 120.0
     _HUMAN_TURN_MIN_TARGET = 5
@@ -123,10 +127,10 @@ class FloorManager:
     _MODERATOR_TURN_SHARE_TARGET_MAX = 0.40
     _MODERATOR_TURN_SHARE_WARN_OVER = 0.45
     # 规则 11：老师点名占比软目标约 80%。
-    _MODERATOR_NOMINATION_SHARE_TARGET = 0.80
-    _MODERATOR_NOMINATION_SHARE_WARN_BELOW = 0.65
-    # 规则 7：真人发言后老师立即接住的最低占比软目标。
-    _POST_HUMAN_MODERATOR_FEEDBACK_TARGET = 0.50
+    _MODERATOR_NOMINATION_SHARE_TARGET = 0.50
+    _MODERATOR_NOMINATION_SHARE_WARN_BELOW = 0.0
+    # 规则 7：真人发言后保留少量老师兜底，其余交给同学/思想家推进。
+    _POST_HUMAN_MODERATOR_FEEDBACK_TARGET = 0.0
     _MODERATOR_END_MARKERS = (
         "讨论结束",
         "就到这里",
@@ -222,7 +226,11 @@ class FloorManager:
     # Bound how long we wait for a cancelled stream __anext__ task to acknowledge
     # cancellation. Some model streams can ignore cancellation for a while, and
     # owner-loop recovery must not block indefinitely on that wait.
-    _PENDING_WAIT_CANCEL_TIMEOUT_SEC = 0.5
+    _PENDING_WAIT_CANCEL_TIMEOUT_SEC = 2.0
+    _TEAM_CONTROL_DRAIN_TIMEOUT_SEC = 0.75
+    _TEAM_CONTROL_CANCEL_GRACE_SEC = 0.5
+    _TEAM_STREAM_CLOSE_TIMEOUT_SEC = 1.2
+    _TEAM_STREAM_CLOSE_CANCEL_GRACE_SEC = 0.5
 
     def __init__(
         self,
@@ -329,6 +337,7 @@ class FloorManager:
         self._deferred_human_request_speaker: Optional[str] = None
         self._deferred_human_request_reason = ""
         self._pending_continuation_task: Optional[str] = None
+        self._pending_moderator_human_invite_target: Optional[str] = None
 
         # Stalled watchdog: detect no-progress windows and auto-recover human wait stalls.
         self._watchdog_task: Optional[asyncio.Task] = None
@@ -338,7 +347,7 @@ class FloorManager:
         self._stall_check_interval_sec = 2.0
         # Keep backend recovery below common WebSocket/client idle waits so the
         # server emits a recovery event before clients conclude the discussion is stuck.
-        self._general_stall_timeout_sec = min(24.0, max(12.0, float(human_timeout) / 4.0))
+        self._general_stall_timeout_sec = min(42.0, max(24.0, float(human_timeout) / 2.0))
         self._deferred_human_request_timeout_sec = max(4.0, min(8.0, float(human_timeout) / 2.0))
         self._submitted_human_input_recovery_timeout_sec = 2.0
         # 需求11：用户要求 30 秒未发言自动跳过。与前端倒计时保持一致。
@@ -376,6 +385,9 @@ class FloorManager:
         self._stream_restart_gate = asyncio.Event()
         self._blocked_for_human_input = False
         self._active_stream_next_event_task: Optional[asyncio.Task[Any]] = None
+        self._team_control_tasks: set[asyncio.Task[Any]] = set()
+        self._cancelled_wait_tasks: set[asyncio.Task[Any]] = set()
+        self._repeated_non_moderator_drop_log_keys: set[tuple[str, str, str]] = set()
         self._run_loop_active = False
         self._pending_run_events: list[dict] = []
         self._team_rebuild_requested = False
@@ -413,14 +425,101 @@ class FloorManager:
                 return
 
             task = loop.create_task(result)
+            self._team_control_tasks.add(task)
+            task.add_done_callback(self._consume_team_control_task_result)
 
-            def _log_failure(done: asyncio.Task) -> None:
-                try:
-                    done.result()
-                except Exception:
-                    logger.debug("team control task raised", exc_info=True)
+    def _consume_team_control_task_result(self, done: asyncio.Task[Any]) -> None:
+        self._team_control_tasks.discard(done)
+        try:
+            done.result()
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        except Exception:
+            logger.debug("team control task raised", exc_info=True)
 
-            task.add_done_callback(_log_failure)
+    def _consume_cancelled_wait_task_result(self, done: asyncio.Task[Any]) -> None:
+        self._cancelled_wait_tasks.discard(done)
+        try:
+            done.result()
+        except (asyncio.CancelledError, StopAsyncIteration, GeneratorExit):
+            pass
+        except Exception:
+            logger.debug("cancelled team wait task raised", exc_info=True)
+
+    def _consume_autogen_background_task_result(self, done: asyncio.Task[Any]) -> None:
+        try:
+            done.result()
+        except (asyncio.CancelledError, StopAsyncIteration, GeneratorExit):
+            pass
+        except ValueError as exc:
+            if "task_done() called too many times" in str(exc):
+                logger.debug("suppressed AutoGen runtime shutdown queue accounting noise")
+            else:
+                logger.debug("AutoGen background task raised ValueError", exc_info=True)
+        except Exception:
+            logger.debug("AutoGen background task raised during shutdown", exc_info=True)
+
+    async def _cancel_autogen_background_tasks(self, runtime: Any) -> None:
+        tasks = [
+            task
+            for task in list(getattr(runtime, "_background_tasks", set()) or set())
+            if isinstance(task, asyncio.Task) and not task.done()
+        ]
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+            task.add_done_callback(self._consume_autogen_background_task_result)
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=self._TEAM_CONTROL_CANCEL_GRACE_SEC,
+        )
+        for task in pending:
+            task.add_done_callback(self._consume_autogen_background_task_result)
+
+    async def _force_stop_autogen_runtime(self, team: Any, *, reason: str) -> None:
+        runtime = getattr(team, "_runtime", None)
+        if runtime is None:
+            return
+        await self._cancel_autogen_background_tasks(runtime)
+        run_context = getattr(runtime, "_run_context", None)
+        if run_context is None:
+            return
+        stop = getattr(runtime, "stop", None)
+        if not callable(stop):
+            return
+        try:
+            await stop()
+            logger.info("[FloorManager] force-stopped AutoGen runtime after %s", reason)
+        except RuntimeError:
+            logger.debug("AutoGen runtime already stopped after %s", reason, exc_info=True)
+        except ValueError as exc:
+            if "task_done() called too many times" in str(exc):
+                logger.debug("suppressed AutoGen runtime stop queue accounting noise")
+            else:
+                logger.debug("AutoGen runtime stop raised ValueError", exc_info=True)
+        except Exception:
+            logger.debug("AutoGen runtime stop failed after %s", reason, exc_info=True)
+
+    async def _drain_background_team_tasks(self) -> None:
+        tasks = [
+            task
+            for task in (*self._team_control_tasks, *self._cancelled_wait_tasks)
+            if not task.done()
+        ]
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=self._TEAM_CONTROL_DRAIN_TIMEOUT_SEC,
+        )
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.wait(
+                pending,
+                timeout=self._TEAM_CONTROL_CANCEL_GRACE_SEC,
+            )
 
     def diagnostics(self) -> dict[str, Any]:
         spoken_display_names = sorted(self._get_spoken_display_names())
@@ -454,26 +553,32 @@ class FloorManager:
 
         total_nominations = self._moderator_nomination_count + self._peer_nomination_count
         moderator_nomination_share = (
-            self._moderator_nomination_count / total_nominations
-        ) if total_nominations > 0 else 0.0
+            (self._moderator_nomination_count / total_nominations) if total_nominations > 0 else 0.0
+        )
 
         total_post_human = self._human_completed_turn_count
         moderator_feedback_rate = (
-            self._immediate_post_human_feedback_moderator / total_post_human
-        ) if total_post_human > 0 else 0.0
+            (self._immediate_post_human_feedback_moderator / total_post_human)
+            if total_post_human > 0
+            else 0.0
+        )
 
         warnings: list[str] = []
         if total_turns >= 6 and moderator_share > self._MODERATOR_TURN_SHARE_WARN_OVER:
+            warnings.append(f"moderator_turn_share={moderator_share:.2f}超出建议范围(0.30-0.40)")
+        if (
+            total_nominations >= 4
+            and moderator_nomination_share < self._MODERATOR_NOMINATION_SHARE_WARN_BELOW
+        ):
             warnings.append(
-                f"moderator_turn_share={moderator_share:.2f}超出建议范围(0.30-0.40)"
+                f"moderator_nomination_share={moderator_nomination_share:.2f}偏低(目标≈0.50)"
             )
-        if total_nominations >= 4 and moderator_nomination_share < self._MODERATOR_NOMINATION_SHARE_WARN_BELOW:
+        if (
+            total_post_human >= 2
+            and moderator_feedback_rate < self._POST_HUMAN_MODERATOR_FEEDBACK_TARGET
+        ):
             warnings.append(
-                f"moderator_nomination_share={moderator_nomination_share:.2f}偏低(目标≈0.80)"
-            )
-        if total_post_human >= 2 and moderator_feedback_rate < self._POST_HUMAN_MODERATOR_FEEDBACK_TARGET:
-            warnings.append(
-                f"post_human_moderator_feedback_rate={moderator_feedback_rate:.2f}偏低(目标≥0.50)"
+                f"post_human_moderator_feedback_rate={moderator_feedback_rate:.2f}偏低(目标≥0.00)"
             )
         missing_count = sum(
             1
@@ -544,25 +649,26 @@ class FloorManager:
 
     def _build_moderator_opening_baseline(self) -> str:
         focus = (self._topic_focus_label() or "").rstrip("。！？!?")
-        topic_lines = [line.strip() for line in (self._current_topic or "").splitlines() if line.strip()]
+        topic_lines = [
+            line.strip() for line in (self._current_topic or "").splitlines() if line.strip()
+        ]
         detail = topic_lines[1] if len(topic_lines) >= 2 else ""
         detail = re.sub(r"^(背景|情境|提示|思考题|讨论题)[:：]\s*", "", detail)
         detail = detail.strip().rstrip("。！？!?")
         if len(detail) > 48:
             detail = detail[:48].rstrip("，,；;、 ") + "…"
 
-        opening_parts = ["同学们好！我是李老师。"]
+        opening_parts = []
         if focus:
-            opening_parts.append(f"今天我们来聊聊“{focus}”。")
+            opening_parts.append(f"同学们好，我是李老师，今天我们来聊聊“{focus}”。")
         else:
-            opening_parts.append("今天我们来聊一个生活里常会碰到的问题。")
+            opening_parts.append("同学们好，我是李老师，今天我们来聊一个生活里常会碰到的问题。")
         if detail:
-            opening_parts.append(f"事情大概是这样：{detail}。")
+            opening_parts.append(f"背景是：{detail}，请大家先说清楚自己的理由。")
         else:
             opening_parts.append(
-                "这个问题来自生活里常见的真实讨论，我们要先弄清楚它到底在问什么、难点又在哪里。"
+                "这个问题来自生活里常见的真实讨论，请大家先说清楚自己的理由和分歧。"
             )
-        opening_parts.append("我们先把基本情况和争议点说清楚，把这件事的基本情况和核心争议都摆出来，再请同学们轮流发言。")
         return "".join(opening_parts)
 
     def _sanitize_opening_reference(self, source: str, content: str) -> str:
@@ -615,7 +721,11 @@ class FloorManager:
                 text = self._build_moderator_opening_baseline()
             return text
 
-        if source != "moderator" and (source in self.ai_names or source in self.human_names) and is_first_turn:
+        if (
+            source != "moderator"
+            and (source in self.ai_names or source in self.human_names)
+            and is_first_turn
+        ):
             # 同学首轮发言去掉"上一位同学"式互引
             text = re.sub(r"(上一位同学|刚才.*同学|某位同学)", "这个问题", text)
             text = re.sub(r"(你说得对|他说得对|她说得对)", "我先说说我的看法", text)
@@ -696,18 +806,13 @@ class FloorManager:
         return "我也很受启发，今天的讨论让我看到，不能只看一个表面的结果，还要看背后的过程和选择。"
 
     def _is_discussion_opening_message(self, source: str) -> bool:
-        if (
-            source != "moderator"
-            or self._speaker_message_count.get("moderator", 0) > 0
-        ):
+        if source != "moderator" or self._speaker_message_count.get("moderator", 0) > 0:
             return False
         moderator_display = self._agent_to_display_name.get("moderator", "moderator")
         if any(name != moderator_display for name in self._recent_display_speakers):
             return False
         return not any(
-            count > 0
-            for name, count in self._speaker_message_count.items()
-            if name != "moderator"
+            count > 0 for name, count in self._speaker_message_count.items() if name != "moderator"
         )
 
     def _looks_like_moderator_opening_candidate(self, content: str) -> bool:
@@ -730,6 +835,9 @@ class FloorManager:
 
     def _ensure_moderator_opening_context(self, content: str) -> str:
         text = (content or "").strip()
+        sentence_count = len([part for part in re.split(r"[。！？!?]+", text) if part.strip()])
+        if sentence_count > self._MODERATOR_OPENING_SENTENCE_LIMIT and not self._has_explicit_moderator_invitation_phrase(text):
+            return self._build_moderator_opening_baseline()
         if self._validate_moderator_opening(text) and self._moderator_opening_has_context(text):
             return text
         baseline = self._build_moderator_opening_baseline()
@@ -780,7 +888,10 @@ class FloorManager:
             return False
         if self._speaker_message_count.get(agent_name, 0) > 0:
             return True
-        return self._speaker_utterance_status.get(agent_name) == SpeakerUtteranceStatus.SPOKE_WITH_CONTENT
+        return (
+            self._speaker_utterance_status.get(agent_name)
+            == SpeakerUtteranceStatus.SPOKE_WITH_CONTENT
+        )
 
     def _reference_eligible_display_names(self) -> set[str]:
         eligible: set[str] = set()
@@ -843,6 +954,15 @@ class FloorManager:
                 if len(compact) >= 2:
                     candidates.add(compact[-2:])
 
+            canonical_agent = self._display_name_to_agent.get(canonical, canonical)
+            if canonical in self._thinker_display_names or canonical_agent in self.thinker_names:
+                suffix_aliases = set(candidates)
+                for alias in suffix_aliases:
+                    if alias.endswith(("先生", "老师", "爷爷", "老爷爷", "老先生")):
+                        continue
+                    for suffix in ("先生", "爷爷", "老爷爷", "老先生"):
+                        candidates.add(f"{alias}{suffix}")
+
             for alias in sorted(candidates, key=len, reverse=True):
                 alias = alias.strip()
                 if len(alias) < 2:
@@ -874,6 +994,35 @@ class FloorManager:
             f"下一位必须由{display_name}直接发言，马上回应刚才的讨论推进，"
             "不要再次点名真人，不要先让主持人重复总结。"
         )
+
+    def _build_moderator_human_invite_task(self, target_agent: str) -> str:
+        target_display = self._agent_to_display_name.get(target_agent, target_agent)
+        moderator_display = self._agent_to_display_name.get("moderator", "李老师")
+        topic_label = self._topic_focus_label() or "当前话题"
+        target_vocative = self._format_display_vocative(target_display)
+        return (
+            f"继续当前关于{topic_label}的讨论。"
+            f"下一位必须先由{moderator_display}发言，用一句极短的话明确点名{target_vocative}发言，"
+            f"例如“{target_vocative}，请。”。"
+            "在主持人真实说出点名邀请前，不要直接请求真人学生开麦。"
+        )
+
+    def _route_human_recovery_through_moderator(self, target_agent: str, *, reason: str) -> str:
+        if "moderator" not in self.ai_names:
+            return ""
+        self._set_designated_speaker("moderator")
+        self._expected_next_ai_speaker = "moderator"
+        self._pending_continuation_task = self._build_moderator_human_invite_task(target_agent)
+        self._pending_moderator_human_invite_target = target_agent
+        self._deferred_human_request_speaker = None
+        self._deferred_human_request_reason = ""
+        self._pending_human_input_reason = "normal"
+        logger.info(
+            "[FloorManager] redirect human recovery through moderator: target=%s reason=%s",
+            target_agent,
+            reason,
+        )
+        return "moderator"
 
     def _normalize_agent_name(self, name: Any) -> str:
         normalized = str(name or "").strip()
@@ -960,8 +1109,16 @@ class FloorManager:
 
         # Check for topic introduction markers
         intro_markers = [
-            "讨论", "话题", "聊聊", "谈谈", "问题",
-            "今天", "主题", "背景", "来自", "来源",
+            "讨论",
+            "话题",
+            "聊聊",
+            "谈谈",
+            "问题",
+            "今天",
+            "主题",
+            "背景",
+            "来自",
+            "来源",
         ]
         has_intro_marker = any(marker in text for marker in intro_markers)
         if not has_intro_marker:
@@ -1009,6 +1166,10 @@ class FloorManager:
         if total_spoken == 0:
             return "moderator"
 
+        expected = self._expected_next_ai_speaker
+        if expected in self.ai_names and expected != "moderator":
+            return expected
+
         human_agent = self._preferred_human_agent_name()
         human_turn_target = self._current_human_turn_target()
         delay_first_human_handoff = self._should_delay_first_human_handoff()
@@ -1022,10 +1183,7 @@ class FloorManager:
         ):
             if self._human_turn_count() < human_turn_target:
                 last_agent = self._last_substantive_agent_speaker()
-                if (
-                    last_agent != human_agent
-                    and self._non_human_turns_since_last_human() >= 1
-                ):
+                if last_agent != human_agent and self._non_human_turns_since_last_human() >= 1:
                     return human_agent
 
         # Priority 2: unspoken non-moderator participants
@@ -1047,7 +1205,11 @@ class FloorManager:
         last_agent = self._last_substantive_agent_speaker()
         for display_name in reversed(self._recent_display_speakers):
             agent_name = self._display_name_to_agent.get(display_name, display_name)
-            if agent_name not in self.human_names and agent_name != "moderator" and agent_name != last_agent:
+            if (
+                agent_name not in self.human_names
+                and agent_name != "moderator"
+                and agent_name != last_agent
+            ):
                 return agent_name
         # If only last speaker is available among non-humans, return moderator
         if last_agent and last_agent != "moderator" and last_agent not in self.human_names:
@@ -1083,20 +1245,48 @@ class FloorManager:
             return None
         return fallback
 
+    def _human_content_explicitly_invites_moderator(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text or "")
+        if not compact:
+            return False
+        return bool(
+            re.search(r"(?:请|想请|想问一下|想问一问|想问问|想问|问问|想听听|听听|邀请).{0,16}(?:老师|李老师)", compact)
+            or re.search(
+                r"(?:老师|李老师)[，,:：]?(?:您|你)(?:怎么看|怎么想|觉得呢|认为呢|能不能|可不可以|是否|能否|说说|讲讲|回答|解释|帮)",
+                compact,
+            )
+        )
+
+    def _designate_peer_followup_after_human_turn(self, content: str) -> None:
+        if self._discussion_end_requested or self.state in (FloorState.CLOSING, FloorState.ENDED):
+            return
+        if self._expected_next_ai_speaker:
+            return
+        if self._human_content_explicitly_invites_moderator(content):
+            return
+        fallback = self._smart_fallback_speaker()
+        if fallback in self.ai_names and fallback != "moderator":
+            self._set_designated_speaker(fallback)
+            self._expected_next_ai_speaker = fallback
+            self._pending_continuation_task = self._build_targeted_continuation_task(fallback)
+            self._deferred_human_request_speaker = None
+            self._deferred_human_request_reason = ""
+            logger.info("[FloorManager] 真人发言后指定同伴接续: %s", fallback)
+
     def _select_fallback_and_designate(self) -> Optional[str]:
         """Select smart fallback speaker and set as designated. Returns the chosen speaker."""
         if self._discussion_end_requested or self.state in (FloorState.CLOSING, FloorState.ENDED):
             return None
         speaker = self._smart_fallback_speaker()
         if speaker:
-            self._set_designated_speaker(speaker)
             if speaker in self.human_names:
-                self._expected_next_ai_speaker = None
-                self._pending_continuation_task = None
-                self._deferred_human_request_speaker = speaker
-                self._deferred_human_request_reason = "moderator_designated_human"
-                self._pending_human_input_reason = self._deferred_human_request_reason
-            elif speaker in self.ai_names:
+                routed = self._route_human_recovery_through_moderator(
+                    speaker,
+                    reason="smart_fallback",
+                )
+                return routed or None
+            self._set_designated_speaker(speaker)
+            if speaker in self.ai_names:
                 self._expected_next_ai_speaker = speaker
                 self._pending_continuation_task = self._build_targeted_continuation_task(speaker)
                 self._deferred_human_request_speaker = None
@@ -1122,19 +1312,18 @@ class FloorManager:
             return False
 
         if fallback in self.human_names:
-            self._set_designated_speaker(fallback)
-            self._deferred_human_request_speaker = fallback
-            self._deferred_human_request_reason = "moderator_designated_human"
-            self._pending_human_input_reason = self._deferred_human_request_reason
-            self._expected_next_ai_speaker = None
-            self._pending_continuation_task = None
+            routed = self._route_human_recovery_through_moderator(
+                fallback,
+                reason="premature_stream_end_before_human_budget",
+            )
             logger.info(
-                "[FloorManager] stream ended before human budget reached; recover with human turn: human_turn_count=%s target=%s speaker=%s",
+                "[FloorManager] stream ended before human budget reached; ask moderator to invite human: human_turn_count=%s target=%s speaker=%s routed=%s",
                 self._human_turn_count(),
                 human_turn_target,
                 fallback,
+                routed,
             )
-            return True
+            return bool(routed)
 
         if fallback in self.ai_names:
             self._set_designated_speaker(fallback)
@@ -1268,18 +1457,14 @@ class FloorManager:
         human_turn_target = self._current_human_turn_target()
         human_budget_exception_allowed = self._human_budget_exception_allowed()
         remaining_human_turns = (
-            max(0, human_turn_target - human_turn_count)
-            if self.human_names
-            else 0
+            max(0, human_turn_target - human_turn_count) if self.human_names else 0
         )
         missing_ai_agents = self._missing_required_ai_speakers()
         missing_ai_display_names = sorted(
             self._agent_to_display_name.get(name, name) for name in missing_ai_agents
         )
         min_substantive_turns = (
-            self._MIN_SUBSTANTIVE_TURNS_BEFORE_CLOSING
-            if len(self.all_names) >= 6
-            else 0
+            self._MIN_SUBSTANTIVE_TURNS_BEFORE_CLOSING if len(self.all_names) >= 6 else 0
         )
         remaining_substantive_turns = max(
             0,
@@ -1290,16 +1475,14 @@ class FloorManager:
         if remaining_human_turns > 0 and not human_budget_exception_allowed:
             blockers.append(f"remaining_human_turns={remaining_human_turns}")
         if missing_ai_display_names:
-            blockers.append(
-                "missing_ai_display_names=" + ",".join(missing_ai_display_names)
-            )
+            blockers.append("missing_ai_display_names=" + ",".join(missing_ai_display_names))
         if remaining_substantive_turns > 0:
-            blockers.append(
-                f"remaining_substantive_turns={remaining_substantive_turns}"
-            )
+            blockers.append(f"remaining_substantive_turns={remaining_substantive_turns}")
 
-        forced_ready_due_to_attempt_limit = bool(blockers) and (
-            self._closing_attempt_count >= self._CLOSING_ATTEMPT_LIMIT
+        forced_ready_due_to_attempt_limit = (
+            bool(blockers)
+            and not missing_ai_display_names
+            and self._closing_attempt_count >= self._CLOSING_ATTEMPT_LIMIT
         )
 
         return {
@@ -1349,10 +1532,7 @@ class FloorManager:
         target_agent = self._preferred_human_agent_name()
         if target_agent and self._speaker_message_count.get(target_agent, 0) > 0:
             return False
-        if (
-            self._non_human_turn_count_before_first_human()
-            >= self._FIRST_HUMAN_MIN_WARMUP_TURNS
-        ):
+        if self._non_human_turn_count_before_first_human() >= self._FIRST_HUMAN_MIN_WARMUP_TURNS:
             return True
         if self._discussion_started_mono <= 0:
             return False
@@ -1397,17 +1577,23 @@ class FloorManager:
                 self.current_speaker,
             )
             return True
-        logger.warning(
-            "[FloorManager] 点名后发言者不匹配，拦截 source=%s expected=%s",
-            source,
-            expected,
-        )
         reassertion_key = (expected, self.current_speaker or "")
         if self._expected_ai_reassertion_key != reassertion_key:
+            logger.warning(
+                "[FloorManager] 点名后发言者不匹配，拦截 source=%s expected=%s",
+                source,
+                expected,
+            )
             self._expected_ai_reassertion_key = reassertion_key
             self._set_designated_speaker(expected)
             self._request_stream_restart(f"expected_ai_mismatch:{expected}")
             self._touch_progress("expected_ai_mismatch_restart")
+        else:
+            logger.debug(
+                "[FloorManager] 重复点名错位流已丢弃: source=%s expected=%s",
+                source,
+                expected,
+            )
         return True
 
     def _is_authorized_human_request_reason(self, reason: str) -> bool:
@@ -1420,12 +1606,33 @@ class FloorManager:
             return pending_reason
         if self._is_authorized_human_request_reason(normalized_reason):
             return normalized_reason
-        if (
-            normalized_reason in {"speaker_selected_human", "human_input_requested_waiting"}
-            and self._is_authorized_human_request_reason(pending_reason)
-        ):
+        if normalized_reason in {
+            "speaker_selected_human",
+            "human_input_requested_waiting",
+        } and self._is_authorized_human_request_reason(pending_reason):
             return pending_reason
         return "normal"
+
+    def _build_direct_named_handoff_text(
+        self,
+        target_display_name: str,
+        *,
+        prefer_contextual_human_followup: bool = False,
+    ) -> str:
+        display_name = (target_display_name or "").strip()
+        if not display_name:
+            return ""
+
+        agent_name = self._display_name_to_agent.get(display_name, display_name)
+        target_vocative = self._format_display_vocative(display_name)
+
+        if agent_name in self.human_names:
+            return f"{target_vocative}，你怎么看？"
+
+        if agent_name in self.thinker_names or display_name in self._thinker_display_names:
+            return f"{target_vocative}，你怎么看？"
+
+        return f"关于这个话题，{target_vocative}，你有什么想法？"
 
     def _build_first_human_handoff_text(
         self,
@@ -1437,56 +1644,20 @@ class FloorManager:
             human_agent,
             human_agent,
         )
-        human_vocative = self._format_display_vocative(human_display)
-        handoff = f"我们先把麦克风交给{human_vocative}。{human_vocative}，你怎么看？"
-
-        lead = ""
-        display_names = self._get_all_display_names()
-        segments, _ = self._drain_complete_stream_sentences(original_text or "")
-        for segment in segments[:2]:
-            compact = re.sub(r"\s+", "", segment)
-            if not compact or len(compact) > 44:
-                continue
-            if re.search(r"(请|想问问|问问|想听听|听听|有请|邀请|轮到|下一位|接下来|交给|发言)", segment):
-                continue
-            if display_names and parse_speaker_designation(segment, display_names):
-                continue
-            lead = segment.strip()
-            break
-
-        return f"{lead}{handoff}" if lead else handoff
+        return self._build_direct_named_handoff_text(
+            human_display,
+            prefer_contextual_human_followup=True,
+        )
 
     def _build_targeted_handoff_text(self, target_display_name: str) -> str:
-        display_name = (target_display_name or "").strip()
-        if not display_name:
-            return ""
-        target_vocative = self._format_display_vocative(display_name)
-        return f"我们先听听{target_vocative}的想法。{target_vocative}，你怎么看？"
+        return self._build_direct_named_handoff_text(target_display_name)
 
     def _build_targeted_handoff_with_lead_text(
         self,
         original_text: str,
         target_display_name: str,
     ) -> str:
-        handoff = self._build_targeted_handoff_text(target_display_name)
-        if not handoff:
-            return ""
-
-        lead = ""
-        display_names = self._get_all_display_names()
-        segments, _ = self._drain_complete_stream_sentences(original_text or "")
-        for segment in segments[:2]:
-            compact = re.sub(r"\s+", "", segment)
-            if not compact or len(compact) > 44:
-                continue
-            if re.search(r"(请|想问问|问问|想听听|听听|有请|邀请|轮到|下一位|接下来|交给|发言)", segment):
-                continue
-            if display_names and parse_speaker_designation(segment, display_names):
-                continue
-            lead = segment.strip()
-            break
-
-        return f"{lead}{handoff}" if lead else handoff
+        return self._build_targeted_handoff_text(target_display_name)
 
     def _ensure_explicit_moderator_handoff_content(
         self,
@@ -1543,11 +1714,7 @@ class FloorManager:
             return ""
 
         last_agent = self._last_substantive_agent_speaker()
-        candidates = [
-            thinker
-            for thinker in sorted(self.thinker_names)
-            if thinker != last_agent
-        ]
+        candidates = [thinker for thinker in sorted(self.thinker_names) if thinker != last_agent]
         if not candidates:
             candidates = sorted(self.thinker_names)
         return candidates[0] if candidates else ""
@@ -1582,6 +1749,8 @@ class FloorManager:
         )
         for summary in highlights:
             value = (summary or "").strip(" ，,。！？!?；;:：")
+            value = re.sub(r"^我接着刚才的讨论[，,]\s*", "", value)
+            value = re.sub(r"^我接一下[^，,。！？!?]{1,16}的(?:方向|想法|观点)[，,]\s*", "", value)
             normalized = normalize_reference_match_text(value)
             if not normalized or normalized in seen:
                 continue
@@ -1600,7 +1769,9 @@ class FloorManager:
         shortened = self._truncate_quote_fragment(value, max_visible_chars=max_visible_chars)
         if not shortened:
             return ""
-        if self._quote_fragment_visible_length(shortened) < self._quote_fragment_visible_length(value):
+        if self._quote_fragment_visible_length(shortened) < self._quote_fragment_visible_length(
+            value
+        ):
             return f"{shortened}…"
         return shortened
 
@@ -1619,14 +1790,21 @@ class FloorManager:
             )
             if shortened
         ]
+        def praise_highlight_text(value: str) -> str:
+            cleaned = re.sub(r"[“”\"「」『』]", "", value or "").strip(" ，,。！？!?；;:：")
+            return cleaned or "自己的想法"
+
         if len(highlights) >= 2:
+            first = praise_highlight_text(highlights[0])
+            second = praise_highlight_text(highlights[1])
             praise = (
-                f"最后还想特别夸夸{human_display}，你先提到“{highlights[0]}”，后来又想到“{highlights[1]}”，"
+                f"最后还想特别夸夸{human_display}，你先提到{first}，后来又想到{second}，"
                 "说明你一直在认真听、认真想，也能把自己的观点往前推进，下次如果把最想说明的一点再讲具体一点，你的表达会更有力量。"
             )
         elif highlights:
+            first = praise_highlight_text(highlights[0])
             praise = (
-                f"最后还想特别夸夸{human_display}，你提到“{highlights[0]}”，这个观察很认真，也让大家把问题想得更深了一点，"
+                f"最后还想特别夸夸{human_display}，你提到{first}，这个观察很认真，也让大家把问题想得更深了一点，"
                 "下次如果顺着这个点再补一个生活里的例子，你的想法会更清楚。"
             )
         else:
@@ -1681,7 +1859,9 @@ class FloorManager:
                 "moderator",
                 SpeakerUtteranceStatus.SPOKE_WITH_CONTENT,
             )
-            self._speaker_message_count["moderator"] = self._speaker_message_count.get("moderator", 0) + 1
+            self._speaker_message_count["moderator"] = (
+                self._speaker_message_count.get("moderator", 0) + 1
+            )
             display_source = self._agent_to_display_name.get("moderator", "moderator")
             self._recent_display_speakers.append(display_source)
             if len(self._recent_display_speakers) > 16:
@@ -1822,7 +2002,8 @@ class FloorManager:
         # Even distribution: calculate adaptive gap based on remaining budget
         # Remaining human turns needed vs remaining total turns
         total_non_mod = sum(
-            1 for name, count in self._speaker_message_count.items()
+            1
+            for name, count in self._speaker_message_count.items()
             if name != "moderator" and name not in self.human_names and count > 0
         )
         remaining_human = human_turn_target - human_count
@@ -1835,6 +2016,42 @@ class FloorManager:
         if human_count <= 2:
             return current_gap >= 1
         return current_gap >= desired_gap
+
+    def _should_force_peer_budget_human_invitation(
+        self,
+        source: str,
+        text: str,
+        designated: Optional[str],
+    ) -> bool:
+        if (
+            source not in self.ai_names
+            or source == "moderator"
+            or designated is not None
+            or self._discussion_end_requested
+        ):
+            return False
+        if self._recent_human_skip_pending or not self.human_names:
+            return False
+        if self._has_moderator_invitation_intent(text) or self._choose_thinker_followup_agent(text):
+            return False
+        target_agent = self._preferred_human_agent_name()
+        if not target_agent or self._speaker_message_count.get(target_agent, 0) <= 0:
+            return False
+        if self._human_budget_exception_allowed():
+            return False
+        if self._human_turn_count() >= self._current_human_turn_target():
+            return False
+        return self._non_human_turns_since_last_human() >= 1
+
+    def _append_peer_human_handoff_text(self, text: str, target_display_name: str) -> str:
+        value = (text or "").strip()
+        vocative = self._format_display_vocative(target_display_name, fallback="同学")
+        invite = f"{vocative}，你怎么看？"
+        if not value:
+            return invite
+        if value.endswith(("。", "！", "？", "!", "?")):
+            return f"{value}{invite}"
+        return f"{value}。{invite}"
 
     def _force_first_human_stream_segment(self, source: str, segment: str) -> str:
         return segment
@@ -1919,9 +2136,7 @@ class FloorManager:
             return rf"(?:{'|'.join(escaped_aliases)})(?:同学|老师|先生|女士|小朋友)?"
 
         target_pattern = (
-            build_target_pattern(designated)
-            if designated
-            else r"[^。！？!?]{1,24}(?:同学|先生)?"
+            build_target_pattern(designated) if designated else r"[^。！？!?]{1,24}(?:同学|先生)?"
         )
         value = text or ""
         if re.search(
@@ -2062,8 +2277,8 @@ class FloorManager:
         known_names = set(self._agent_to_display_name.values())
 
         def repl(match: re.Match[str]) -> str:
-            name = (match.group('name') or "").strip()
-            suffix = (match.group('suffix') or "").strip()
+            name = (match.group("name") or "").strip()
+            suffix = (match.group("suffix") or "").strip()
             if name in known_names:
                 return match.group(0)
             if last_display:
@@ -2081,7 +2296,7 @@ class FloorManager:
         value = text or ""
 
         def repl(match: re.Match[str]) -> str:
-            fragment = (match.group('fragment') or "").strip()
+            fragment = (match.group("fragment") or "").strip()
             if not fragment:
                 return match.group(0)
             owner = self._guess_reference_owner(fragment)
@@ -2100,13 +2315,7 @@ class FloorManager:
         if len(normalized) < 2:
             return False
 
-        for _speaker, quote in reversed(self._recent_reference_quotes):
-            candidate_norm = normalize_reference_match_text(quote)
-            if candidate_norm and normalized in candidate_norm:
-                return True
-
-        topic_norm = normalize_reference_match_text(self._current_topic)
-        if topic_norm and len(normalized) >= 4 and normalized in topic_norm:
+        if self._is_exactly_traceable_quote_fragment(fragment):
             return True
 
         if len(normalized) <= 10 and self._guess_reference_owner(fragment):
@@ -2114,11 +2323,43 @@ class FloorManager:
 
         return False
 
+    def _is_exactly_traceable_quote_fragment(self, fragment: str) -> bool:
+        normalized = normalize_reference_match_text(fragment)
+        if len(normalized) < 2:
+            return False
+
+        for _speaker, quote in reversed(self._recent_reference_quotes):
+            candidate_norm = normalize_reference_match_text(quote)
+            if candidate_norm and normalized in candidate_norm:
+                return True
+
+        topic_norm = normalize_reference_match_text(self._current_topic)
+        return bool(topic_norm and len(normalized) >= 4 and normalized in topic_norm)
+
     def _sanitize_moderator_quote_whitelist(self, text: str) -> str:
         value = text or ""
 
+        def is_exactly_traceable_fragment(fragment: str) -> bool:
+            return self._is_exactly_traceable_quote_fragment(fragment)
+
+        def rewrite_untraceable_praise_quote(match: re.Match[str]) -> str:
+            fragment = (match.group("fragment") or "").strip()
+            if fragment and self._is_traceable_quote_fragment(fragment):
+                return match.group(0)
+            subject = (match.group("subject") or "这个点").strip().rstrip("的")
+            noun = (match.group("noun") or "点").strip()
+            if subject in {"这个", "这"}:
+                subject = f"这个{noun}"
+            return f"{subject}很值得继续讨论。"
+
+        value = re.sub(
+            r"(?P<subject>(?:刚才)?(?:这个|这|[^。！？!?，,；;]{1,8}))(?P<noun>比喻|例子|说法|提法|表达|观点|问题|想法)[^。！？!?“\"「『]{0,18}[—\-–,:：，, ]*[“\"「『](?P<fragment>[^”\"」』]{1,80})[”\"」』][^。！？!?]{0,24}[。！？!?]?",
+            rewrite_untraceable_praise_quote,
+            value,
+        )
+
         def rewrite_untraceable_quoted_label(match: re.Match[str]) -> str:
-            fragment = (match.group('fragment') or "").strip()
+            fragment = (match.group("fragment") or "").strip()
             if not fragment:
                 return "这个点"
             if self._is_traceable_quote_fragment(fragment):
@@ -2131,9 +2372,39 @@ class FloorManager:
             value,
         )
 
+        def rewrite_trailing_untraceable_quote(match: re.Match[str]) -> str:
+            fragment = (match.group("fragment") or "").strip()
+            if fragment and is_exactly_traceable_fragment(fragment):
+                return match.group(0)
+            return "这个点很值得继续讨论。"
+
+        value = re.sub(
+            r"[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]\s*[—\-–,:：，, ]*(?:[^。！？!?，,；;“\"「『]{1,10})?(?:同学|先生)?(?:这个|这)?(?:比喻|说法|提法|观点|想法|例子|问题|表达)[^。！？!?]{0,24}[。！？!?]?",
+            rewrite_trailing_untraceable_quote,
+            value,
+        )
+
+        def rewrite_named_possessive_untraceable_quote(match: re.Match[str]) -> str:
+            fragment = (match.group("fragment") or "").strip()
+            if fragment and is_exactly_traceable_fragment(fragment):
+                return match.group(0)
+            noun = match.group("noun") or "点"
+            return f"这个{noun}很值得继续讨论。"
+
+        value = re.sub(
+            r"[^。！？!?，,；;“\"「『]{1,10}(?:同学|先生)?(?:这个|这)?[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』](?:的)?(?P<noun>比喻|说法|提法|观点|想法|例子|问题|表达)[^。！？!?]{0,24}[。！？!?]?",
+            rewrite_named_possessive_untraceable_quote,
+            value,
+        )
+        value = re.sub(
+            r"[^。！？!?，,；;“\"「『]{1,10}(?:同学|先生)?(?:这个|这)?(?P<claim>这个(?:点|比喻|说法|提法|观点|想法|例子|问题|表达)很值得继续讨论)",
+            r"\g<claim>",
+            value,
+        )
+
         def rewrite_teacher_self_quote(match: re.Match[str]) -> str:
-            prefix = match.group('prefix') or ''
-            fragment = (match.group('fragment') or "").strip()
+            prefix = match.group("prefix") or ""
+            fragment = (match.group("fragment") or "").strip()
             if not fragment:
                 return f"{prefix}这个点"
             owner = self._guess_reference_owner(fragment)
@@ -2211,9 +2482,9 @@ class FloorManager:
         kept_quotes: list[dict[str, Any]] = []
 
         for index, match in enumerate(matches):
-            fragment = (match.group('fragment') or "").strip()
+            fragment = (match.group("fragment") or "").strip()
             visible_length = self._quote_fragment_visible_length(fragment)
-            replacement = f'“{fragment}”'
+            replacement = f"“{fragment}”"
             plain_replacement = fragment
             kept_visible_length = visible_length
             prefix_context = value[max(0, match.start() - 12) : match.start()]
@@ -2232,7 +2503,7 @@ class FloorManager:
             elif visible_length > 12:
                 shortened = self._truncate_quote_fragment(fragment, max_visible_chars=12)
                 if shortened:
-                    replacement = f'“{shortened}”'
+                    replacement = f"“{shortened}”"
                     plain_replacement = shortened
                     kept_visible_length = self._quote_fragment_visible_length(shortened)
                 else:
@@ -2276,8 +2547,8 @@ class FloorManager:
         normalized = re.sub(r"这个点(这个比喻|这个说法|这个想法|这个观点)", r"\1", normalized)
 
         def strip_untraceable_praise_quote(match: re.Match[str]) -> str:
-            lead = (match.group('lead') or '').strip()
-            fragment = (match.group('fragment') or '').strip()
+            lead = (match.group("lead") or "").strip()
+            fragment = (match.group("fragment") or "").strip()
             if self._is_traceable_quote_fragment(fragment):
                 return match.group(0)
             lead = re.sub(r"[—\-–,:：，,]+$", "", lead).strip()
@@ -2294,14 +2565,14 @@ class FloorManager:
             canonical_pattern = "|".join(re.escape(name) for name in canonical_names)
 
             def strip_canonical_named_praise_quote(match: re.Match[str]) -> str:
-                lead = (match.group('lead') or '').strip()
+                lead = (match.group("lead") or "").strip()
                 if not re.search(r"(说得|讲得|问得|提得|想得|精彩|到位|太棒|真棒|很棒|真好)", lead):
                     return match.group(0)
-                fragment = (match.group('fragment') or '').strip()
-                name = match.group('name')
+                fragment = (match.group("fragment") or "").strip()
+                name = match.group("name")
                 if self._is_traceable_quote_fragment(fragment):
                     return match.group(0)
-                honorific = match.group('honorific') or ''
+                honorific = match.group("honorific") or ""
                 lead = re.sub(r"[—\-–,:：，,]+$", "", lead).strip()
                 return f"{self._format_reference_name(name, honorific)}，你{lead}。"
 
@@ -2316,15 +2587,15 @@ class FloorManager:
             names_pattern = "|".join(re.escape(alias) for _canonical, alias in alias_pairs)
 
             def strip_named_praise_quote(match: re.Match[str]) -> str:
-                lead = (match.group('lead') or '').strip()
+                lead = (match.group("lead") or "").strip()
                 if not re.search(r"(说得|讲得|问得|提得|想得|精彩|到位|太棒|真棒|很棒|真好)", lead):
                     return match.group(0)
-                fragment = (match.group('fragment') or '').strip()
-                name_alias = match.group('name')
+                fragment = (match.group("fragment") or "").strip()
+                name_alias = match.group("name")
                 name = alias_to_canonical.get(name_alias, name_alias)
                 if self._is_traceable_quote_fragment(fragment):
                     return match.group(0)
-                honorific = match.group('honorific') or ''
+                honorific = match.group("honorific") or ""
                 lead = re.sub(r"[—\-–,:：，,]+$", "", lead).strip()
                 return f"{self._format_reference_name(name, honorific)}，你{lead}。"
 
@@ -2357,10 +2628,29 @@ class FloorManager:
         """把未实际发言者的命名归因改写为最近真实发言者或中性表述。"""
         escaped_name = re.escape(name)
         replacement_prefix = f"刚才{last_display}" if last_display else "刚才有同学"
+        extra_honorific = r"(?:同学|先生|老师|爷爷|奶奶|老爷爷|老奶奶|老先生)?"
+
+        text = re.sub(
+            rf"{escaped_name}{extra_honorific}[，,:：]?\s*你(?:说的话|讲的话|刚才说的?|刚才讲的?|前面说的?|前面讲的?)(?:[^。！？!?]{{0,40}})[。！？!?]?",
+            "刚才这个问题挺值得继续想。",
+            text,
+        )
+
+        def rewrite_unspoken_hearing(match: re.Match[str]) -> str:
+            verb = match.group("verb")
+            if last_display:
+                return f"{verb}{self._format_display_vocative(last_display)}刚才的发言"
+            return f"{verb}刚才这位同学的发言"
+
+        text = re.sub(
+            rf"(?P<verb>听完|听了|听到|看完|看到)\s*{escaped_name}{extra_honorific}(?:的)?(?:话|发言|分享|观点|想法)",
+            rewrite_unspoken_hearing,
+            text,
+        )
 
         def rewrite_named_possessive_quote(match: re.Match[str]) -> str:
-            fragment = match.group('fragment')
-            noun = match.group('noun')
+            fragment = match.group("fragment")
+            noun = match.group("noun")
             return f"{replacement_prefix}提出的“{fragment}”{noun}"
 
         text = re.sub(
@@ -2403,6 +2693,10 @@ class FloorManager:
             (
                 rf"{escaped_name}(?:同学|先生)?\s*(提出的|说的|说得|提到的|讲到的|分享的|质疑的|追问的)",
                 rf"{replacement_prefix}\1",
+            ),
+            (
+                rf"{escaped_name}(?:同学|先生)?(?:也)?\s*(问到了?|问到|说到了?|讲到了?|提到了?)([^。！？!?]{{0,16}})",
+                r"刚才这个问题\2",
             ),
         ]
         for pattern, replacement in rewrite_specs:
@@ -2460,6 +2754,30 @@ class FloorManager:
         for pattern, replacement in self_rewrites:
             text = re.sub(pattern, replacement, text)
 
+        # 防止角色用第三人称夸自己（如“小说提到……真棒”“小疑的这个想法真好”）。
+        if source != "moderator":
+            escaped_current_display = re.escape(current_display)
+            third_person_self_rewrites = [
+                (
+                    rf"{escaped_current_display}(?:同学|先生)?的这个",
+                    "这个",
+                ),
+                (
+                    rf"{escaped_current_display}(?:同学|先生)?的这(个|种|条|句|段)",
+                    r"这\1",
+                ),
+                (
+                    rf"{escaped_current_display}(?:同学|先生)?(?:还)?(?:提到|说到|讲到)(?=[“\"「『])",
+                    "",
+                ),
+                (
+                    rf"{escaped_current_display}(?:同学|先生)?(?:还)?(提到|说到|讲到|认为|觉得|指出|提出|分享|强调|质疑|追问)",
+                    r"我\1",
+                ),
+            ]
+            for pattern, replacement in third_person_self_rewrites:
+                text = re.sub(pattern, replacement, text)
+
         # 防止"我（XX）觉得……"这种冗余自我介绍
         text = re.sub(rf"我[（(]{re.escape(current_display)}[）)]", "我", text)
         text = re.sub(r"老师(?:同学|先生)", "老师", text)
@@ -2474,17 +2792,23 @@ class FloorManager:
         # 构建"具备可引用内容"的名字集合。只有真正说过实质内容的人才允许被当作引用对象。
         spoke_set = self._reference_eligible_display_names()
 
-        display_names = self._display_aliases()
+        alias_pairs = self._iter_display_name_aliases()
+        alias_to_canonical = {alias: canonical for canonical, alias in alias_pairs}
+        display_names = [alias for _canonical, alias in alias_pairs]
         for name in display_names:
-            if name == current_display:
+            canonical_name = alias_to_canonical.get(name, name)
+            if canonical_name == current_display:
                 continue
             # 修正"刚才/上一位/前面 + 错误名字" → 替换为真正的上一位
-            if last_display and name != last_display:
-                text = re.sub(rf"(刚才|上一位|前面)\s*{re.escape(name)}", rf"\1{last_display}", text)
+            if last_display and canonical_name != last_display:
+                text = re.sub(
+                    rf"(刚才|上一位|前面)\s*{re.escape(name)}", rf"\1{last_display}", text
+                )
             # 检测对从未发言者的引用（"X说/X提到/X认为"） → 替换为中性表述
-            if name not in spoke_set:
+            if canonical_name not in spoke_set:
+
                 def rewrite_unspoken_direct_quote(match: re.Match[str]) -> str:
-                    fragment = (match.group('fragment') or "").strip()
+                    fragment = (match.group("fragment") or "").strip()
                     owner = self._guess_reference_owner(fragment)
                     if owner and owner != name:
                         return f"{self._format_display_vocative(owner)}，你刚才说“{fragment}”"
@@ -2622,22 +2946,30 @@ class FloorManager:
                 r"|提醒得?(?:也)?(?:太|真|特别|非常|挺|很|到位)"
             )
             for name in display_names:
-                if name == last_display:
+                canonical_name = alias_to_canonical.get(name, name)
+                if canonical_name == last_display:
                     continue
-                if name == current_display and source != "moderator":
+                if canonical_name == current_display and source != "moderator":
                     continue
 
                 def rewrite_compliment_vocative(
                     match: re.Match[str],
                     *,
                     original_name: str = name,
+                    original_canonical: str = canonical_name,
                     target_display: str = last_display,
                 ) -> str:
                     following = text[match.end() : match.end() + 90]
-                    quoted = re.match(r"[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]", following)
-                    if quoted and self._guess_reference_owner(quoted.group('fragment')) == original_name:
+                    quoted = re.match(
+                        r"[“\"「『](?P<fragment>[^”\"」』]{2,80})[”\"」』]", following
+                    )
+                    if (
+                        quoted
+                        and self._guess_reference_owner(quoted.group("fragment"))
+                        in {original_name, original_canonical}
+                    ):
                         return match.group(0)
-                    verb = match.group('verb')
+                    verb = match.group("verb")
                     pronoun = "" if verb.startswith("你") else "你"
                     return (
                         f"{self._format_display_vocative(target_display, fallback=match.group(1) or '同学')}，"
@@ -2661,13 +2993,16 @@ class FloorManager:
         # 当 X != last_display 且 X != current_display 时，强制改写为 last_display。
         if last_display:
             for name in display_names:
-                if name == last_display:
+                canonical_name = alias_to_canonical.get(name, name)
+                if canonical_name == last_display:
                     continue
-                if name == current_display and source != "moderator":
+                if canonical_name == current_display and source != "moderator":
                     continue
                 text = re.sub(
                     rf"^{re.escape(name)}(同学|先生)?[，,]?\s*(?:你)?(这|那)?(?:个|段|次|句)?\s*(问题|说法|比喻|想法|观点|例子|疑问|答案|思路|表述)",
-                    lambda m, _ld=last_display: f"{self._format_display_vocative(_ld, fallback=m.group(1) or '同学')}，你这个{m.group(3)}",
+                    lambda m, _ld=last_display: (
+                        f"{self._format_display_vocative(_ld, fallback=m.group(1) or '同学')}，你这个{m.group(3)}"
+                    ),
                     text,
                     flags=re.MULTILINE,
                 )
@@ -2694,7 +3029,9 @@ class FloorManager:
 
         display_names = self._display_aliases()
         for display_name in display_names:
-            if not display_name or display_name == self._agent_to_display_name.get("moderator", "moderator"):
+            if not display_name or display_name == self._agent_to_display_name.get(
+                "moderator", "moderator"
+            ):
                 continue
             suffix = self._display_role_suffix(display_name)
             escaped = re.escape(display_name)
@@ -2770,7 +3107,10 @@ class FloorManager:
             ref_name = match.group(1)
             ref_metaphor = match.group(2)
             agent_name = self._display_name_to_agent.get(ref_name, ref_name)
-            if agent_name in self.human_names and self._speaker_message_count.get(agent_name, 0) <= 0:
+            if (
+                agent_name in self.human_names
+                and self._speaker_message_count.get(agent_name, 0) <= 0
+            ):
                 logger.warning(
                     "[FloorManager] 主持人引用未发言真人的比喻，移除: name=%s metaphor=%s",
                     ref_name,
@@ -2779,10 +3119,7 @@ class FloorManager:
                 text = text.replace(match.group(0), "")
                 continue
             # Check if this metaphor/keyword exists in any recent summary
-            found = any(
-                ref_metaphor in summary
-                for speaker, summary in self._recent_turn_summaries
-            )
+            found = any(ref_metaphor in summary for speaker, summary in self._recent_turn_summaries)
             if not found:
                 logger.warning(
                     "[FloorManager] 主持人引用不存在的内容: name=%s content=%s",
@@ -2803,7 +3140,10 @@ class FloorManager:
                 last_actual_speaker = self._recent_display_speakers[-1]
             if ref_name and last_actual_speaker and ref_name != last_actual_speaker:
                 agent_name = self._display_name_to_agent.get(ref_name, ref_name)
-                if agent_name in self.human_names and self._speaker_message_count.get(agent_name, 0) <= 0:
+                if (
+                    agent_name in self.human_names
+                    and self._speaker_message_count.get(agent_name, 0) <= 0
+                ):
                     logger.warning(
                         "[FloorManager] 张冠李戴：主持人说'%s说Y'但%s未发言，实际发言者是%s",
                         ref_name,
@@ -2880,13 +3220,21 @@ class FloorManager:
             if speaker != current_display and quote
         )
         topical_score = max(
-            (score_reference_fragment(text, candidate) for candidate in topical_candidates if candidate),
+            (
+                score_reference_fragment(text, candidate)
+                for candidate in topical_candidates
+                if candidate
+            ),
             default=0,
         )
 
         if len(normalized) <= 6 and topical_score < 6 and not peer_mentions:
             return "weak"
-        if any(marker in normalized for marker in weak_markers) and len(normalized) <= 10 and not peer_mentions:
+        if (
+            any(marker in normalized for marker in weak_markers)
+            and len(normalized) <= 10
+            and not peer_mentions
+        ):
             return "weak"
         if len(normalized) >= 8 and topical_candidates and topical_score < 4 and not peer_mentions:
             return "off_topic"
@@ -2954,11 +3302,11 @@ class FloorManager:
         invalidated_names: set[str] = set()
 
         def rewrite_named_vocative(match: re.Match[str]) -> str:
-            name_alias = match.group('name')
+            name_alias = match.group("name")
             name = alias_to_canonical.get(name_alias, name_alias)
-            honorific = match.group('honorific') or ''
-            verb = match.group('verb')
-            fragment = match.group('fragment')
+            honorific = match.group("honorific") or ""
+            verb = match.group("verb")
+            fragment = match.group("fragment")
             owner = self._guess_reference_owner(fragment)
             if owner == name:
                 return match.group(0)
@@ -2980,35 +3328,88 @@ class FloorManager:
         )
 
         def rewrite_named_report(match: re.Match[str]) -> str:
-            name_alias = match.group('name')
+            name_alias = match.group("name")
             name = alias_to_canonical.get(name_alias, name_alias)
-            honorific = match.group('honorific') or ''
-            verb = match.group('verb')
-            fragment = match.group('fragment')
+            honorific = match.group("honorific") or ""
+            verb = match.group("verb")
+            fragment = match.group("fragment")
             owner = self._guess_reference_owner(fragment)
+            def unquoted_reference(owner_name: str | None) -> str:
+                reference_name = (
+                    self._format_reference_name(owner_name, honorific) if owner_name else "有同学"
+                )
+                noun = "问题" if re.search(r"问|追问|质疑", verb) else "想法"
+                return f"{reference_name}的这个{noun}"
+
             if owner == name:
+                if not self._is_exactly_traceable_quote_fragment(fragment):
+                    return unquoted_reference(owner)
                 return match.group(0)
             if owner:
                 invalidated_names.add(name_alias)
+                if not self._is_exactly_traceable_quote_fragment(fragment):
+                    return unquoted_reference(owner)
                 return f"{self._format_reference_name(owner, honorific)}{verb}“{fragment}”"
             invalidated_names.add(name_alias)
-            return f"有同学{verb}“{fragment}”"
+            return unquoted_reference(None)
 
         value = re.sub(
-            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:还)?\s*(?P<verb>说的?|提到的?|讲到的?|提出的?|分享的?|质疑的?|追问的?)[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]",
+            rf"(?:刚才|刚刚|前面|之前)?(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:还)?\s*(?P<verb>说的?|提到的?|讲到的?|提出的?|分享的?|质疑的?|追问的?)[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]",
             rewrite_named_report,
             value,
         )
         value = re.sub(
-            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:还)?\s*(?P<verb>刚才说的?|刚才提到的?|刚才讲到的?|刚才提出的?|刚才分享的?|刚才质疑的?|刚才追问的?)[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]",
+            rf"(?:刚才|刚刚|前面|之前)?(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:还)?\s*(?P<verb>刚才说的?|刚才提到的?|刚才讲到的?|刚才提出的?|刚才分享的?|刚才质疑的?|刚才追问的?)[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]",
             rewrite_named_report,
+            value,
+        )
+
+        def rewrite_named_story_report(match: re.Match[str]) -> str:
+            name_alias = match.group("name")
+            name = alias_to_canonical.get(name_alias, name_alias)
+            honorific = match.group("honorific") or ""
+            fragment = match.group("fragment")
+            noun = match.group("noun") or "例子"
+            owner = self._guess_reference_owner(fragment)
+            if owner == name and self._is_exactly_traceable_quote_fragment(fragment):
+                return match.group(0)
+            invalidated_names.add(name_alias)
+            reference_name = self._format_reference_name(owner, honorific) if owner else "有同学"
+            if owner and self._is_exactly_traceable_quote_fragment(fragment):
+                return f"{reference_name}讲的“{fragment}”的{noun}"
+            return f"{reference_name}的这个{noun}"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:刚才|刚刚|前面|之前)?(?:讲|讲到|说|说到|提|提到)(?:的)?(?:那个|这个)?[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』](?:的)?(?P<noun>故事|例子|比喻|说法|观点|想法|问题|表达|答案)",
+            rewrite_named_story_report,
+            value,
+        )
+
+        def rewrite_named_claim_quote(match: re.Match[str]) -> str:
+            name_alias = match.group("name")
+            name = alias_to_canonical.get(name_alias, name_alias)
+            honorific = match.group("honorific") or ""
+            verb = match.group("verb")
+            lead = match.group("lead") or ""
+            fragment = match.group("fragment")
+            owner = self._guess_reference_owner(fragment)
+            if owner == name and self._is_exactly_traceable_quote_fragment(fragment):
+                return match.group(0)
+            invalidated_names.add(name_alias)
+            if owner and self._is_exactly_traceable_quote_fragment(fragment):
+                return f"{self._format_reference_name(owner, honorific)}{verb}{lead}“{fragment}”"
+            return f"有同学觉得{lead}“{fragment}”"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?\s*(?P<verb>说|说到|认为|觉得|提到|讲到)(?P<lead>[^。！？!?“\"「『]{{0,24}})[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]",
+            rewrite_named_claim_quote,
             value,
         )
 
         def rewrite_named_object(match: re.Match[str]) -> str:
-            name_alias = match.group('name')
+            name_alias = match.group("name")
             name = alias_to_canonical.get(name_alias, name_alias)
-            fragment = match.group('fragment')
+            fragment = match.group("fragment")
             owner = self._guess_reference_owner(fragment)
             if owner == name:
                 return match.group(0)
@@ -3023,10 +3424,65 @@ class FloorManager:
             value,
         )
 
+        def rewrite_named_labeled_quote(match: re.Match[str]) -> str:
+            name_alias = match.group("name")
+            name = alias_to_canonical.get(name_alias, name_alias)
+            honorific = match.group("honorific") or ""
+            fragment = match.group("fragment")
+            noun = match.group("noun") or "点"
+            owner = self._guess_reference_owner(fragment)
+            if owner == name:
+                return match.group(0)
+            invalidated_names.add(name_alias)
+            if owner:
+                return f"{self._format_reference_name(owner, honorific)}提到的“{fragment}”"
+            return f"这个{noun}"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:刚才|刚刚|前面)?(?:那个|这个)?[“\"「『](?P<fragment>[^”\"」』]{{2,60}})[”\"」』](?:的)?(?P<noun>比喻|例子|说法|观点|想法|问题|表达|答案)",
+            rewrite_named_labeled_quote,
+            value,
+        )
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?(?:刚才|刚刚|前面)?(?:提到|说|讲|提出)(?:的)?[“\"「『](?P<fragment>[^”\"」』]{{2,60}})[”\"」』](?:这个|的)?(?P<noun>比喻|例子|说法|观点|想法|问题|表达|答案)?",
+            rewrite_named_labeled_quote,
+            value,
+        )
+
+        def rewrite_named_sentence_quote(match: re.Match[str]) -> str:
+            body = match.group("body") or ""
+            fragments = re.findall(r"[“\"「『]([^”\"」』]{2,80})[”\"」』]", body)
+            if fragments and all(self._is_exactly_traceable_quote_fragment(fragment) for fragment in fragments):
+                return match.group(0)
+            return f"这句话{body}"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?这句话(?P<body>[^。！？!?]{{0,120}}[“\"「『][^。！？!?]{{0,120}})",
+            rewrite_named_sentence_quote,
+            value,
+        )
+
+        def rewrite_named_story_quote(match: re.Match[str]) -> str:
+            name_alias = match.group("name")
+            fragment = match.group("fragment")
+            noun = match.group("noun") or "例子"
+            owner = self._guess_reference_owner(fragment)
+            name = alias_to_canonical.get(name_alias, name_alias)
+            if owner == name and self._is_exactly_traceable_quote_fragment(fragment):
+                return match.group(0)
+            invalidated_names.add(name_alias)
+            return f"这个{noun}"
+
+        value = re.sub(
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?[，,:：]?\s*你(?:刚才)?(?:提|提到|讲|讲到|说|说到)(?:的)?(?:这个|那个)?[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』]的?(?P<noun>故事|例子|想法|问题|说法)",
+            rewrite_named_story_quote,
+            value,
+        )
+
         def rewrite_sentence_pronoun(match: re.Match[str]) -> str:
-            prefix = match.group('prefix') or ''
-            verb = match.group('verb')
-            fragment = match.group('fragment')
+            prefix = match.group("prefix") or ""
+            verb = match.group("verb")
+            fragment = match.group("fragment")
             owner = self._guess_reference_owner(fragment)
             if owner:
                 return f"{prefix}{owner}{verb}“{fragment}”"
@@ -3044,13 +3500,13 @@ class FloorManager:
         )
 
         def rewrite_named_direct_quote(match: re.Match[str]) -> str:
-            prefix = match.group('prefix') or ''
-            name_alias = match.group('name')
+            prefix = match.group("prefix") or ""
+            name_alias = match.group("name")
             name = alias_to_canonical.get(name_alias, name_alias)
-            honorific = match.group('honorific') or ''
-            verb = match.group('verb')
-            fragment = match.group('fragment')
-            suffix = match.group('suffix') or ''
+            honorific = match.group("honorific") or ""
+            verb = match.group("verb")
+            fragment = match.group("fragment")
+            suffix = match.group("suffix") or ""
             owner = self._guess_reference_owner(fragment)
             if owner == name:
                 return match.group(0)
@@ -3065,32 +3521,32 @@ class FloorManager:
         )
 
         def rewrite_named_praise_quote(match: re.Match[str]) -> str:
-            name_alias = match.group('name')
+            name_alias = match.group("name")
             name = alias_to_canonical.get(name_alias, name_alias)
-            honorific = match.group('honorific') or ''
-            praise = (match.group('praise') or '').strip()
-            fragment = match.group('fragment')
+            honorific = match.group("honorific") or ""
+            praise = (match.group("praise") or "").strip()
+            fragment = match.group("fragment")
             owner = self._guess_reference_owner(fragment)
             if owner == name:
                 return match.group(0)
             invalidated_names.add(name_alias)
-            praise = praise.lstrip('你').strip(' ，,：:—-')
+            praise = praise.lstrip("你").strip(" ，,：:—-")
             return f"{self._format_reference_name(name, honorific)}，你{praise}。"
 
         value = re.sub(
-            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?[，,:：]?\s*你(?P<praise>这个点说得[^“\"「『]{0,12}|这句话说得[^“\"「『]{0,12}|问得[^“\"「『]{0,12}|提得[^“\"「『]{0,12}|讲得[^“\"「『]{0,12})[—\-–,:：，, ]*[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』][^。！？!?]{{0,24}}",
+            rf"(?P<name>{names_pattern})(?P<honorific>同学|先生)?[，,:：]?\s*你(?P<praise>这个点说得[^“\"「『]{0, 12}|这句话说得[^“\"「『]{0, 12}|问得[^“\"「『]{0, 12}|提得[^“\"「『]{0, 12}|讲得[^“\"「『]{0, 12})[—\-–,:：，, ]*[“\"「『](?P<fragment>[^”\"」』]{{2,80}})[”\"」』][^。！？!?]{{0,24}}",
             rewrite_named_praise_quote,
             value,
         )
 
         def rewrite_broad_named_praise_quote(match: re.Match[str]) -> str:
-            lead = (match.group('lead') or '').strip()
+            lead = (match.group("lead") or "").strip()
             if not re.search(r"(说得|讲得|问得|提得|想得|精彩|到位|太棒|真棒|很棒|真好)", lead):
                 return match.group(0)
-            name_alias = match.group('name')
+            name_alias = match.group("name")
             name = alias_to_canonical.get(name_alias, name_alias)
-            honorific = match.group('honorific') or ''
-            fragment = match.group('fragment')
+            honorific = match.group("honorific") or ""
+            fragment = match.group("fragment")
             owner = self._guess_reference_owner(fragment)
             if owner == name:
                 return match.group(0)
@@ -3115,6 +3571,8 @@ class FloorManager:
                 r"这个\1",
                 value,
             )
+            value = re.sub(r"(?:让我用)?你的(?:例子|故事)[^。！？!?]{0,160}[。！？!?]?", "", value)
+            value = re.sub(r"你(?:对|并没有|只是)[^。！？!?]{0,160}[。！？!?]?", "", value)
 
         value = re.sub(r"\s{2,}", " ", value).strip()
         value = re.sub(r"^[，,:：\s]+", "", value)
@@ -3202,9 +3660,11 @@ class FloorManager:
         value = text or ""
         for pattern in self._META_BLOCK_PATTERNS:
             value = pattern.sub(
-                lambda match: ""
-                if self._looks_like_meta_reasoning_segment(match.group(1))
-                else match.group(0),
+                lambda match: (
+                    ""
+                    if self._looks_like_meta_reasoning_segment(match.group(1))
+                    else match.group(0)
+                ),
                 value,
             )
         return value
@@ -3294,14 +3754,16 @@ class FloorManager:
         if not emitted_prefix:
             return False, raw_content
         if raw_content.startswith(emitted_prefix):
-            tail = raw_content[len(emitted_prefix):].lstrip()
+            tail = raw_content[len(emitted_prefix) :].lstrip()
             return True, self._filter_streamed_tail_duplicates(tail, emitted_segment_keys)
 
         emitted_segments, _ = self._drain_complete_stream_sentences(emitted_prefix)
         final_segments, final_remainder = self._drain_complete_stream_sentences(raw_content)
         matched_segments = 0
         for emitted_segment, final_segment in zip(emitted_segments, final_segments):
-            if self._normalize_streaming_segment(emitted_segment) != self._normalize_streaming_segment(final_segment):
+            if self._normalize_streaming_segment(
+                emitted_segment
+            ) != self._normalize_streaming_segment(final_segment):
                 break
             matched_segments += 1
 
@@ -3347,10 +3809,41 @@ class FloorManager:
         aclose = getattr(stream, "aclose", None)
         if not callable(aclose):
             return
+        close_task: asyncio.Task[Any] | None = None
         try:
-            await asyncio.wait_for(aclose(), timeout=1.0)
+            close_task = asyncio.ensure_future(aclose())
+            await asyncio.wait_for(
+                asyncio.shield(close_task),
+                timeout=self._TEAM_STREAM_CLOSE_TIMEOUT_SEC,
+            )
         except asyncio.TimeoutError:
-            logger.warning("[FloorManager] closing abandoned team stream timed out; continuing with restart")
+            logger.debug(
+                "[FloorManager] closing abandoned team stream timed out; continuing with restart"
+            )
+            if close_task is not None:
+                close_task.cancel()
+                try:
+                    await asyncio.wait_for(
+                        close_task,
+                        timeout=self._TEAM_STREAM_CLOSE_CANCEL_GRACE_SEC,
+                    )
+                except (asyncio.CancelledError, GeneratorExit):
+                    pass
+                except asyncio.TimeoutError:
+                    self._cancelled_wait_tasks.add(close_task)
+                    close_task.add_done_callback(self._consume_cancelled_wait_task_result)
+                    if self._team_factory is not None:
+                        self._team_rebuild_requested = True
+                        await self._force_stop_autogen_runtime(
+                            self.team,
+                            reason="stalled stream close",
+                        )
+                except Exception:
+                    logger.debug("[FloorManager] cancelled team stream close failed", exc_info=True)
+        except (asyncio.CancelledError, GeneratorExit):
+            if close_task is not None and not close_task.done():
+                close_task.cancel()
+            raise
         except Exception:
             logger.debug("[FloorManager] closing abandoned team stream failed", exc_info=True)
 
@@ -3359,14 +3852,11 @@ class FloorManager:
             return False
         current_display = self._agent_to_display_name.get(source, source)
         return bool(
-            self._recent_display_speakers
-            and self._recent_display_speakers[-1] == current_display
+            self._recent_display_speakers and self._recent_display_speakers[-1] == current_display
         )
 
     def _should_suppress_ai_while_human_waiting(self, source: str) -> bool:
-        pending_human_speaker = self._normalize_agent_name(
-            self._last_human_input_requested_speaker
-        )
+        pending_human_speaker = self._normalize_agent_name(self._last_human_input_requested_speaker)
         has_pending_human_request = pending_human_speaker in self.human_names
         return (
             (
@@ -3395,7 +3885,9 @@ class FloorManager:
                 reason="prepare_pending_human_message",
                 recovery=True,
             )
-        if FloorState.HUMAN_TURN_WAITING in self._ALLOWED_STATE_TRANSITIONS.get(self.state, frozenset()):
+        if FloorState.HUMAN_TURN_WAITING in self._ALLOWED_STATE_TRANSITIONS.get(
+            self.state, frozenset()
+        ):
             self.current_speaker = source
             await self._set_state(
                 FloorState.HUMAN_TURN_WAITING,
@@ -3434,9 +3926,9 @@ class FloorManager:
             if clear_designation:
                 self._set_designated_speaker(None)
             return None
-        if (
-            speaker == self._last_human_input_requested_speaker
-            and self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+        if speaker == self._last_human_input_requested_speaker and self.state in (
+            FloorState.HUMAN_TURN_WAITING,
+            FloorState.HUMAN_SPEAKING,
         ):
             logger.info(
                 "[FloorManager] 忽略重复 human_input_requested: speaker=%s state=%s",
@@ -3454,7 +3946,10 @@ class FloorManager:
             )
             if clear_designation:
                 self._set_designated_speaker(None)
-            if (reason or "").strip() in {"speaker_selected_human", "human_input_requested_waiting"}:
+            if (reason or "").strip() in {
+                "speaker_selected_human",
+                "human_input_requested_waiting",
+            }:
                 await self._recover_from_stale_human_request(
                     speaker,
                     reason="stale_human_input_request",
@@ -3528,7 +4023,11 @@ class FloorManager:
         log_message: str,
         request_stream_restart: bool = True,
     ) -> Optional[dict]:
-        skipped_speaker = self.current_speaker or self._last_human_input_requested_speaker
+        skipped_speaker = (
+            self._current_waiting_human_speaker()
+            or self.current_speaker
+            or self._last_human_input_requested_speaker
+        )
         pending_human_text = self._pop_submitted_human_input(skipped_speaker)
         display_speaker = self._agent_to_display_name.get(skipped_speaker, skipped_speaker)
         logger.warning(log_message)
@@ -3563,7 +4062,9 @@ class FloorManager:
                 self._set_designated_speaker(fallback)
                 if fallback in self.ai_names:
                     self._expected_next_ai_speaker = fallback
-                    self._pending_continuation_task = self._build_targeted_continuation_task(fallback)
+                    self._pending_continuation_task = self._build_targeted_continuation_task(
+                        fallback
+                    )
         self._team_rebuild_requested = True
         if not request_stream_restart:
             self._clear_stream_restart_request()
@@ -3612,8 +4113,7 @@ class FloorManager:
             return None
         reason = self._resolve_human_input_request_reason("human_input_requested_waiting")
         request_id = (
-            self._last_human_input_request_id
-            or f"hr-{max(self._human_input_request_seq, 1)}"
+            self._last_human_input_request_id or f"hr-{max(self._human_input_request_seq, 1)}"
         ).strip()
         return {
             "speaker": speaker,
@@ -3641,15 +4141,22 @@ class FloorManager:
         if agent_speaker:
             self._pending_submitted_human_inputs[agent_speaker] = (text or "").strip()
 
+    def _current_waiting_human_speaker(self) -> str:
+        current = self._normalize_agent_name(self.current_speaker)
+        if current in self.human_names:
+            return current
+        requested = self._normalize_agent_name(self._last_human_input_requested_speaker)
+        if requested in self.human_names:
+            return requested
+        return current or requested
+
     def _should_inline_process_submitted_human_input(self, speaker: str) -> bool:
         agent_speaker = self._normalize_agent_name(speaker)
         if not agent_speaker:
             return False
         if self.state not in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
             return False
-        waiting_speaker = self._normalize_agent_name(
-            self.current_speaker or self._last_human_input_requested_speaker
-        )
+        waiting_speaker = self._current_waiting_human_speaker()
         if waiting_speaker != agent_speaker:
             return False
         active_wait = self._active_stream_next_event_task
@@ -3683,7 +4190,7 @@ class FloorManager:
         return queued_text
 
     async def _recover_pending_human_input_before_next_team_wait(self) -> Optional[dict]:
-        waiting_speaker = self.current_speaker or self._last_human_input_requested_speaker
+        waiting_speaker = self._current_waiting_human_speaker()
         pending_submitted_input = (
             self._peek_submitted_human_input(waiting_speaker)
             if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
@@ -3716,13 +4223,17 @@ class FloorManager:
             try:
                 signature = inspect.signature(callback)
                 params = list(signature.parameters.values())
-                accepts_tts_text = any(
-                    param.kind in (
-                        inspect.Parameter.VAR_POSITIONAL,
-                        inspect.Parameter.VAR_KEYWORD,
+                accepts_tts_text = (
+                    any(
+                        param.kind
+                        in (
+                            inspect.Parameter.VAR_POSITIONAL,
+                            inspect.Parameter.VAR_KEYWORD,
+                        )
+                        for param in params
                     )
-                    for param in params
-                ) or len(signature.parameters) >= 4
+                    or len(signature.parameters) >= 4
+                )
             except (TypeError, ValueError):
                 accepts_tts_text = True
 
@@ -3818,7 +4329,12 @@ class FloorManager:
         self._stream_restart_requested = False
         self._stream_restart_gate.clear()
 
-    async def _cancel_pending_wait_task(self, task: Optional[asyncio.Task[Any]]) -> None:
+    async def _cancel_pending_wait_task(
+        self,
+        task: Optional[asyncio.Task[Any]],
+        *,
+        team_wait: bool = False,
+    ) -> None:
         if task is None or task.done():
             return
         task.cancel()
@@ -3834,6 +4350,14 @@ class FloorManager:
                 "[FloorManager] timed out waiting %.2fs for cancelled team wait task; continuing recovery",
                 self._PENDING_WAIT_CANCEL_TIMEOUT_SEC,
             )
+            self._cancelled_wait_tasks.add(task)
+            task.add_done_callback(self._consume_cancelled_wait_task_result)
+            if team_wait and self._team_factory is not None:
+                self._team_rebuild_requested = True
+                await self._force_stop_autogen_runtime(
+                    self.team,
+                    reason="stalled stream wait cancellation",
+                )
         except Exception:
             logger.debug("[FloorManager] cancel pending wait task failed", exc_info=True)
 
@@ -3843,6 +4367,26 @@ class FloorManager:
             return
         task.cancel()
         logger.info("[FloorManager] canceled active team wait task: %s", reason)
+
+    def _log_repeated_non_moderator_drop(self, source: str, content: str, *, kind: str) -> None:
+        key = (kind, source, self.current_speaker or "")
+        if key in self._repeated_non_moderator_drop_log_keys:
+            logger.debug(
+                "[FloorManager] 丢弃连续非主持人%s: source=%s content=%s",
+                kind,
+                source,
+                str(content)[:120],
+            )
+            return
+        if len(self._repeated_non_moderator_drop_log_keys) > 32:
+            self._repeated_non_moderator_drop_log_keys.clear()
+        self._repeated_non_moderator_drop_log_keys.add(key)
+        logger.warning(
+            "[FloorManager] 丢弃连续非主持人%s，避免残留 TTS 外泄: source=%s content=%s",
+            kind,
+            source,
+            str(content)[:120],
+        )
 
     async def _watchdog_loop(self) -> None:
         """Watchdog loop: auto-recover stuck human-turn windows and emit diagnostics."""
@@ -3880,7 +4424,11 @@ class FloorManager:
                     continue
 
             # Guard 2: Client connection lost for too long (only during active session)
-            if self._discussion_started_mono > 0 and self._is_connected is not None and not self._is_connected():
+            if (
+                self._discussion_started_mono > 0
+                and self._is_connected is not None
+                and not self._is_connected()
+            ):
                 if _connection_lost_at is None:
                     _connection_lost_at = now
                     logger.warning(
@@ -3905,7 +4453,10 @@ class FloorManager:
                 _connection_lost_at = None
 
             # Guard 3: Consecutive stall recoveries without progress (only during active session)
-            if self._discussion_started_mono > 0 and self._consecutive_stall_recoveries >= self._MAX_CONSECUTIVE_STALL_RECOVERIES:
+            if (
+                self._discussion_started_mono > 0
+                and self._consecutive_stall_recoveries >= self._MAX_CONSECUTIVE_STALL_RECOVERIES
+            ):
                 logger.error(
                     "[FloorManager] %d consecutive stall recoveries without progress; force-ending session=%s",
                     self._consecutive_stall_recoveries,
@@ -3925,7 +4476,7 @@ class FloorManager:
 
             # Prefer explicit auto-recovery for human wait stalls.
             if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING):
-                waiting_speaker = self.current_speaker or self._last_human_input_requested_speaker
+                waiting_speaker = self._current_waiting_human_speaker()
                 pending_submitted_input = (
                     self._pending_submitted_human_inputs.get(
                         self._normalize_agent_name(waiting_speaker),
@@ -3958,7 +4509,7 @@ class FloorManager:
                         continue
                     self._last_watchdog_action_ts = now
                     self._human_turn_idle_notice_sent = True
-                    speaker = self.current_speaker
+                    speaker = self._current_waiting_human_speaker() or self.current_speaker
                     display = self._agent_to_display_name.get(speaker, speaker)
                     self._human_timeout_count += 1
                     self._set_speaker_utterance_status(speaker, SpeakerUtteranceStatus.TIMED_OUT)
@@ -3975,7 +4526,10 @@ class FloorManager:
                     self._touch_progress("watchdog_human_wait_notice")
                 continue
 
-            if self._deferred_human_request_speaker and idle_sec >= self._deferred_human_request_timeout_sec:
+            if (
+                self._deferred_human_request_speaker
+                and idle_sec >= self._deferred_human_request_timeout_sec
+            ):
                 if now - self._last_watchdog_action_ts < 12.0:
                     continue
                 self._last_watchdog_action_ts = now
@@ -4022,6 +4576,7 @@ class FloorManager:
         self._deferred_human_request_reason = ""
         self._pending_continuation_task = None
         self._clear_stream_restart_request()
+        self._pending_moderator_human_invite_target = None
         self._recent_turn_summaries.clear()
         if self.summary_memory is not None:
             await self.summary_memory.clear()
@@ -4064,7 +4619,9 @@ class FloorManager:
                         recovered_human_turn_stream_end = True
                         saw_events_after_human_turn_recovery = False
                         restart_after_general_stall = True
-                        logger.info("[FloorManager] restarting team stream after owner-loop pending human recovery")
+                        logger.info(
+                            "[FloorManager] restarting team stream after owner-loop pending human recovery"
+                        )
                         break
                     next_event_task: Optional[asyncio.Task[Any]] = None
                     restart_task: Optional[asyncio.Task[Any]] = None
@@ -4073,7 +4630,8 @@ class FloorManager:
                             self._peek_submitted_human_input(
                                 self.current_speaker or self._last_human_input_requested_speaker
                             )
-                            if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+                            if self.state
+                            in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
                             else ""
                         )
                         stall_timeout_sec = (
@@ -4095,12 +4653,13 @@ class FloorManager:
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                         if restart_task in done and self._stream_restart_requested:
-                            await self._cancel_pending_wait_task(next_event_task)
+                            await self._cancel_pending_wait_task(next_event_task, team_wait=True)
                             self._clear_stream_restart_request()
-                            current_waiting_speaker = self.current_speaker or self._last_human_input_requested_speaker
+                            current_waiting_speaker = self._current_waiting_human_speaker()
                             current_pending_submitted_input = (
                                 self._peek_submitted_human_input(current_waiting_speaker)
-                                if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+                                if self.state
+                                in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
                                 else ""
                             )
                             if current_pending_submitted_input:
@@ -4116,15 +4675,18 @@ class FloorManager:
                                 recovered_human_turn_stream_end = True
                                 saw_events_after_human_turn_recovery = False
                             restart_after_general_stall = True
-                            logger.info("[FloorManager] restarting team stream after explicit restart request")
+                            logger.info(
+                                "[FloorManager] restarting team stream after explicit restart request"
+                            )
                             self._touch_progress("run_stream_explicit_restart")
                             break
                         if next_event_task in done:
                             await self._cancel_pending_wait_task(restart_task)
-                            current_waiting_speaker = self.current_speaker or self._last_human_input_requested_speaker
+                            current_waiting_speaker = self._current_waiting_human_speaker()
                             current_pending_submitted_input = (
                                 self._peek_submitted_human_input(current_waiting_speaker)
-                                if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+                                if self.state
+                                in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
                                 else ""
                             )
                             if next_event_task.cancelled() and current_pending_submitted_input:
@@ -4140,31 +4702,37 @@ class FloorManager:
                                 recovered_human_turn_stream_end = True
                                 saw_events_after_human_turn_recovery = False
                                 restart_after_general_stall = True
-                                logger.info("[FloorManager] recovering pending human input after active wait cancellation")
+                                logger.info(
+                                    "[FloorManager] recovering pending human input after active wait cancellation"
+                                )
                                 break
                             event = next_event_task.result()
                             stream_had_any_event = True
                         else:
-                            await self._cancel_pending_wait_task(next_event_task)
+                            await self._cancel_pending_wait_task(next_event_task, team_wait=True)
                             await self._cancel_pending_wait_task(restart_task)
                             raise asyncio.TimeoutError
                     except asyncio.TimeoutError:
                         if self._paused or self._blocked_for_human_input:
                             continue
-                        if self._discussion_end_requested or self.state in (FloorState.CLOSING, FloorState.ENDED):
+                        if self._discussion_end_requested or self.state in (
+                            FloorState.CLOSING,
+                            FloorState.ENDED,
+                        ):
                             logger.info(
                                 "[FloorManager] ignoring stall recovery because discussion is closing state=%s",
                                 self.state,
                             )
                             break
-                        waiting_speaker = self.current_speaker or self._last_human_input_requested_speaker
+                        waiting_speaker = self._current_waiting_human_speaker()
                         pending_submitted_input = (
                             self._peek_submitted_human_input(waiting_speaker)
-                            if self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+                            if self.state
+                            in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
                             else ""
                         )
                         if pending_submitted_input:
-                            await self._cancel_pending_wait_task(next_event_task)
+                            await self._cancel_pending_wait_task(next_event_task, team_wait=True)
                             await self._close_active_team_stream(stream)
                             stream_closed_for_recovery = True
                             result = await self._recover_pending_human_turn_after_stream_end(
@@ -4177,7 +4745,9 @@ class FloorManager:
                             recovered_human_turn_stream_end = True
                             saw_events_after_human_turn_recovery = False
                             restart_after_general_stall = True
-                            logger.info("[FloorManager] owner loop recovered pending human input after short timeout")
+                            logger.info(
+                                "[FloorManager] owner loop recovered pending human input after short timeout"
+                            )
                             break
                         if self._deferred_human_request_speaker:
                             logger.warning(
@@ -4187,7 +4757,8 @@ class FloorManager:
                             )
                             human_request = await self._make_human_input_requested_event(
                                 self._deferred_human_request_speaker,
-                                reason=self._deferred_human_request_reason or "moderator_designated_human",
+                                reason=self._deferred_human_request_reason
+                                or "moderator_designated_human",
                                 clear_designation=False,
                             )
                             if human_request is not None:
@@ -4235,7 +4806,10 @@ class FloorManager:
                             self._consecutive_selector_stalls,
                         )
                         # Smart fallback: after consecutive stalls, designate next speaker deterministically
-                        if self._consecutive_selector_stalls >= self._max_consecutive_selector_stalls:
+                        if (
+                            self._consecutive_selector_stalls
+                            >= self._max_consecutive_selector_stalls
+                        ):
                             fallback = self._select_fallback_and_designate()
                             msg = (
                                 f"检测到流程持续停滞，系统已指定 {self._agent_to_display_name.get(fallback, fallback)} 继续发言。"
@@ -4269,10 +4843,6 @@ class FloorManager:
                         if self._active_stream_next_event_task is next_event_task:
                             self._active_stream_next_event_task = None
 
-                    # Reset stall counter on successful event
-                    self._consecutive_selector_stalls = 0
-                    self._consecutive_stall_recoveries = 0
-
                     if recovered_human_turn_stream_end:
                         saw_events_after_human_turn_recovery = True
 
@@ -4289,6 +4859,13 @@ class FloorManager:
 
                     result = await self._process_event(event)
                     if result:
+                        if result.get("event_type") in {
+                            "message",
+                            "stream",
+                            "human_input_requested",
+                        }:
+                            self._consecutive_selector_stalls = 0
+                            self._consecutive_stall_recoveries = 0
                         yield result
                         if result.get("event_type") == "message":
                             _src = (result.get("data") or {}).get("source", "")
@@ -4315,7 +4892,9 @@ class FloorManager:
                     if self._stream_restart_requested:
                         self._clear_stream_restart_request()
                         restart_after_general_stall = True
-                        logger.info("[FloorManager] restarting team stream after explicit restart request")
+                        logger.info(
+                            "[FloorManager] restarting team stream after explicit restart request"
+                        )
                         break
 
                 if self._discussion_end_requested:
@@ -4325,14 +4904,31 @@ class FloorManager:
                     self._expected_next_ai_speaker in self.ai_names
                     and self._expected_next_ai_speaker != "moderator"
                 )
+                if (
+                    stream_exhausted
+                    and not stream_had_any_event
+                    and self._expected_next_ai_speaker == "moderator"
+                    and self._pending_moderator_human_invite_target
+                ):
+                    logger.warning(
+                        "[FloorManager] moderator human-invite recovery stream ended without events; clearing target=%s",
+                        self._pending_moderator_human_invite_target,
+                    )
+                    self._pending_moderator_human_invite_target = None
+                    self._expected_next_ai_speaker = None
+                    self._pending_continuation_task = None
+                    self._set_designated_speaker(None)
+                    break
                 if stream_exhausted and (
-                    not expected_ai_pending_at_stream_end
+                    self.state not in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+                    and not expected_ai_pending_at_stream_end
                     and (
                         not stream_consumed_expected_ai_turn
                         or self._should_block_moderator_final_closing()
                     )
                 ):
-                    self._schedule_recovery_after_premature_stream_end()
+                    if self._schedule_recovery_after_premature_stream_end():
+                        restart_after_general_stall = True
 
                 if stream_exhausted and self._deferred_human_request_speaker:
                     human_request = await self._make_human_input_requested_event(
@@ -4354,17 +4950,28 @@ class FloorManager:
                                 yield result
                             recovered_human_turn_stream_end = True
                             saw_events_after_human_turn_recovery = False
-                            logger.info("[FloorManager] deferred human turn recovered at stream boundary; restarting team stream continuation")
+                            logger.info(
+                                "[FloorManager] deferred human turn recovered at stream boundary; restarting team stream continuation"
+                            )
                             continue
 
                 if restart_after_general_stall:
+                    abandoned_team = self.team
                     if not stream_closed_for_recovery:
                         await self._close_active_team_stream(stream)
                     if self._team_rebuild_requested and self._team_factory is not None:
+                        await self._force_stop_autogen_runtime(
+                            abandoned_team,
+                            reason="team rebuild after stream recovery",
+                        )
                         self.team = self._team_factory()
                         self._team_rebuild_requested = False
-                        logger.info("[FloorManager] rebuilt discussion team after owner-loop human recovery")
-                    logger.info("[FloorManager] restarting team stream after general stall recovery")
+                        logger.info(
+                            "[FloorManager] rebuilt discussion team after owner-loop human recovery"
+                        )
+                    logger.info(
+                        "[FloorManager] restarting team stream after general stall recovery"
+                    )
                     continue
 
                 if (
@@ -4398,7 +5005,9 @@ class FloorManager:
 
                     recovered_human_turn_stream_end = True
                     saw_events_after_human_turn_recovery = False
-                    logger.info("[FloorManager] human turn recovered; restarting team stream continuation")
+                    logger.info(
+                        "[FloorManager] human turn recovered; restarting team stream continuation"
+                    )
                     continue
 
                 break
@@ -4450,7 +5059,9 @@ class FloorManager:
                 )
                 if forced_goodbye:
                     if not is_non_substantive_turn(forced_goodbye):
-                        self._speaker_message_count["moderator"] = self._speaker_message_count.get("moderator", 0) + 1
+                        self._speaker_message_count["moderator"] = (
+                            self._speaker_message_count.get("moderator", 0) + 1
+                        )
                         display_source = self._agent_to_display_name.get("moderator", "moderator")
                         self._recent_display_speakers.append(display_source)
                         if len(self._recent_display_speakers) > 16:
@@ -4467,6 +5078,12 @@ class FloorManager:
                     self._discussion_end_requested = True
 
             self._watchdog_stop.set()
+            await self._cancel_pending_wait_task(
+                self._active_stream_next_event_task,
+                team_wait=True,
+            )
+            self._active_stream_next_event_task = None
+            await self._drain_background_team_tasks()
             if self._watchdog_task:
                 self._watchdog_task.cancel()
                 try:
@@ -4474,6 +5091,10 @@ class FloorManager:
                 except asyncio.CancelledError:
                     pass
                 self._watchdog_task = None
+            await self._force_stop_autogen_runtime(
+                self.team,
+                reason="floor manager shutdown",
+            )
             if self.state != FloorState.ENDED:
                 await self._set_state(FloorState.ENDED, reason="discussion_end")
             yield {"event_type": "ended", "data": {"session_id": self.session_id}}
@@ -4506,11 +5127,7 @@ class FloorManager:
 
             logger.info("[FloorManager] 选择发言者: %s (is_human=%s)", speaker, is_human)
             expected_ai = self._expected_next_ai_speaker
-            if (
-                expected_ai
-                and speaker in self.ai_names
-                and speaker != expected_ai
-            ):
+            if expected_ai and speaker in self.ai_names and speaker != expected_ai:
                 logger.warning(
                     "[FloorManager] 点名后 selector 选择了非预期发言者，已拦截 speaker=%s expected=%s",
                     speaker,
@@ -4533,7 +5150,9 @@ class FloorManager:
             if speaker:
                 self.current_speaker = speaker
                 if not self._has_substantive_utterance(speaker):
-                    self._set_speaker_utterance_status(speaker, SpeakerUtteranceStatus.NOMINATED_ONLY)
+                    self._set_speaker_utterance_status(
+                        speaker, SpeakerUtteranceStatus.NOMINATED_ONLY
+                    )
 
             await self._enter_selecting_speaker(
                 reason="speaker_selection_received",
@@ -4541,7 +5160,9 @@ class FloorManager:
             )
 
             if is_human:
-                await self._set_state(FloorState.HUMAN_TURN_WAITING, reason="speaker_selected_human")
+                await self._set_state(
+                    FloorState.HUMAN_TURN_WAITING, reason="speaker_selected_human"
+                )
             else:
                 await self._set_state(FloorState.AI_SPEAKING, reason="speaker_selected_ai")
             if not is_human:
@@ -4574,6 +5195,12 @@ class FloorManager:
                 )
                 return None
 
+            if self._is_repeated_non_moderator_turn(source):
+                self._log_repeated_non_moderator_drop(source, content, kind="流")
+                self._set_designated_speaker("moderator")
+                self._pop_streaming_message_tail(source, "")
+                return None
+
             await self._sync_ai_turn_without_selection_event(
                 source,
                 reason="ai_stream_detected",
@@ -4603,7 +5230,10 @@ class FloorManager:
                         segment = self._enforce_moderator_brevity(segment, is_final_closing=False)
                         if not segment:
                             continue
-                        if self._moderator_stream_sentence_emitted >= self._MODERATOR_INVITE_SENTENCE_LIMIT:
+                        if (
+                            self._moderator_stream_sentence_emitted
+                            >= self._MODERATOR_INVITE_SENTENCE_LIMIT
+                        ):
                             # 超出主持人流式限额的句子保留给最终消息，避免 TTS 漏播。
                             continue
                     else:
@@ -4648,6 +5278,16 @@ class FloorManager:
                 return None
 
             if source in self.human_names:
+                if self._discussion_end_requested or self.state in (
+                    FloorState.CLOSING,
+                    FloorState.ENDED,
+                ):
+                    logger.info(
+                        "[FloorManager] ignoring late human message during closing: speaker=%s state=%s",
+                        source,
+                        self.state.value,
+                    )
+                    return None
                 await self._prepare_pending_human_message_state(source)
                 self._pending_submitted_human_inputs.pop(source, None)
                 self._last_human_input_requested_speaker = ""
@@ -4667,11 +5307,7 @@ class FloorManager:
                 )
                 return None
             if self._is_repeated_non_moderator_turn(source):
-                logger.warning(
-                    "[FloorManager] 丢弃连续非主持人消息，避免角色自说自答: source=%s content=%s",
-                    source,
-                    str(raw_content)[:120],
-                )
+                self._log_repeated_non_moderator_drop(source, raw_content, kind="消息")
                 self._set_designated_speaker("moderator")
                 self._pop_streaming_message_tail(source, raw_content)
                 return None
@@ -4717,7 +5353,10 @@ class FloorManager:
                         self._last_completed_message_key == completed_key
                         and (now_mono - self._last_completed_message_ts) <= 30.0
                     )
-                    or (now_mono - self._recent_completed_message_ts.get(completed_key, -999.0) <= 30.0)
+                    or (
+                        now_mono - self._recent_completed_message_ts.get(completed_key, -999.0)
+                        <= 30.0
+                    )
                 )
             ):
                 logger.info(
@@ -4777,13 +5416,10 @@ class FloorManager:
                 source == "moderator"
                 and not is_final_closing
                 and self._is_discussion_opening_message(source)
-                and self._looks_like_moderator_opening_candidate(content)
                 and not is_non_substantive_turn(content)
             ):
                 if not self._validate_moderator_opening(content):
-                    logger.warning(
-                        "[FloorManager] 主持人开场不合格，已强制替换为话题简介"
-                    )
+                    logger.warning("[FloorManager] 主持人开场不合格，已强制替换为话题简介")
                 content = self._ensure_moderator_opening_context(content)
             designated_pre_filter: Optional[str] = None
             explicit_formal_human_invite = False
@@ -4813,10 +5449,12 @@ class FloorManager:
                     )
 
             if not is_final_closing:
-                content, designated_pre_filter, forced_human_invite = self._force_first_human_invitation(
-                    source,
-                    content,
-                    designated_pre_filter,
+                content, designated_pre_filter, forced_human_invite = (
+                    self._force_first_human_invitation(
+                        source,
+                        content,
+                        designated_pre_filter,
+                    )
                 )
                 if self._should_force_budget_human_invitation(
                     source,
@@ -4837,7 +5475,9 @@ class FloorManager:
                     designated_pre_filter = target_display
                     budget_forced_human_invite = True
 
-            had_streamed_tts, remaining_tts_raw = self._pop_streaming_message_tail(source, raw_content)
+            had_streamed_tts, remaining_tts_raw = self._pop_streaming_message_tail(
+                source, raw_content
+            )
 
             # 安全过滤 AI 输出
             if source in self.ai_names:
@@ -4861,8 +5501,25 @@ class FloorManager:
                 content = self._enforce_non_human_ai_duration(source, content)
                 if not content:
                     self._pop_streaming_message_tail(source, "")
-                    logger.info("[FloorManager] AI 消息被40秒时长约束后为空，跳过发送: source=%s", source)
+                    logger.info(
+                        "[FloorManager] AI 消息被40秒时长约束后为空，跳过发送: source=%s", source
+                    )
                     return None
+
+            if self._should_force_peer_budget_human_invitation(
+                source,
+                content,
+                designated_pre_filter,
+            ):
+                target_agent = self._preferred_human_agent_name()
+                target_display = self._agent_to_display_name.get(target_agent, target_agent)
+                content = self._append_peer_human_handoff_text(content, target_display)
+                designated_pre_filter = target_display
+                logger.info(
+                    "[FloorManager] 同伴接续后直接邀请真人: source=%s target=%s",
+                    source,
+                    target_agent,
+                )
 
             immediate_human_request_speaker = ""
             immediate_human_request_reason = ""
@@ -4888,12 +5545,19 @@ class FloorManager:
 
             # 如果是老师或用户的发言，检查是否指定了下一位发言者（需求4）
             designated: Optional[str] = designated_pre_filter
-            if not is_final_closing and all_display_names and (source in self.ai_names or source in self.human_names):
+            if (
+                not is_final_closing
+                and all_display_names
+                and (source in self.ai_names or source in self.human_names)
+            ):
                 designated = designated or parse_speaker_designation(content, all_display_names)
-                agent_name = self._display_name_to_agent.get(designated, designated) if designated else ""
+                agent_name = (
+                    self._display_name_to_agent.get(designated, designated) if designated else ""
+                )
                 if (
                     source == "moderator"
                     and designated
+                    and designated_pre_filter is None
                     and not self._has_explicit_targeted_moderator_handoff(
                         content,
                         designated=designated,
@@ -4942,7 +5606,11 @@ class FloorManager:
                     designated = target_display
                     agent_name = target_agent
                 if designated:
-                    if source == "moderator" and agent_name in self.human_names and self._should_delay_first_human_handoff():
+                    if (
+                        source == "moderator"
+                        and agent_name in self.human_names
+                        and self._should_delay_first_human_handoff()
+                    ):
                         if not explicit_formal_human_invite:
                             logger.warning(
                                 "[FloorManager] 首轮真人暖场不足，忽略主持人过早点名: target=%s non_human_turns=%s",
@@ -4953,7 +5621,12 @@ class FloorManager:
                             agent_name = ""
                             content = self._build_moderator_opening_baseline()
                     if designated:
-                        logger.info("[FloorManager] %s 指定下一位发言者: %s (agent: %s)", display_source, designated, agent_name)
+                        logger.info(
+                            "[FloorManager] %s 指定下一位发言者: %s (agent: %s)",
+                            display_source,
+                            designated,
+                            agent_name,
+                        )
                         # 规则 11：统计老师 vs 同学点名次数。
                         if source == "moderator":
                             self._moderator_nomination_count += 1
@@ -4970,12 +5643,20 @@ class FloorManager:
                         agent_name = self._smart_fallback_speaker()
                         if agent_name and agent_name not in {last_substantive, source}:
                             designated = self._agent_to_display_name.get(agent_name, agent_name)
-                            logger.info("[FloorManager] back-to-back已重定向至: %s (display=%s)", agent_name, designated)
+                            logger.info(
+                                "[FloorManager] back-to-back已重定向至: %s (display=%s)",
+                                agent_name,
+                                designated,
+                            )
                         else:
                             # 无可选fallback，放弃指定让selector自行决定
                             designated = None
                             agent_name = ""
-                    if source == "moderator" and original_designated and designated != original_designated:
+                    if (
+                        source == "moderator"
+                        and original_designated
+                        and designated != original_designated
+                    ):
                         if designated and agent_name in self.human_names:
                             content = self._build_first_human_handoff_text(
                                 content,
@@ -4999,6 +5680,7 @@ class FloorManager:
                         self._deferred_human_request_speaker = agent_name
                         self._deferred_human_request_reason = "moderator_designated_human"
                         self._pending_human_input_reason = self._deferred_human_request_reason
+                        self._pending_moderator_human_invite_target = None
                         self._expected_next_ai_speaker = None
                         immediate_human_request_speaker = agent_name
                         immediate_human_request_reason = self._deferred_human_request_reason
@@ -5039,7 +5721,11 @@ class FloorManager:
                                 self._moderator_roleplay_target,
                             )
                         self._expected_next_ai_speaker = None
-                    elif source == "moderator" and agent_name in self.ai_names and agent_name != "moderator":
+                    elif (
+                        source == "moderator"
+                        and agent_name in self.ai_names
+                        and agent_name != "moderator"
+                    ):
                         self._set_designated_speaker(agent_name)
                         self._expected_next_ai_speaker = agent_name
                         boundary_handoff_target = agent_name
@@ -5101,7 +5787,9 @@ class FloorManager:
             if normalized_completed_content:
                 self._recent_completed_message_ts[completed_key] = now_mono
             if not is_non_substantive_turn(content):
-                self._set_speaker_utterance_status(source, SpeakerUtteranceStatus.SPOKE_WITH_CONTENT)
+                self._set_speaker_utterance_status(
+                    source, SpeakerUtteranceStatus.SPOKE_WITH_CONTENT
+                )
                 if source != "moderator":
                     self._closing_attempt_count = 0
                 if source not in self.human_names:
@@ -5136,7 +5824,9 @@ class FloorManager:
                 if human_request is not None:
                     self._queue_run_event(message_event)
                     if should_restart_for_boundary_handoff(boundary_handoff_target):
-                        self._request_stream_restart(f"designated_speaker_handoff:{boundary_handoff_target}")
+                        self._request_stream_restart(
+                            f"designated_speaker_handoff:{boundary_handoff_target}"
+                        )
                     if (
                         source == "moderator"
                         and self._pending_human_guidance
@@ -5157,7 +5847,14 @@ class FloorManager:
                         self._last_human_input_request_id = ""
                         self._human_completed_turn_count += 1
                         self._post_human_feedback_pending = True
-                        await self._set_state(FloorState.SELECTING_SPEAKER, reason="human_message_complete")
+                        self._designate_peer_followup_after_human_turn(content)
+                        if not self._discussion_end_requested and self.state not in (
+                            FloorState.CLOSING,
+                            FloorState.ENDED,
+                        ):
+                            await self._set_state(
+                                FloorState.SELECTING_SPEAKER, reason="human_message_complete"
+                            )
                     return human_request
             elif notify_human_request_speaker:
                 await self._notify_deferred_human_input_requested(
@@ -5165,7 +5862,9 @@ class FloorManager:
                     reason=notify_human_request_reason,
                 )
             if should_restart_for_boundary_handoff(boundary_handoff_target):
-                self._request_stream_restart(f"designated_speaker_handoff:{boundary_handoff_target}")
+                self._request_stream_restart(
+                    f"designated_speaker_handoff:{boundary_handoff_target}"
+                )
             if (
                 source == "moderator"
                 and self._pending_human_guidance
@@ -5187,7 +5886,14 @@ class FloorManager:
                 # 规则 7：记录人后馈馈领待补。
                 self._human_completed_turn_count += 1
                 self._post_human_feedback_pending = True
-                await self._set_state(FloorState.SELECTING_SPEAKER, reason="human_message_complete")
+                self._designate_peer_followup_after_human_turn(content)
+                if not self._discussion_end_requested and self.state not in (
+                    FloorState.CLOSING,
+                    FloorState.ENDED,
+                ):
+                    await self._set_state(
+                        FloorState.SELECTING_SPEAKER, reason="human_message_complete"
+                    )
             elif source in self.ai_names and self.state == FloorState.AI_SPEAKING:
                 await self._enter_selecting_speaker(
                     reason="ai_message_complete",
@@ -5248,7 +5954,11 @@ class FloorManager:
         self._touch_progress("submit_human_input")
         self._pending_human_input_reason = "normal"
 
-        logger.info("[FloorManager] 收到人类输入: name=%s, text_len=%d", normalized_name, len(normalized_text))
+        logger.info(
+            "[FloorManager] 收到人类输入: name=%s, text_len=%d",
+            normalized_name,
+            len(normalized_text),
+        )
 
         # 空输入直接按跳过处理，保证流程继续。
         if not normalized_text:
@@ -5290,7 +6000,9 @@ class FloorManager:
             return
 
         if not normalize_reference_match_text(normalized_text):
-            logger.info("[FloorManager] 输入仅包含空白/表情/标点，按空内容处理: %s", normalized_name)
+            logger.info(
+                "[FloorManager] 输入仅包含空白/表情/标点，按空内容处理: %s", normalized_name
+            )
             if self.human_guidance_memory is not None:
                 await self.human_guidance_memory.clear()
             self._pending_human_guidance = False
@@ -5371,7 +6083,7 @@ class FloorManager:
         # 使用 display name map if available
         participant_labels = (
             list(self._display_name_to_agent.keys())
-            if hasattr(self, '_display_name_to_agent')
+            if hasattr(self, "_display_name_to_agent")
             else all_participant_names
         )
         designated = parse_speaker_designation(normalized_text, participant_labels)
@@ -5388,7 +6100,7 @@ class FloorManager:
             # 转换为 agent name
             agent_name = (
                 self._display_name_to_agent.get(designated, designated)
-                if hasattr(self, '_display_name_to_agent')
+                if hasattr(self, "_display_name_to_agent")
                 else designated
             )
             current_agent_name = self._display_name_to_agent.get(normalized_name, normalized_name)
@@ -5444,17 +6156,16 @@ class FloorManager:
         speaker_agent_name = self._normalize_agent_name(speaker)
         display_speaker = self._agent_to_display_name.get(speaker_agent_name, speaker)
         human_display_names = {
-            self._agent_to_display_name.get(name, name)
-            for name in self.human_names
+            self._agent_to_display_name.get(name, name) for name in self.human_names
         }
         is_human = speaker_agent_name in self.human_names or speaker in human_display_names
         if not is_human:
             logger.info("[FloorManager] 非人类参与者 %s 尝试举手打断，忽略", speaker)
             return
 
-        if (
-            self.current_speaker == speaker_agent_name
-            and self.state in (FloorState.HUMAN_TURN_WAITING, FloorState.HUMAN_SPEAKING)
+        if self.current_speaker == speaker_agent_name and self.state in (
+            FloorState.HUMAN_TURN_WAITING,
+            FloorState.HUMAN_SPEAKING,
         ):
             logger.info("[FloorManager] %s 已经获得发言权，忽略重复举手", display_speaker)
             return
@@ -5474,7 +6185,7 @@ class FloorManager:
         # 由老师口吻发布同意插话通知。
         await self._emit_message(
             moderator_display,
-            f"{display_speaker} 同学，我同意你先发言，其他同学稍后继续。",
+            f"{self._format_display_vocative(display_speaker)}，请。",
             "interrupt",
         )
 
