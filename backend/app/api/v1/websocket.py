@@ -17,6 +17,7 @@ from app.agents.human_proxy import clear_human_queues, create_human_proxy, norma
 from app.agents.moderator import create_moderator
 from app.agents.virtual_character import create_virtual_character, create_thinker_agent
 from app.config import settings
+from app.core.discussion_session_hub import SESSION_HUB, LiveDiscussion, SocketTransport
 from app.core.floor_manager import FloorManager
 from app.store import user_store
 from autogen_core.models import UserMessage
@@ -37,6 +38,84 @@ from app.core.turn_scheduler import create_discussion_team
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["websocket"])
+
+
+async def _resume_discussion(
+    websocket: WebSocket,
+    live: LiveDiscussion,
+    resume_from_seq: int,
+    session_id: str,
+) -> None:
+    """Re-attach a reconnecting socket to an already-running discussion.
+
+    The discussion task keeps running independently; here we swap the live
+    transport to the new socket, replay any events the client missed, and pump
+    inbound human input into the existing FloorManager.
+    """
+    transport = SocketTransport(websocket)
+    live.attach(transport)
+    logger.info(
+        "WebSocket 重连恢复讨论: session_id=%s resume_seq=%s", session_id, resume_from_seq
+    )
+    try:
+        await transport.send_json(
+            {
+                "event_type": "resumed",
+                "event_seq": live.event_seq,
+                "data": {"session_id": session_id, "resume_seq": resume_from_seq},
+            }
+        )
+        for payload in live.replay_after(resume_from_seq):
+            await transport.send_json(payload)
+    except Exception:
+        transport.mark_closed()
+        live.detach()
+        live.schedule_grace_cleanup(live.finalize)
+        return
+
+    floor_manager = live.floor_manager
+    agent_display_map = live.agent_display_map or {}
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except Exception:
+                continue
+            msg_type = str(msg.get("type", "unknown") or "unknown")
+            if msg_type == "human_input" and floor_manager is not None:
+                speaker = normalize_display_name(msg.get("speaker", ""))
+                content = str(msg.get("content", "") or "")
+                live.pending_human_request_ts.pop(speaker, None)
+                live.pending_human_request_id.pop(speaker, "")
+                try:
+                    await floor_manager.submit_human_input(speaker, content)
+                except Exception:
+                    logger.debug("resume human_input failed", exc_info=True)
+            elif msg_type == "pause" and floor_manager is not None:
+                floor_manager.set_paused(True)
+                if live.send_event is not None:
+                    await live.send_event("system", {"message": "讨论已暂停"})
+            elif msg_type == "resume" and floor_manager is not None:
+                floor_manager.set_paused(False)
+                if live.send_event is not None:
+                    await live.send_event("system", {"message": "讨论已恢复"})
+                    pending_request = floor_manager.pending_human_input_request_snapshot()
+                    if pending_request is not None:
+                        payload = dict(pending_request)
+                        speaker = (payload.get("speaker") or "").strip()
+                        if speaker:
+                            payload["agent_speaker"] = speaker
+                            payload["speaker"] = agent_display_map.get(speaker, speaker)
+                        await live.send_event("human_input_requested", payload)
+    except WebSocketDisconnect:
+        logger.info("WebSocket 再次断开（恢复连接窗口）: session_id=%s", session_id)
+    except Exception:
+        logger.debug("resume input loop error", exc_info=True)
+    finally:
+        live.detach()
+        if live.is_active():
+            live.schedule_grace_cleanup(live.finalize)
 
 
 @router.websocket("/ws/discussion/{session_id}")
@@ -65,6 +144,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
     logger.info(f"WebSocket 连接建立: session_id={session_id}")
     event_seq = 0
+    live: LiveDiscussion | None = None
+    detaching = False
     designated_next_speaker: str | None = None
     background_tasks: set[asyncio.Task] = set()
     floor_manager: FloorManager | None = None
@@ -172,7 +253,10 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
     async def send_event(event_type: str, data: dict) -> bool:
         nonlocal ws_closed
         nonlocal history_final_status, history_final_reason
-        if ws_closed:
+        nonlocal event_seq
+
+        # Legacy guard only applies before a LiveDiscussion is wired up.
+        if live is None and ws_closed:
             record_send_drop("ws_closed_guard", event_type)
             if history_store is not None:
                 _now = asyncio.get_running_loop().time()
@@ -186,7 +270,6 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         {"reason": _reason_key, "event_type": event_type},
                     )
             return False
-        nonlocal event_seq
         event_seq += 1
         payload = {
             "event_type": event_type,
@@ -194,8 +277,14 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             "data": data,
         }
         try:
-            await websocket.send_json(payload)
-            if history_store is not None:
+            if live is not None:
+                # Buffers for reconnect replay, delivers when a socket is attached.
+                delivered = await live.deliver(payload)
+            else:
+                await websocket.send_json(payload)
+                delivered = True
+
+            if delivered and history_store is not None:
                 await history_store.append_entry(
                     "outbound",
                     event_type,
@@ -209,6 +298,29 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     history_final_status = "error"
                 if not history_final_reason:
                     history_final_reason = str(data.get("message", "") or "").strip()
+
+            if not delivered:
+                # Event was buffered (client temporarily gone) but the
+                # discussion keeps running; record a throttled drop signal.
+                reason_key = (
+                    "detached_buffer"
+                    if (live is not None and live.within_grace())
+                    else "ws_closed_guard"
+                )
+                record_send_drop(reason_key, event_type)
+                if live is None:
+                    ws_closed = True
+                if history_store is not None:
+                    _now = asyncio.get_running_loop().time()
+                    _last = _send_drop_history_last_ts.get(reason_key, 0.0)
+                    if _now - _last >= _send_drop_history_throttle_sec:
+                        _send_drop_history_last_ts[reason_key] = _now
+                        await history_store.append_entry(
+                            "internal",
+                            "send_drop",
+                            {"reason": reason_key, "event_type": event_type},
+                        )
+                return False
             return True
         except (RuntimeError, WebSocketDisconnect) as e:
             # RuntimeError: Unexpected ASGI message 'websocket.send' after close.
@@ -224,7 +336,11 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         "send_drop",
                         {"reason": reason, "event_type": event_type},
                     )
-            ws_closed = True
+            if live is not None:
+                if live.transport is not None:
+                    live.transport.mark_closed()
+            else:
+                ws_closed = True
             return False
         except Exception:
             record_send_drop("send_exception", event_type)
@@ -239,7 +355,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                         "send_drop",
                         {"reason": _reason, "event_type": event_type},
                     )
-            ws_closed = True
+            if live is None:
+                ws_closed = True
             logger.debug("send_event failed for type=%s", event_type, exc_info=True)
             return False
 
@@ -316,6 +433,42 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         max_turns = max(1, int(config.get("max_turns") or settings.max_turns))
         # 需求16：旁听模式——用户只观看讨论，每次轮到用户时系统自动跳过
         observer_mode = bool(config.get("observer_mode", False))
+
+        # --- 断线重连：恢复仍在后台运行的讨论 ---
+        # 用户切换浏览器标签或短暂断网后，讨论会在后台保活；重连时携带
+        # resume=true + resume_seq=<最后收到的 event_seq>，这里直接接管原会话。
+        resume_requested = bool(config.get("resume"))
+        try:
+            resume_from_seq = int(config.get("resume_seq") or 0)
+        except (TypeError, ValueError):
+            resume_from_seq = 0
+        if resume_requested:
+            existing_live = SESSION_HUB.get_active(session_id)
+            if existing_live is not None:
+                await _resume_discussion(
+                    websocket, existing_live, resume_from_seq, session_id
+                )
+                return
+            # 请求恢复但会话已过宽限期/已结束：明确告知客户端讨论已结束，
+            # 不要用同一 session_id 误启一场全新讨论。
+            try:
+                await websocket.send_json(
+                    {
+                        "event_type": "ended",
+                        "event_seq": resume_from_seq + 1,
+                        "data": {
+                            "session_id": session_id,
+                            "reason": "session_expired",
+                            "resumable": False,
+                        },
+                    }
+                )
+            except Exception:
+                logger.debug("notify session_expired failed", exc_info=True)
+            return
+
+        # 新会话：创建可保活的 LiveDiscussion，并让所有出站事件经其缓冲转发。
+        live = LiveDiscussion(session_id, SocketTransport(websocket))
 
         history_store = MeetingHistoryStore(session_id)
         await history_store.start(
@@ -561,7 +714,7 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             human_queue_scope=session_id,
             thinker_agent_names=[a.name for a in thinker_agents],
             nominal_max_turns=max_turns,
-            is_connected=lambda: not ws_closed,
+            is_connected=lambda: (live.is_connected() if live is not None else not ws_closed),
         )
 
         # 设置 display name 映射（需求4：用于指定发言者解析）
@@ -718,6 +871,65 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 topic_title=topic.title,
             )
         )
+
+        # 将运行中的讨论登记到会话保活中心，使断线重连可以接管同一会话。
+        def _build_final_stats() -> dict:
+            floor_diag = floor_manager.diagnostics() if floor_manager is not None else {}
+            return {
+                "send_observability": {
+                    "drop_total": send_drop_total,
+                    "drop_reasons": dict(send_drop_reasons),
+                    "last_drop": dict(last_send_drop) if last_send_drop else None,
+                },
+                "client_metrics": export_client_metric_stats(),
+                "floor_manager": floor_diag,
+            }
+
+        async def _finalize_detached() -> None:
+            # 宽限期内未重连（或讨论已在后台结束）时的统一收尾。
+            try:
+                task = live.discussion_task if live is not None else discussion_task
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:
+                        pass
+                if floor_manager is not None:
+                    floor_manager._on_message = None
+                    floor_manager._on_turn_change = None
+                    floor_manager._on_state_change = None
+                    floor_manager._on_interrupt = None
+                    floor_manager._on_error = None
+                if background_tasks:
+                    for bt in list(background_tasks):
+                        bt.cancel()
+                    await asyncio.gather(*background_tasks, return_exceptions=True)
+                    background_tasks.clear()
+                clear_human_queues(session_scope=session_id)
+                if history_store is not None:
+                    final_status = history_final_status
+                    if final_status == "running":
+                        final_status = "disconnected"
+                    await history_store.finish(
+                        status=final_status,
+                        reason=history_final_reason or "client_disconnected",
+                        final_stats=_build_final_stats(),
+                    )
+            except Exception:
+                logger.debug("finalize detached failed session=%s", session_id, exc_info=True)
+            finally:
+                SESSION_HUB.discard(session_id, live)
+
+        live.floor_manager = floor_manager
+        live.discussion_task = discussion_task
+        live.agent_display_map = agent_display_map
+        live.pending_human_request_ts = pending_human_request_ts
+        live.pending_human_request_id = pending_human_request_id
+        live.send_event = send_event
+        live.human_name = human_names[0] if human_names else ""
+        live.finalize = _finalize_detached
+        SESSION_HUB.register(live)
 
         # 同时处理来自客户端的人类输入
         async def handle_human_input():
@@ -900,12 +1112,27 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             except Exception as e:
                 logger.error(f"处理人类输入时出错: {e}")
 
-        # 并行运行讨论和人类输入处理。任一侧结束时，取消另一侧，避免连接关闭后继续发送。
+        # 并行运行讨论和人类输入处理。
+        # 若客户端断开（input_task 先结束）但讨论仍在进行，则不再取消讨论，
+        # 而是 detach 当前 socket、保活后台讨论，并启动宽限期等待重连。
         input_task = asyncio.create_task(handle_human_input())
         done, pending = await asyncio.wait(
             {discussion_task, input_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        if (
+            live is not None
+            and input_task in done
+            and not discussion_task.done()
+        ):
+            detaching = True
+            live.detach()
+            live.schedule_grace_cleanup(live.finalize)
+            logger.info(
+                "WebSocket 断开但讨论继续后台运行，等待重连: session_id=%s", session_id
+            )
+            return
 
         for t in pending:
             t.cancel()
@@ -968,38 +1195,44 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                     user_store.record_event(_session_user_id, "session_end", f"duration_ms={session_ms}")
             except Exception:
                 logger.debug("Failed to track session duration", exc_info=True)
-        if floor_manager is not None:
-            # 连接关闭后停止 FloorManager 对外回调，避免 finally 阶段继续尝试 websocket.send。
-            floor_manager._on_message = None
-            floor_manager._on_turn_change = None
-            floor_manager._on_state_change = None
-            floor_manager._on_interrupt = None
-            floor_manager._on_error = None
-        if background_tasks:
-            for task in list(background_tasks):
-                task.cancel()
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-            background_tasks.clear()
-        clear_human_queues(session_scope=session_id)
-        if history_store is not None:
-            final_status = history_final_status
-            if final_status == "running":
-                final_status = "disconnected"
-            floor_diag = floor_manager.diagnostics() if floor_manager is not None else {}
-            await history_store.finish(
-                status=final_status,
-                reason=history_final_reason,
-                final_stats={
-                    "send_observability": {
-                        "drop_total": send_drop_total,
-                        "drop_reasons": dict(send_drop_reasons),
-                        "last_drop": dict(last_send_drop) if last_send_drop else None,
+        if detaching:
+            # 讨论仍在后台运行（断线宽限期内），收尾交由 _finalize_detached 处理。
+            logger.info(f"WebSocket 连接挂起（保活中）: session_id={session_id}")
+        else:
+            if live is not None:
+                SESSION_HUB.discard(session_id, live)
+            if floor_manager is not None:
+                # 连接关闭后停止 FloorManager 对外回调，避免 finally 阶段继续尝试 websocket.send。
+                floor_manager._on_message = None
+                floor_manager._on_turn_change = None
+                floor_manager._on_state_change = None
+                floor_manager._on_interrupt = None
+                floor_manager._on_error = None
+            if background_tasks:
+                for task in list(background_tasks):
+                    task.cancel()
+                await asyncio.gather(*background_tasks, return_exceptions=True)
+                background_tasks.clear()
+            clear_human_queues(session_scope=session_id)
+            if history_store is not None:
+                final_status = history_final_status
+                if final_status == "running":
+                    final_status = "disconnected"
+                floor_diag = floor_manager.diagnostics() if floor_manager is not None else {}
+                await history_store.finish(
+                    status=final_status,
+                    reason=history_final_reason,
+                    final_stats={
+                        "send_observability": {
+                            "drop_total": send_drop_total,
+                            "drop_reasons": dict(send_drop_reasons),
+                            "last_drop": dict(last_send_drop) if last_send_drop else None,
+                        },
+                        "client_metrics": export_client_metric_stats(),
+                        "floor_manager": floor_diag,
                     },
-                    "client_metrics": export_client_metric_stats(),
-                    "floor_manager": floor_diag,
-                },
-            )
-        logger.info(f"WebSocket 清理完成: session_id={session_id}")
+                )
+            logger.info(f"WebSocket 清理完成: session_id={session_id}")
 
 
 async def _run_discussion(

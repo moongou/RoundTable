@@ -7,6 +7,23 @@
 
 ---
 
+## v1.0.17 - 2026-06-01
+
+### Bug 修复
+
+- 修复「讨论过程中切到其他浏览器标签页，回来后系统误判讨论已中断」的问题。讨论现在
+  在后台保活，短暂断线/切标签不再终止会话。
+  - 后端新增可恢复会话中心 `discussion_session_hub`（`LiveDiscussion` + `DiscussionSessionHub`）：
+    出站事件经有界缓冲区转发，断线进入宽限期（默认 180s）继续后台运行，重连时按客户端
+    最后收到的 `event_seq` 补发遗漏事件并接管原讨论任务。
+  - `websocket.py`：断线时不再取消讨论任务，而是 `detach` 当前 socket 并启动宽限清理；
+    `is_connected` 改为感知宽限期，避免 FloorManager 守卫在重连窗口内强制结束；新增
+    `_resume_discussion` 重连接管与 `resume` 过期会话的明确 `ended(session_expired)` 应答。
+  - 前端 `DiscussionWebSocket` 区分服务端真正 `ended` 与原始 socket `onDone`：意外断开时
+    发出 `disconnected` 并携带 `resume_seq` 自动重连（指数退避，最多 8 次），成功后收到
+    `resumed`；沉浸式讨论页据此显示「连接中断，正在恢复 / 讨论已恢复」，不再误判结束。
+  - 新增 8 个会话保活回归用例（缓冲/补发、宽限清理、重连取消、过期会话语义等）。
+
 ## v1.0.16 - 2026-05-31
 
 ### 稳定性改进

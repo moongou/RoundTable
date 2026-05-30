@@ -3878,6 +3878,23 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
           }
         }
         break;
+      case WsEventType.disconnected:
+        // 连接短暂中断（切标签/掉线），讨论仍在后台运行，客户端会自动重连恢复。
+        // 关键：不要将其当作讨论结束，避免误触发“讨论已结束”。
+        if (!_discussionEnded) {
+          setState(() {
+            _statusText = '连接中断，正在尝试恢复讨论…';
+          });
+          _showStatusToast('连接中断，正在尝试恢复讨论…', isError: false);
+        }
+        break;
+      case WsEventType.resumed:
+        // 重连成功，后台讨论已接管并补发遗漏内容。
+        setState(() {
+          _statusText = '讨论已恢复';
+        });
+        _showStatusToast('讨论已恢复', isError: false);
+        break;
       case WsEventType.interrupt:
         final data = event.data;
         if (data != null) {
