@@ -680,7 +680,7 @@ def _mentions_participant_as_quote_owner(text: str, participant: str, fragment: 
         return False
     return bool(
         re.search(
-            rf"{re.escape(participant)}(?:同学|先生|老师)?[^。！？!?\n]{{0,18}}(?:刚才|刚刚|前面)?[^。！？!?\n]{{0,8}}(?:说过|说的|提到过|提到的|提到|提过|提的|讲过|讲的|分享过|分享的|问过|问的|写过|写的)[^。！？!?\n]{{0,10}}[“\"「『]{re.escape(fragment)}",
+            rf"{re.escape(participant)}(?:同学|先生|老师)?[^。！？!?\n]{{0,18}}(?:刚才|刚刚|前面)?[^。！？!?\n]{{0,8}}(?:说过|说的|提到过|提到的|提到|提过|提的|讲过|讲的|分享过|分享的|问过|问的|写过|写的|说|讲|提|问|写|分享)[^。！？!?\n]{{0,10}}[“\"「『]{re.escape(fragment)}",
             text,
         )
     )

@@ -892,6 +892,55 @@ def test_floor_manager_rewrites_named_quote_when_owner_is_different() -> None:
     assert "小探说到“恐龙打架”" in sanitized
 
 
+def _grounding_floor_manager() -> FloorManager:
+    floor_manager = FloorManager(
+        team=_TeamStub(),
+        ai_agents=[SimpleNamespace(name="moderator"), SimpleNamespace(name="explorer")],
+        human_agents=[SimpleNamespace(name="豆苗")],
+        safety_filter=_SafetyFilterStub(),
+    )
+    floor_manager.set_display_name_map(
+        {
+            "moderator": "老师",
+            "explorer": "小探",
+            "豆苗": "豆苗",
+        }
+    )
+    return floor_manager
+
+
+def test_grounding_history_finds_true_owner_without_reference_quotes() -> None:
+    """接地校验可在完整发言历史中定位真实出处，即便近期引用缓存为空。"""
+    floor_manager = _grounding_floor_manager()
+    floor_manager._grounding_history = [
+        ("小探", "我觉得最有趣的部分是恐龙打架谁会赢，这要自己想象。"),
+        ("豆苗", "如果规则是大家一起商量出来的，我会更愿意遵守。"),
+    ]
+    # 近期引用缓存为空时，旧的评分逻辑无法定位归属。
+    assert floor_manager._guess_reference_owner("恐龙打架") == "小探"
+
+
+def test_grounding_rejects_fabricated_attribution_even_if_scorer_matches() -> None:
+    """即使近期引用评分会命中某人，接地历史中查无此言则拒绝归属，避免张冠李戴。"""
+    floor_manager = _grounding_floor_manager()
+    # 评分逻辑会把该片段归给豆苗……
+    floor_manager._recent_reference_quotes = [("豆苗", "多米诺骨牌效应特别明显")]
+    # ……但完整发言历史里豆苗/小探都没真正说过它。
+    floor_manager._grounding_history = [
+        ("豆苗", "我更在乎规则是不是大家一起商量出来的。"),
+        ("小探", "我喜欢自己想象恐龙打架的画面。"),
+    ]
+    assert floor_manager._guess_reference_owner("多米诺骨牌效应特别明显") is None
+
+
+def test_grounding_dormant_when_history_empty_preserves_legacy_behavior() -> None:
+    """无接地历史时保持旧有评分行为，确保既有用例不被影响。"""
+    floor_manager = _grounding_floor_manager()
+    floor_manager._recent_reference_quotes = [("豆苗", "多米诺骨牌效应特别明显")]
+    floor_manager._grounding_history = []
+    assert floor_manager._guess_reference_owner("多米诺骨牌效应特别明显") == "豆苗"
+
+
 @pytest.mark.asyncio
 async def test_floor_manager_recovers_pending_human_message_after_residual_ai_state() -> None:
     floor_manager = FloorManager(

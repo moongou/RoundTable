@@ -39,8 +39,10 @@ from autogen_agentchat.teams import SelectorGroupChat
 
 from app.agents.human_proxy import get_human_queue, put_human_input
 from app.core.discussion_rules import (
+    CitationClaim,
     SpeakerBalanceSnapshot,
     speaker_balance_warnings,
+    validate_citation_claim,
 )
 from app.core.floor_text_utils import (
     extract_core_viewpoint,
@@ -328,6 +330,10 @@ class FloorManager:
         self._recent_display_speakers: list[str] = []
         self._recent_turn_summaries: list[tuple[str, str]] = []
         self._recent_reference_quotes: list[tuple[str, str]] = []
+        # 接地校验历史：保留每位发言者的完整发言内容（display_name, content），
+        # 用于核对“被引片段是否真的出现在该角色历史发言中”。仅在实时讨论
+        # （summary_memory 启用）时填充；单测默认为空，故不影响既有用例行为。
+        self._grounding_history: list[tuple[str, str]] = []
         self._last_completed_message_key: Optional[tuple[str, str]] = None
         self._last_completed_message_ts: float = 0.0
         self._recent_completed_message_ts: dict[tuple[str, str], float] = {}
@@ -3308,7 +3314,35 @@ class FloorManager:
             guidance["suggested_peer_summary"] = peer_focus[1]
         return guidance
 
+    def _is_grounded_citation(self, owner: str, fragment: str) -> bool:
+        """核对 owner 的历史发言中是否真的出现过 fragment（接地校验）。"""
+        if not owner or not fragment or not self._grounding_history:
+            return False
+        return validate_citation_claim(
+            CitationClaim(owner=owner, quote=fragment, history=self._grounding_history)
+        )
+
+    def _grounded_citation_owner(self, fragment: str) -> str | None:
+        """在完整发言历史中找出真正说过 fragment 的最近发言者；找不到返回 None。"""
+        if not fragment or not self._grounding_history:
+            return None
+        seen: set[str] = set()
+        for owner, _content in reversed(self._grounding_history):
+            if owner in seen:
+                continue
+            seen.add(owner)
+            if validate_citation_claim(
+                CitationClaim(owner=owner, quote=fragment, history=self._grounding_history)
+            ):
+                return owner
+        return None
+
     def _guess_reference_owner(self, fragment: str) -> str | None:
+        # 接地校验优先：若完整发言历史中能确认真实出处，直接采用该归属。
+        grounded_owner = self._grounded_citation_owner(fragment)
+        if grounded_owner is not None:
+            return grounded_owner
+
         best_name = ""
         best_score = 0
         tied = False
@@ -3324,6 +3358,10 @@ class FloorManager:
                 tied = True
 
         if best_score < 3 or tied:
+            return None
+        # 接地兜底：若已有完整发言历史，却无法确认评分得到的归属真的说过该片段，
+        # 说明这很可能是被编造/错配的引用，拒绝归属以避免张冠李戴。
+        if self._grounding_history and not self._is_grounded_citation(best_name, fragment):
             return None
         return best_name
 
@@ -3646,6 +3684,10 @@ class FloorManager:
         self._recent_turn_summaries.append((display_source, summary))
         if len(self._recent_turn_summaries) > 3:
             self._recent_turn_summaries = self._recent_turn_summaries[-3:]
+        # 接地校验历史：保留较长的完整发言内容，便于核对被引片段的真实出处。
+        self._grounding_history.append((display_source, text))
+        if len(self._grounding_history) > 40:
+            self._grounding_history = self._grounding_history[-40:]
         quote = extract_reference_quote(text)
         if quote:
             self._recent_reference_quotes.append((display_source, quote))
