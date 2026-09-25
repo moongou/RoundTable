@@ -137,6 +137,7 @@ TTS_PROVIDERS = {
     "openai_tts": "OpenAI TTS API",
     "siliconflow_tts": "硅基流动 TTS",
     "volcengine_tts": "火山引擎 TTS",
+    "boson_tts": "Boson Higgs Audio TTS",
     "disabled": "禁用语音合成（纯文本显示）",
 }
 
@@ -423,6 +424,13 @@ class Settings(BaseSettings):
     volcengine_tts_voice: str = "zh_female_qingxin"
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     cosyvoice_voice: str = "default"
+
+    # Boson AI (Higgs Audio TTS + Avatar)
+    boson_api_key: str = ""
+    boson_base_url: str = "https://api.boson.ai/v1"
+    boson_tts_model: str = "higgs-audio-v3"
+    boson_avatar_url: str = ""
+    boson_avatar_enabled: bool = False
 
     # 交互方式
     push_to_talk: bool = True

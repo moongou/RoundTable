@@ -87,7 +87,7 @@ else
 fi
 
 echo "[2/3] 构建 Web..."
-"$FLUTTER_BIN" build web --release --pwa-strategy=none --no-tree-shake-icons "${BUILD_ARGS[@]}"
+"$FLUTTER_BIN" build web --release --pwa-strategy=none --no-tree-shake-icons ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
 
 echo "[3/3] 同步到后端 static 目录..."
 mkdir -p "$BACKEND_STATIC_DIR"

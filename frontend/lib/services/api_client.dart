@@ -246,6 +246,24 @@ class ApiClient {
     return SpeechConfig.fromJson(response.data as Map<String, dynamic>);
   }
 
+
+  /// 获取 Boson API Key 配置状态（只含脱敏信息）
+  Future<BosonSecretStatus> getBosonSecretStatus() async {
+    final response = await _dio.get('/api/v1/config/secrets/boson');
+    return BosonSecretStatus.fromJson(response.data as Map<String, dynamic>);
+  }
+
+  /// 保存 Boson API Key 到后端 .env
+  Future<BosonSecretStatus> saveBosonSecret(
+    BosonSecretUpdateRequest request,
+  ) async {
+    final response = await _dio.post(
+      '/api/v1/config/secrets/boson',
+      data: request.toJson(),
+    );
+    return BosonSecretStatus.fromJson(response.data as Map<String, dynamic>);
+  }
+
   /// 检查本地服务健康状态
   Future<Map<String, ServiceHealth>> checkServicesHealth() async {
     final response = await _dio.get('/api/v1/config/health');

@@ -7,6 +7,28 @@
 
 ---
 
+## v1.0.19 - 2026-09-26
+
+### Bug 修复
+
+- 修复本地开发面板拉起后端时立刻崩溃的问题。过去面板用系统 `python3 -m app.main`
+  启动，而项目依赖装在 `backend/.venv` 里，导致 `ModuleNotFoundError: No module named
+  'websockets'`；且登记的工作目录指向已废弃的旧检出 `~/IdeaProjects/RoundTable`。
+- 修正后端端口错配。`backend/.env` 中的 `PORT` 被设成 8888（那是项目自带 devpanel 的
+  端口），与 README、Flutter 前端、`devpanel.js` 三者约定的 8001 不一致；现已统一为 8001。
+- `devpanel.js` 的虚拟环境探测路径由不存在的 `backend/venv` 修正为 `backend/.venv`，
+  使其拉起后端时同样使用带依赖的虚拟环境。
+
+### 工程与环境
+
+- 清理重复的工作副本：`~/IdeaProjects/RoundTable` 是同一仓库的废弃检出（分支 `DEV-AB`，
+  最后活动 2026-06-01），已删除，保留 `VS-CODE-PROJECT/RoundTable`（分支 `bossonAI`）。
+- `.gitignore` 新增忽略本机 IDE/会话目录 `.codebuddy/`、Flutter Web 实验产物
+  `backend/static/canvaskit/experimental_webparagraph/` 与 iOS 临时产物
+  `frontend/ios/Flutter/ephemeral/Packages/`，避免误入库。
+
+---
+
 ## v1.0.18 - 2026-06-01
 
 ### Bug 修复

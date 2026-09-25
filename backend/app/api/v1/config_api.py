@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +17,8 @@ from urllib.parse import urlparse
 
 import httpx
 import websockets
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 from websockets.exceptions import InvalidStatus
 
 from app.api.v1.admin_guard import require_management_token
@@ -37,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config", tags=["config"])
 CONFIG_PROFILES_DIR = Path(settings.base_dir) / "runtime" / "config_profiles"
+
+BOSON_ENV_KEYS = (
+    "BOSON_API_KEY",
+    "BOSON_BASE_URL",
+    "BOSON_AVATAR_URL",
+    "BOSON_AVATAR_ENABLED",
+)
+
 
 _CLOUD_VOICE_SERVICE_IDS = {
     "openai_whisper",
@@ -174,8 +185,122 @@ def _has_real_api_key(value: str) -> bool:
     return bool(key and key not in {"sk-xxx", "your-api-key"} and not key.startswith("sk-xxx"))
 
 
+def _mask_secret(secret: str) -> str:
+    """返回脱敏后的密钥，不泄露明文。"""
+    if not _has_real_api_key(secret):
+        return ""
+    if len(secret) <= 8:
+        return "***"
+    return f"{secret[:4]}...{secret[-4:]}"
+
+
+def _validate_boson_api_key(api_key: str) -> str:
+    stripped = api_key.strip()
+    if not _has_real_api_key(stripped):
+        raise HTTPException(status_code=400, detail="Boson API Key 不能为空或占位值")
+    if len(stripped) < 12:
+        raise HTTPException(status_code=400, detail="Boson API Key 长度过短")
+    if any(ch.isspace() for ch in stripped):
+        raise HTTPException(status_code=400, detail="Boson API Key 不能包含空白字符")
+    if "\n" in stripped or "\r" in stripped:
+        raise HTTPException(status_code=400, detail="Boson API Key 格式无效")
+    return stripped
+
+
+def _validate_env_value(value: str, field_name: str) -> str:
+    stripped = value.strip()
+    if "\n" in stripped or "\r" in stripped:
+        raise HTTPException(status_code=400, detail=f"{field_name} 不能包含换行")
+    return stripped
+
+
+def _format_env_value(value: str) -> str:
+    if not value:
+        return ""
+    if any(ch.isspace() for ch in value) or "#" in value or '"' in value or "\\" in value:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def _write_env_values(env_path: Path, updates: dict[str, str]) -> None:
+    """原子更新 .env 中指定键，保留无关配置。"""
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    updated_keys: set[str] = set()
+    next_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            next_lines.append(line)
+            continue
+
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            next_lines.append(f"{key}={_format_env_value(updates[key])}")
+            updated_keys.add(key)
+        else:
+            next_lines.append(line)
+
+    missing_keys = [key for key in BOSON_ENV_KEYS if key in updates and key not in updated_keys]
+    if missing_keys:
+        if next_lines and next_lines[-1] != "":
+            next_lines.append("")
+        next_lines.append("# Boson AI 配置")
+        next_lines.extend(f"{key}={_format_env_value(updates[key])}" for key in missing_keys)
+
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{env_path.name}.",
+        suffix=".tmp",
+        dir=env_path.parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write("\n".join(next_lines))
+            temp_file.write("\n")
+        os.replace(temp_name, env_path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _boson_status() -> BosonSecretStatus:
+    api_key = settings.boson_api_key
+    avatar_url = settings.boson_avatar_url.strip()
+    return BosonSecretStatus(
+        has_api_key=_has_real_api_key(api_key),
+        api_key_masked=_mask_secret(api_key),
+        base_url=settings.boson_base_url,
+        avatar_url_configured=bool(avatar_url),
+        avatar_enabled=settings.boson_avatar_enabled and bool(avatar_url),
+    )
+
+
 def _public_provider_ids() -> list[str]:
     return [pid for pid, defaults in PROVIDER_DEFAULTS.items() if not defaults.get("alias_of")]
+
+
+class BosonSecretUpdateRequest(BaseModel):
+    """Boson 密钥更新请求。"""
+
+    api_key: str
+    base_url: str | None = None
+    avatar_url: str | None = None
+
+
+class BosonSecretStatus(BaseModel):
+    """Boson 密钥配置状态。"""
+
+    has_api_key: bool
+    api_key_masked: str = ""
+    base_url: str
+    avatar_url_configured: bool
+    avatar_enabled: bool
 
 
 def _provider_config_value(provider_id: str, field_suffix: str, default: str = "") -> str:
@@ -745,7 +870,52 @@ async def get_current_config():
         "hardware_detection_on_startup": settings.hardware_detection_on_startup,
         "web_search_enabled": settings.web_search_enabled,
         "tavily_configured": bool(settings.tavily_api_key),
+        "boson": _boson_status().model_dump(),
     }
+
+
+@router.get("/secrets/boson", response_model=BosonSecretStatus)
+async def get_boson_secret_status():
+    """获取 Boson 密钥配置状态，只返回脱敏信息。"""
+    return _boson_status()
+
+
+@router.post("/secrets/boson", response_model=BosonSecretStatus)
+async def update_boson_secret(request: BosonSecretUpdateRequest):
+    """保存 Boson API Key 到后端 .env，并同步当前运行时配置。"""
+    api_key = _validate_boson_api_key(request.api_key)
+    base_url = _validate_env_value(
+        request.base_url if request.base_url is not None else settings.boson_base_url,
+        "Boson Base URL",
+    )
+    avatar_url = _validate_env_value(
+        request.avatar_url if request.avatar_url is not None else settings.boson_avatar_url,
+        "Boson Avatar URL",
+    )
+
+    if not base_url:
+        base_url = "https://api.boson.ai/v1"
+
+    avatar_enabled = bool(avatar_url)
+    updates = {
+        "BOSON_API_KEY": api_key,
+        "BOSON_BASE_URL": base_url,
+        "BOSON_AVATAR_URL": avatar_url,
+        "BOSON_AVATAR_ENABLED": str(avatar_enabled).lower(),
+    }
+
+    try:
+        _write_env_values(settings.base_dir / ".env", updates)
+    except OSError as e:
+        logger.error("写入 Boson 配置失败: %s", e)
+        raise HTTPException(status_code=500, detail="保存 Boson 配置失败") from e
+
+    settings.boson_api_key = api_key
+    settings.boson_base_url = base_url
+    settings.boson_avatar_url = avatar_url
+    settings.boson_avatar_enabled = avatar_enabled
+
+    return _boson_status()
 
 
 @router.get("/validate")

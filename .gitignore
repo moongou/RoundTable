@@ -73,5 +73,12 @@ backend/static/admin.html
 backend/runtime/
 processed/
 
+### 本机 IDE / 会话数据 ###
+.codebuddy/
+
+### 构建临时产物 ###
+backend/static/canvaskit/experimental_webparagraph/
+frontend/ios/Flutter/ephemeral/Packages/
+
 ### Playwright MCP ###
 .playwright-mcp/

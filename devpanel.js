@@ -59,10 +59,13 @@ function startBackend() {
     return { ok: false, msg: '检测到后端已由外部进程运行，可直接“打开应用”；若需面板接管，请先点击“停止后端”后再启动' };
   }
   const rootVenvPy = path.join(ROOT, '.venv', 'bin', 'python');
-  const backendVenvPy = path.join(BACKEND_DIR, 'venv', 'bin', 'python');
+  const backendVenvPy = path.join(BACKEND_DIR, '.venv', 'bin', 'python');
+  const legacyBackendVenvPy = path.join(BACKEND_DIR, 'venv', 'bin', 'python');
   const pyBin = fs.existsSync(rootVenvPy)
     ? rootVenvPy
-    : (fs.existsSync(backendVenvPy) ? backendVenvPy : 'python3');
+    : (fs.existsSync(backendVenvPy)
+      ? backendVenvPy
+      : (fs.existsSync(legacyBackendVenvPy) ? legacyBackendVenvPy : 'python3'));
   const envFile = path.join(BACKEND_DIR, '.env');
   const args = [
     '-m', 'uvicorn',
@@ -3422,6 +3425,33 @@ const server = http.createServer(async (req, res) => {
       const statusCode = e && e.code === 'ENOENT' ? 404 : 500;
       res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ error: e.message }));
+    }
+  }
+  // Generic API proxy — forward any /api/v1/* request to the backend
+  if (pathname.startsWith('/api/v1/') || pathname.startsWith('/api/auth/')) {
+    try {
+      const backendPath = pathname + (search || '');
+      let body = '';
+      if (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') {
+        body = await new Promise((resolve) => {
+          let data = '';
+          req.on('data', (chunk) => (data += chunk));
+          req.on('end', () => resolve(data));
+        });
+      }
+      // Forward the original Authorization header (user token) to the backend
+      const headers = { 'Content-Type': 'application/json' };
+      const origAuth = req.headers['authorization'];
+      if (origAuth) headers['Authorization'] = origAuth;
+      // Backend management routes have their own auth handled by proxyBackendAdminJson
+      const upstream = await requestBackend(req.method, backendPath, {
+        headers,
+        body,
+      });
+      res.writeHead(upstream.statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(upstream.body || '{}');
+    } catch (e) {
+      return sendJson(res, 500, { detail: e.message || 'api_proxy_failed' });
     }
   }
   if (pathname.startsWith('/api/') && req.method === 'POST') {
