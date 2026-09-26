@@ -27,6 +27,7 @@ from app.core.golden_quotes import (
     parse_golden_quotes_response,
 )
 from app.core.llm_factory import create_character_client, create_moderator_client
+from app.core.role_limits import validate_role_roster
 from app.core.safety_filter import SafetyFilter
 from app.core.session_store import SessionStore
 from app.core.thinkers import get_thinker, thinker_label
@@ -126,14 +127,10 @@ async def create_session(request: CreateSessionRequest):
         if not get_thinker(tid):
             raise HTTPException(status_code=404, detail=f"思想家 '{tid}' 不存在")
 
-    # 最多 8 个虚拟角色（不含主持人李老师）
-    non_moderator_chars = [c for c in request.character_ids if c != "moderator"]
-    virtual_count = len(non_moderator_chars) + len(request.thinker_ids)
-    if virtual_count > 8:
-        raise HTTPException(
-            status_code=400,
-            detail=f"虚拟角色最多 8 人（当前选择了 {virtual_count} 人：{len(non_moderator_chars)} 个角色 + {len(request.thinker_ids)} 个思想家），请减少选择",
-        )
+    # 角色阵容限制：最多 2 位同学 + 1 位老师（主持人，固定）+ 1 位思想家
+    roster_ok, roster_error = validate_role_roster(request.character_ids, request.thinker_ids)
+    if not roster_ok:
+        raise HTTPException(status_code=400, detail=roster_error)
 
     # 创建参与者列表
     participants: list[Participant] = []

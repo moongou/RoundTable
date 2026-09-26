@@ -429,7 +429,7 @@ async def benchmark_tts(
     _auth: None = Depends(require_management_token),
 ):
     """基准测试所有或指定的 TTS 服务。跳过未配置/不可用的服务。"""
-    target_services = services or ["chattts", "edge_tts", "vibevoice", "fireredtts", "openvoice", "cosyvoice"]
+    target_services = services or ["edge_tts", "openvoice", "cosyvoice"]
     results = await asyncio.gather(
         *[_benchmark_one_tts(svc, LOCAL_SERVICE_DEFAULTS.get(svc, {}).get("url", ""), rounds) for svc in target_services]
     )
@@ -551,7 +551,7 @@ async def test_voice_service(
     """独立测试单个语音服务（设置页面用）。
 
     Args:
-        service_id: 服务ID (capswriter/vosk/vibevoice/fireredtts 等)
+        service_id: 服务ID (capswriter/vosk/openvoice 等)
         service_type: 'asr' 或 'tts'
         text: 测试文本 (TTS用)
     """

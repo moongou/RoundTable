@@ -21,18 +21,6 @@ def test_get_voice_service_url_uses_vosk_runtime_url(monkeypatch) -> None:
     assert settings.get_voice_service_url("vosk") == "http://localhost:7702"
 
 
-def test_get_voice_service_url_uses_vibevoice_runtime_url(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "vibevoice_url", "http://localhost:7704")
-
-    assert settings.get_voice_service_url("vibevoice") == "http://localhost:7704"
-
-
-def test_get_voice_service_url_uses_fireredtts_runtime_url(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "fireredtts_url", "http://localhost:7706")
-
-    assert settings.get_voice_service_url("fireredtts") == "http://localhost:7706"
-
-
 def test_health_candidate_service_ids_follow_current_runtime_config(monkeypatch) -> None:
     monkeypatch.setattr(settings, "asr_provider", "funasr")
     monkeypatch.setattr(settings, "tts_provider", "openvoice")

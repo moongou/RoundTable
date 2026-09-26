@@ -32,19 +32,10 @@ class SessionScreen extends ConsumerStatefulWidget {
   @override
   ConsumerState<SessionScreen> createState() => _SessionScreenState();
 
-  static String preferAvailableChatTts(
+  static String resolveTtsProvider(
     String requestedProvider,
     SpeechConfig? speechConfig,
   ) {
-    if (requestedProvider != defaultTtsProvider) {
-      return requestedProvider;
-    }
-    for (final provider
-        in speechConfig?.ttsProviders ?? const <SpeechProviderInfo>[]) {
-      if (provider.id == 'chattts' && provider.available) {
-        return 'chattts';
-      }
-    }
     return requestedProvider;
   }
 }
@@ -197,7 +188,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       }
     }
 
-    final ttsProvider = SessionScreen.preferAvailableChatTts(
+    final ttsProvider = SessionScreen.resolveTtsProvider(
       settings.ttsProvider,
       speechConfig,
     );

@@ -400,6 +400,13 @@ final currentConfigProvider = FutureProvider<CurrentConfig>((ref) async {
   return apiClient.getCurrentConfig();
 });
 
+/// Boson API Key 配置状态（后端只返回脱敏信息）
+final bosonSecretStatusProvider =
+    FutureProvider<BosonSecretStatus>((ref) async {
+  final apiClient = ref.watch(apiClientProvider);
+  return apiClient.getBosonSecretStatus();
+});
+
 final configProfilesProvider =
     FutureProvider<List<SavedConfigProfile>>((ref) async {
   final apiClient = ref.watch(apiClientProvider);

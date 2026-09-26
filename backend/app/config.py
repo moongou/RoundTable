@@ -128,10 +128,7 @@ ASR_PROVIDERS = {
 
 TTS_PROVIDERS = {
     "browser": "浏览器原生语音合成",
-    "chattts": "ChatTTS 本地服务（对话风格，优先）",
     "edge_tts": "OpenAI Edge TTS 本地服务",
-    "vibevoice": "VibeVoice 本地服务（微软，高品质）",
-    "fireredtts": "FireRedTTS 本地服务（支持流式）",
     "openvoice": "OpenVoice 本地服务（支持变声）",
     "cosyvoice": "CosyVoice 本地服务",
     "openai_tts": "OpenAI TTS API",
@@ -144,15 +141,12 @@ TTS_PROVIDERS = {
 }
 
 LOCAL_SERVICE_DEFAULTS = {
-    "chattts": {"url": "http://localhost:9998", "health": "/gradio_api/info"},
     "edge_tts": {"url": "http://localhost:5051", "health": "/v1/models"},
     "cosyvoice": {"url": "http://localhost:50000", "health": "/health"},
     "funasr": {"url": "ws://localhost:10095", "health": "/"},
     "ollama": {"url": "http://localhost:11434", "health": "/api/tags"},
     "capswriter": {"url": "ws://localhost:6016", "health": "/"},
     "vosk": {"url": "http://localhost:6702", "health": "/health"},
-    "vibevoice": {"url": "http://localhost:6704", "health": "/health"},
-    "fireredtts": {"url": "http://localhost:6706", "health": "/health"},
     "openvoice": {"url": "http://localhost:6707", "health": "/health"},
 }
 
@@ -215,30 +209,6 @@ VOICE_SERVICE_META = {
         "mode": "local",
         "needs_api_key": False,
         "health_path": "/v1/models",
-    },
-    "chattts": {
-        "name": "ChatTTS 本地服务（对话风格）",
-        "default_url": "http://localhost:9998",
-        "type": "tts",
-        "mode": "local",
-        "needs_api_key": False,
-        "health_path": "/gradio_api/info",
-    },
-    "vibevoice": {
-        "name": "VibeVoice 微软高品质语音合成",
-        "default_url": LOCAL_SERVICE_DEFAULTS["vibevoice"]["url"],
-        "type": "tts",
-        "mode": "local",
-        "needs_api_key": False,
-        "health_path": LOCAL_SERVICE_DEFAULTS["vibevoice"]["health"],
-    },
-    "fireredtts": {
-        "name": "FireRedTTS 本地语音合成（流式）",
-        "default_url": LOCAL_SERVICE_DEFAULTS["fireredtts"]["url"],
-        "type": "tts",
-        "mode": "local",
-        "needs_api_key": False,
-        "health_path": LOCAL_SERVICE_DEFAULTS["fireredtts"]["health"],
     },
     "openvoice": {
         "name": "OpenVoice 本地语音合成（变声）",
@@ -427,11 +397,8 @@ class Settings(BaseSettings):
     # TTS (语音合成)
     tts_provider: str = "edge_tts"  # browser / edge_tts / cosyvoice / local services
     tts_url: str = "http://localhost:5051"  # deprecated, use edge_tts_url
-    chattts_url: str = "http://localhost:9998"
     edge_tts_url: str = "http://localhost:5051"
     cosyvoice_url: str = "http://localhost:50000"
-    vibevoice_url: str = "http://localhost:6704"
-    fireredtts_url: str = "http://localhost:6706"
     openvoice_url: str = "http://localhost:6707"
     openai_tts_api_key: str = ""  # uses openai_api_key if blank
     openai_tts_base_url: str = "https://api.openai.com/v1"
@@ -476,12 +443,6 @@ class Settings(BaseSettings):
 
     # 交互方式
     push_to_talk: bool = True
-
-    # ── 网络搜索 ───────────────────────────────────────────────────────────
-
-    tavily_api_key: str = ""
-    tavily_base_url: str = "https://api.tavily.com"
-    web_search_enabled: bool = False
 
     # ── 服务器 ─────────────────────────────────────────────────────────────
 
@@ -627,14 +588,11 @@ class Settings(BaseSettings):
             "human_turn_timeout",
             "hardware_detection_on_startup",
             # Voice service URLs
-            "chattts_url",
             "capswriter_url",
             "vosk_url",
             "funasr_url",
             "edge_tts_url",
             "cosyvoice_url",
-            "vibevoice_url",
-            "fireredtts_url",
             "openvoice_url",
             "openai_whisper_api_key",
             "openai_whisper_base_url",
@@ -674,10 +632,6 @@ class Settings(BaseSettings):
             "minimax_tts_voice",
             "tts_voice",
             "cosyvoice_voice",
-            # Web search
-            "tavily_api_key",
-            "tavily_base_url",
-            "web_search_enabled",
         }
         # 动态允许所有提供商的 api_key / base_url / model 字段
         for pid in PROVIDER_DEFAULTS:
@@ -697,14 +651,11 @@ class Settings(BaseSettings):
         """获取语音服务的 URL。"""
         sid = (service_id or "").strip().lower()
         url_map = {
-            "chattts": self.chattts_url,
             "capswriter": self.capswriter_url,
             "vosk": self.vosk_url,
             "funasr": self.funasr_url,
             "edge_tts": self.edge_tts_url,
             "cosyvoice": self.cosyvoice_url,
-            "vibevoice": self.vibevoice_url,
-            "fireredtts": self.fireredtts_url,
             "openvoice": self.openvoice_url,
             "openai_whisper": self.openai_whisper_base_url,
             "siliconflow_asr": self.siliconflow_asr_base_url,

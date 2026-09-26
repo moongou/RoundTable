@@ -1231,19 +1231,10 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
     return '';
   }
 
-  String _preferAvailableChatTts(
+  String _resolveTtsProvider(
     String requestedProvider,
     SpeechConfig? speechConfig,
   ) {
-    if (requestedProvider != ImmersiveSessionScreen.defaultTtsProvider) {
-      return requestedProvider;
-    }
-    for (final provider
-        in speechConfig?.ttsProviders ?? const <SpeechProviderInfo>[]) {
-      if (provider.id == 'chattts' && provider.available) {
-        return 'chattts';
-      }
-    }
     return requestedProvider;
   }
 
@@ -1710,7 +1701,7 @@ class _ImmersiveSessionScreenState extends ConsumerState<ImmersiveSessionScreen>
       }
     }
     final serverUrl = resolvedSettings.serverUrl;
-    final ttsProvider = _preferAvailableChatTts(
+    final ttsProvider = _resolveTtsProvider(
       resolvedSettings.ttsProvider,
       speechConfig,
     );

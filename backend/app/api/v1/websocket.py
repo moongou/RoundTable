@@ -22,7 +22,8 @@ from app.core.floor_manager import FloorManager
 from app.store import user_store
 from autogen_core.models import UserMessage
 from app.core.llm_errors import describe_model_error
-from app.core.llm_factory import create_character_client, create_moderator_client
+from app.core.llm_factory import create_model_client
+from app.agents.role_sub_agent import ROLE_HUMAN, RoleDirectory
 from app.core.meeting_history import MeetingHistoryStore
 from app.core.user_review import (
     build_user_review_prompt,
@@ -30,6 +31,7 @@ from app.core.user_review import (
     parse_user_review_response,
 )
 from app.core.rolling_summary_memory import HumanResponseGuidanceMemory, RollingSummaryMemory
+from app.core.role_limits import validate_role_roster
 from app.core.safety_filter import SafetyFilter
 from app.core.thinkers import get_thinker, thinker_label
 from app.core.topics import get_topic_by_id
@@ -547,15 +549,12 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
                 await websocket.close()
                 return
 
-        # 最多 8 个虚拟角色（不含主持人李老师）
-        non_moderator_chars = [c for c in character_ids if c != "moderator"]
-        virtual_count = len(non_moderator_chars) + len(thinker_ids)
-        if virtual_count > 8:
+        # 角色阵容限制：最多 2 位同学 + 1 位老师（主持人，固定）+ 1 位思想家
+        roster_ok, roster_error = validate_role_roster(character_ids, thinker_ids)
+        if not roster_ok:
             await send_event(
                 "error",
-                {
-                    "message": f"虚拟角色最多 8 人（当前选择了 {virtual_count} 人），请减少选择"
-                },
+                {"message": roster_error},
             )
             await websocket.close()
             return
@@ -578,10 +577,13 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             await websocket.close()
             return
 
-        # 创建 Agent 实例
+        # 创建 Agent 实例：子 agent 模式——每个角色独立模型客户端 + 共享角色注册表
+        role_directory = RoleDirectory()
         try:
-            moderator_client = create_moderator_client()
-            character_client = create_character_client()
+            moderator_client = create_model_client()
+            character_clients = [
+                create_model_client() for _ in range(len([c for c in character_ids if c != "moderator"]))
+            ]
         except Exception as e:
             await send_event(
                 "api_error",
@@ -621,8 +623,9 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
 
         summary_memory = RollingSummaryMemory()
         moderator_guidance_memory = HumanResponseGuidanceMemory()
-        shared_memory = [summary_memory]
-        moderator_memory = [summary_memory, moderator_guidance_memory]
+        # 子 agent 模式：结构化台账由 RoleSubAgent 自带，
+        # 主持人仅保留"真人回应指导"记忆，虚拟角色不再挂共享摘要记忆
+        moderator_memory = [moderator_guidance_memory]
 
         moderator = create_moderator(
             model_client=moderator_client,
@@ -632,35 +635,45 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
             thinker_names=thinker_display_names,
             human_names=human_names,
             memory=moderator_memory,
+            directory=role_directory,
         )
 
         characters = [
             create_virtual_character(
                 cid,
-                model_client=character_client,
+                model_client=character_clients[idx],
                 topic=topic.title,
                 participant_names=all_participant_names,
-                memory=shared_memory,
+                directory=role_directory,
             )
-            for cid in character_ids if cid != "moderator"
+            for idx, cid in enumerate(c for c in character_ids if c != "moderator")
         ]
 
-        # 创建思想家角色
+        # 创建思想家角色（同样使用专属子 agent + 独立客户端）
+        thinker_clients = [create_model_client() for _ in thinker_ids]
         thinker_agents = [
             create_thinker_agent(
                 tid,
-                model_client=character_client,
+                model_client=thinker_clients[idx],
                 topic=topic.title,
                 participant_names=all_participant_names,
-                memory=shared_memory,
+                directory=role_directory,
             )
-            for tid in thinker_ids
+            for idx, tid in enumerate(thinker_ids)
         ]
 
         humans = [
             create_human_proxy(name, session_scope=session_id)
             for name in dict.fromkeys(human_names)
         ]
+
+        # 真人学生也登记进角色注册表，保证台账中人类发言同样精确归属
+        for human_agent in humans:
+            role_directory.register(
+                human_agent.name,
+                agent_display_map.get(human_agent.name, human_agent.name),
+                ROLE_HUMAN,
+            )
 
         # 去重：确保没有同名 Agent（AutoGen 要求名字唯一）
         seen_names: set[str] = set()
@@ -696,8 +709,8 @@ async def discussion_websocket(websocket: WebSocket, session_id: str):
         # 创建讨论团队
         team = build_discussion_team()
 
-        # 创建安全过滤器
-        safety_filter = SafetyFilter(model_client=character_client)
+        # 创建安全过滤器（使用独立客户端，不与任何角色共享）
+        safety_filter = SafetyFilter(model_client=create_model_client())
 
         # 创建 Floor Manager
         floor_manager = FloorManager(

@@ -67,14 +67,11 @@ _CONFIG_PROFILE_FIELD_NAMES = {
     "max_turns",
     "human_turn_timeout",
     "hardware_detection_on_startup",
-    "chattts_url",
     "capswriter_url",
     "vosk_url",
     "funasr_url",
     "edge_tts_url",
     "cosyvoice_url",
-    "vibevoice_url",
-    "fireredtts_url",
     "openvoice_url",
     "openai_whisper_api_key",
     "openai_whisper_base_url",
@@ -113,9 +110,6 @@ _CONFIG_PROFILE_FIELD_NAMES = {
     "minimax_tts_voice",
     "tts_voice",
     "cosyvoice_voice",
-    "tavily_api_key",
-    "tavily_base_url",
-    "web_search_enabled",
 }
 for _provider_id in PROVIDER_DEFAULTS:
     _CONFIG_PROFILE_FIELD_NAMES.update(
@@ -537,17 +531,6 @@ async def _semantic_voice_probe(
                 base["reachable"] = resp.status_code == 200 and count > 0
                 base["detail"] = f"speakers={count}, HTTP {resp.status_code}"
                 base["status_code"] = resp.status_code
-            elif service_id == "chattts":
-                resp = await client.get(f"{url.rstrip('/')}/gradio_api/info")
-                payload = resp.json() if resp.status_code == 200 else {}
-                named_endpoints = (
-                    payload.get("named_endpoints", {}) if isinstance(payload, dict) else {}
-                )
-                has_seed_endpoint = "/on_audio_seed_change" in named_endpoints
-                base["reachable"] = resp.status_code == 200 and has_seed_endpoint
-                endpoint_status = "ok" if has_seed_endpoint else "missing"
-                base["detail"] = f"gradio endpoints={endpoint_status}, HTTP {resp.status_code}"
-                base["status_code"] = resp.status_code
             elif service_id == "vosk":
                 resp = await client.get(f"{url.rstrip('/')}/health")
                 payload = resp.json() if resp.status_code == 200 else {}
@@ -879,8 +862,6 @@ async def get_current_config():
         "tts_provider": _effective_tts_provider_id(),
         "push_to_talk": settings.push_to_talk,
         "hardware_detection_on_startup": settings.hardware_detection_on_startup,
-        "web_search_enabled": settings.web_search_enabled,
-        "tavily_configured": bool(settings.tavily_api_key),
         "boson": _boson_status().model_dump(),
     }
 
@@ -1505,48 +1486,3 @@ async def test_voice_service(
         }
     except Exception as e:
         return {"success": False, "status_code": None, "url": url, "voices": [], "error": str(e)}
-
-
-@router.get("/web-search")
-async def get_web_search_config(
-    _auth: None = Depends(require_management_token),
-):
-    """获取网络搜索配置。"""
-    key = settings.tavily_api_key
-    return {
-        "enabled": settings.web_search_enabled,
-        "has_api_key": bool(key),
-        "api_key_masked": (key[:4] + "..." + key[-4:])
-        if key and len(key) > 8
-        else ("***" if key else ""),
-        "base_url": settings.tavily_base_url,
-    }
-
-
-@router.post("/test-web-search")
-async def test_web_search(
-    body: dict,
-    _auth: None = Depends(require_management_token),
-):
-    """测试 Tavily 网络搜索 API 连接。"""
-    api_key = body.get("api_key", "").strip() or settings.tavily_api_key
-    if not api_key:
-        return {"success": False, "error": "未配置 Tavily API Key"}
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.post(
-                f"{settings.tavily_base_url}/search",
-                json={"api_key": api_key, "query": "test", "max_results": 1},
-            )
-            if resp.status_code == 200:
-                return {"success": True, "error": None}
-            try:
-                err_body = resp.json()
-                err_msg = err_body.get(
-                    "detail", err_body.get("message", f"HTTP {resp.status_code}")
-                )
-            except Exception:
-                err_msg = f"HTTP {resp.status_code}"
-            return {"success": False, "error": err_msg}
-    except Exception as e:
-        return {"success": False, "error": str(e)}

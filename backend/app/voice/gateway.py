@@ -66,7 +66,7 @@ class GatewayTTSProvider(TTSProvider):
 
     def __init__(
         self,
-        service: str = "vibevoice",
+        service: str = "openvoice",
         service_url: str | None = None,
         openvoice_url: str | None = None,
         health_path: str | None = None,

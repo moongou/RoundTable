@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from autogen_agentchat.agents import AssistantAgent
 from autogen_core.memory import Memory
 from autogen_core.models import ChatCompletionClient
 
 from app.agents.character_templates import get_template
 from app.agents.human_proxy import safe_agent_name
+from app.agents.role_sub_agent import (
+    ROLE_STUDENT,
+    ROLE_THINKER,
+    RoleDirectory,
+    RoleSubAgent,
+)
 from app.core.thinkers import get_thinker
 
 
@@ -19,15 +24,17 @@ def create_virtual_character(
     topic: str,
     participant_names: list[str] | None = None,
     memory: Sequence[Memory] | None = None,
-) -> AssistantAgent:
-    """从模板创建虚拟角色 Agent。
+    directory: RoleDirectory | None = None,
+) -> RoleSubAgent:
+    """从模板创建虚拟同学子 Agent。
 
     Args:
         template_id: 角色模板 ID（explorer/skeptic/peacemaker/storyteller）。
-        model_client: AutoGen 模型客户端。
+        model_client: 该角色专属的模型客户端（子 agent 模式下每角色独立）。
         topic: 讨论主题。
         participant_names: 在场所有参与者的中文名字列表，用于防止角色
             幻觉引用未到场的人物（需求八）。
+        directory: 共享角色注册表，用于结构化台账的精确归属。
     """
     template = get_template(template_id)
     system_message = template.system_message + f"\n\n讨论主题：{topic}"
@@ -92,13 +99,17 @@ def create_virtual_character(
         "- 不要为了显得和气就把每一轮都说成“我也完全赞同”；真实、礼貌的分歧是允许的。\n"
         "- 即使不同意，也要围绕观点本身讨论，不攻击人。"
     )
-    return AssistantAgent(
+    return RoleSubAgent(
         name=template.id,
         model_client=model_client,
         system_message=system_message,
         description=template.description,
         model_client_stream=True,
         memory=memory,
+    ).bind_role(
+        display_name=template.name,
+        role_type=ROLE_STUDENT,
+        directory=directory,
     )
 
 
@@ -108,15 +119,17 @@ def create_thinker_agent(
     topic: str,
     participant_names: list[str] | None = None,
     memory: Sequence[Memory] | None = None,
-) -> AssistantAgent:
-    """从思想家数据创建 Agent。
+    directory: RoleDirectory | None = None,
+) -> RoleSubAgent:
+    """从思想家数据创建思想家子 Agent。
 
     Args:
         thinker_id: 思想家 ID（weber/confucius 等）。
-        model_client: AutoGen 模型客户端。
+        model_client: 该角色专属的模型客户端。
         topic: 讨论主题。
         participant_names: 在场所有参与者的中文名字列表，用于防止角色
             幻觉引用未到场的人物。
+        directory: 共享角色注册表，用于结构化台账的精确归属。
     """
     thinker = get_thinker(thinker_id)
     if not thinker:
@@ -186,11 +199,15 @@ def create_thinker_agent(
         "3. 即使不同意，也只讨论观点，不贬低任何人。"
     )
 
-    return AssistantAgent(
+    return RoleSubAgent(
         name=safe_agent_name(thinker_id),
         model_client=model_client,
         system_message=system_message,
         description=description,
         model_client_stream=True,
         memory=memory,
+    ).bind_role(
+        display_name=name,
+        role_type=ROLE_THINKER,
+        directory=directory,
     )

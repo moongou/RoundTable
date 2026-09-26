@@ -128,30 +128,6 @@ def test_create_openvoice_provider_uses_runtime_openvoice_url() -> None:
         object.__setattr__(settings, "openvoice_url", previous_url)
 
 
-@pytest.mark.parametrize(
-    ("provider_id", "field_name", "expected_url"),
-    [
-        ("vibevoice", "vibevoice_url", "http://localhost:7704"),
-        ("fireredtts", "fireredtts_url", "http://localhost:7706"),
-    ],
-)
-def test_create_local_tts_provider_uses_runtime_service_url(
-    provider_id: str,
-    field_name: str,
-    expected_url: str,
-) -> None:
-    previous_url = getattr(settings, field_name)
-    object.__setattr__(settings, field_name, expected_url)
-
-    try:
-        provider = create_tts_provider(provider_id)
-
-        assert isinstance(provider, GatewayTTSProvider)
-        assert provider.service_url == expected_url
-    finally:
-        object.__setattr__(settings, field_name, previous_url)
-
-
 def test_create_capswriter_provider_uses_runtime_url_and_json_protocol() -> None:
     previous_url = settings.capswriter_url
     object.__setattr__(settings, "capswriter_url", "ws://localhost:7616")

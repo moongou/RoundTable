@@ -9,7 +9,6 @@ import logging
 
 from app.config import LOCAL_SERVICE_DEFAULTS, settings
 from app.voice.base import ASRProvider, TTSProvider
-from app.voice.chattts import ChatTTSProvider
 from app.voice.cosyvoice import CosyVoiceProvider
 from app.voice.edge_tts import EdgeTTSProvider
 from app.voice.elevenlabs_tts import ElevenLabsTTSProvider
@@ -79,12 +78,7 @@ def create_tts_provider(provider_id: str | None = None) -> TTSProvider:
     """
     pid = provider_id or settings.tts_provider
 
-    if pid == "chattts":
-        return ChatTTSProvider(
-            base_url=settings.get_voice_service_url("chattts")
-            or _local_default_url("chattts", "http://localhost:9998"),
-        )
-    elif pid == "edge_tts":
+    if pid == "edge_tts":
         return EdgeTTSProvider(
             base_url=settings.get_voice_service_url("edge_tts")
             or settings.tts_url
@@ -116,7 +110,7 @@ def create_tts_provider(provider_id: str | None = None) -> TTSProvider:
     elif pid == "disabled":
         # 明确禁用：返回静音，避免过去静默回退 Edge TTS 仍在发声
         return SilentTTSProvider()
-    elif pid in ("vibevoice", "fireredtts", "openvoice"):
+    elif pid == "openvoice":
         return _local_http_tts_provider(pid)
     elif pid == "browser":
         # 浏览器原生 TTS 由前端处理，后端不需要创建提供商
@@ -139,9 +133,7 @@ def create_tts_provider_with_url(provider_id: str, base_url: str = "") -> TTSPro
 
     url = base_url or LOCAL_SERVICE_DEFAULTS.get(provider_id, {}).get("url", "")
 
-    if provider_id == "chattts":
-        return ChatTTSProvider(base_url=url or "http://localhost:9998")
-    elif provider_id == "edge_tts":
+    if provider_id == "edge_tts":
         return EdgeTTSProvider(base_url=url or "http://localhost:5051")
     elif provider_id == "cosyvoice":
         return CosyVoiceProvider(base_url=url or "http://localhost:50000")
@@ -165,7 +157,7 @@ def create_tts_provider_with_url(provider_id: str, base_url: str = "") -> TTSPro
         return _minimax_provider(base_url=url)
     elif provider_id == "disabled":
         return SilentTTSProvider()
-    elif provider_id in ("vibevoice", "fireredtts", "openvoice"):
+    elif provider_id == "openvoice":
         return _local_http_tts_provider(provider_id, base_url=url)
     else:
         logger.warning(f"未知的 TTS 提供商: {provider_id}，回退到 Edge TTS")

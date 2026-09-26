@@ -9,6 +9,49 @@ import '../../services/saved_topics_store.dart';
 import '../../state/settings_provider.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
+import '../../utils/open_external_url_stub.dart'
+    if (dart.library.html) '../../utils/open_external_url_web.dart';
+
+/// 云端服务商控制台地址：配置 API Key 时可从设置页一键跳转官网
+/// （仅云端服务显示，本地服务无需注册）
+const Map<String, String> kProviderConsoleUrls = <String, String>{
+  'boson': 'https://www.boson.ai/workspace',
+  'elevenlabs_tts': 'https://elevenlabs.io/app/settings/api-keys',
+  'minimax_tts': 'https://platform.minimaxi.com/',
+  'openai_tts': 'https://platform.openai.com/api-keys',
+  'siliconflow_tts': 'https://cloud.siliconflow.cn/account/ak',
+  'volcengine_tts': 'https://console.volcengine.com/iam/keyman/',
+  'openai_whisper': 'https://platform.openai.com/api-keys',
+  'siliconflow_asr': 'https://cloud.siliconflow.cn/account/ak',
+  'groq_whisper': 'https://console.groq.com/keys',
+  'volcengine_asr': 'https://console.volcengine.com/iam/keyman/',
+};
+
+/// 设置页通用「打开官网控制台」链接按钮
+Widget _consoleLink(String label, String url) => InkWell(
+      onTap: () => openExternalUrl(url),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.open_in_new,
+                size: 12, color: AppColors.amberGold),
+            const SizedBox(width: 3),
+            Text(
+              label,
+              style: const TextStyle(
+                color: AppColors.amberGold,
+                fontSize: 11,
+                decoration: TextDecoration.underline,
+                decorationColor: AppColors.amberGold,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
 
 /// 设置页面 - 完整配置面板
 /// 支持 LLM 提供商选择与配置（连接测试 + 模型获取）、语音服务、交互方式
@@ -53,9 +96,12 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   final Map<String, bool> _testingVoice = {};
   final Map<String, bool> _savingVoice = {};
 
-  final TextEditingController _tavilyKeyCtrl = TextEditingController();
-  bool _testingTavily = false;
-  Map<String, dynamic>? _tavilyTestResult;
+  final TextEditingController _bosonApiKeyCtrl = TextEditingController();
+  final TextEditingController _bosonBaseUrlCtrl =
+      TextEditingController(text: 'https://api.boson.ai/v1');
+  final TextEditingController _bosonAvatarUrlCtrl = TextEditingController();
+  bool _savingBoson = false;
+  bool _bosonStatusHydrated = false;
 
   bool _healthRefreshing = false;
 
@@ -111,7 +157,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
   @override
   void dispose() {
     _tabController.dispose();
-    _tavilyKeyCtrl.dispose();
+    _bosonApiKeyCtrl.dispose();
+    _bosonBaseUrlCtrl.dispose();
+    _bosonAvatarUrlCtrl.dispose();
     _interactiveTtsTextCtrl.dispose();
     _aiScrollCtrl.dispose();
     _asrScrollCtrl.dispose();
@@ -428,43 +476,32 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     }
   }
 
-  Future<void> _testTavily() async {
-    setState(() => _testingTavily = true);
-    try {
-      final result = await ref.read(apiClientProvider).testWebSearch(
-            apiKey: _tavilyKeyCtrl.text.trim(),
-          );
-      setState(() => _tavilyTestResult = result);
-    } catch (e) {
-      setState(
-          () => _tavilyTestResult = {'success': false, 'error': e.toString()});
-    } finally {
-      setState(() => _testingTavily = false);
-    }
-  }
-
-  Future<void> _saveTavily({bool persist = false}) async {
-    final key = _tavilyKeyCtrl.text.trim();
-    if (key.isEmpty) {
-      _snack('请输入 Tavily API Key');
+  Future<void> _saveBosonSecret() async {
+    final apiKey = _bosonApiKeyCtrl.text.trim();
+    if (apiKey.isEmpty) {
+      _snack('请输入 Boson API Key');
       return;
     }
+    setState(() => _savingBoson = true);
     try {
-      final updates = <String, dynamic>{
-        'tavily_api_key': key,
-        'web_search_enabled': true,
-      };
-      final client = ref.read(apiClientProvider);
-      if (persist) {
-        await client.saveConfig(updates);
-        _snack('✅ Tavily 配置已写入 .env');
-      } else {
-        await client.updateConfig(updates);
-        _snack('✅ Tavily 配置已应用');
-      }
-      ref.invalidate(currentConfigProvider);
+      final baseUrl = _bosonBaseUrlCtrl.text.trim();
+      final avatarUrl = _bosonAvatarUrlCtrl.text.trim();
+      final status = await ref.read(apiClientProvider).saveBosonSecret(
+            BosonSecretUpdateRequest(
+              apiKey: apiKey,
+              baseUrl: baseUrl.isEmpty ? null : baseUrl,
+              avatarUrl: avatarUrl.isEmpty ? null : avatarUrl,
+            ),
+          );
+      _bosonApiKeyCtrl.clear();
+      _bosonBaseUrlCtrl.text = status.baseUrl;
+      _bosonStatusHydrated = true;
+      ref.invalidate(bosonSecretStatusProvider);
+      _snack('✅ Boson 配置已保存：${status.apiKeyMasked}');
     } catch (e) {
-      _snackErr('保存失败: $e');
+      _snackErr('保存 Boson 配置失败: $e');
+    } finally {
+      setState(() => _savingBoson = false);
     }
   }
 
@@ -729,8 +766,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         const SizedBox(height: 14),
         _buildLlmSection(providersAsync, s),
         const SizedBox(height: 14),
-        _buildTavilySection(currentAsync),
-        const SizedBox(height: 14),
         _buildLlmBenchmarkSection(),
         const SizedBox(height: 32),
       ],
@@ -759,11 +794,14 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
 
   Widget _buildTtsTab(LocalSettings s, AsyncValue<SpeechConfig> speechAsync) {
     final speechConfig = speechAsync.valueOrNull;
+    final bosonAsync = ref.watch(bosonSecretStatusProvider);
     return ListView(
       controller: _ttsScrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       children: [
         _buildTtsSection(speechAsync, s),
+        const SizedBox(height: 14),
+        _buildBosonSection(bosonAsync),
         const SizedBox(height: 14),
         _buildTtsBenchmarkSection(),
         const SizedBox(height: 14),
@@ -781,8 +819,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     const order = <String>[
       'edge_tts',
       'openvoice',
-      'vibevoice',
-      'chattts',
       // 云端顶级服务：音色来自账号音色库，不能预置静态预设
       'elevenlabs_tts',
       'minimax_tts',
@@ -1378,7 +1414,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           icon: Icons.graphic_eq_outlined,
           children: [
             Text(
-              '分别为 Edge TTS、OpenVoice、VibeVoice、ChatTTS 以及 ElevenLabs / MiniMax 等云端服务维护独立音色。'
+              '分别为 Edge TTS、OpenVoice 以及 ElevenLabs / MiniMax 等云端服务维护独立音色。'
                   '本地服务用预置预设挑选；ElevenLabs / MiniMax 的音色与你账号绑定，点「从云端音色库选择」实时拉取并逐条试听。'
                   '这里改的是“角色到音色”的映射，不会强制切换你当前正在使用的 TTS 服务。',
               style: TextStyle(
@@ -1466,9 +1502,20 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      palette.title,
-                      style: AppTheme.calligraphyStyleDark(fontSize: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            palette.title,
+                            style: AppTheme.calligraphyStyleDark(fontSize: 18),
+                          ),
+                        ),
+                        if (kProviderConsoleUrls.containsKey(activeProviderId))
+                          _consoleLink(
+                            '官网控制台',
+                            kProviderConsoleUrls[activeProviderId]!,
+                          ),
+                      ],
                     ),
                     const SizedBox(height: 6),
                     Text(
@@ -2513,16 +2560,10 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     }
 
     switch (providerId) {
-      case 'chattts':
-        return 'http://localhost:9998';
       case 'edge_tts':
         return 'http://localhost:5051';
       case 'cosyvoice':
         return 'http://localhost:50000';
-      case 'vibevoice':
-        return 'http://localhost:6704';
-      case 'fireredtts':
-        return 'http://localhost:6706';
       case 'openvoice':
         return 'http://localhost:6707';
     }
@@ -2562,13 +2603,7 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     if (ordered.isEmpty) {
       return type == 'asr'
           ? <String>['capswriter', 'vosk', 'funasr', 'siliconflow_asr']
-          : <String>[
-              'edge_tts',
-              'vibevoice',
-              'fireredtts',
-              'openvoice',
-              'cosyvoice'
-            ];
+          : <String>['edge_tts', 'openvoice', 'cosyvoice'];
     }
 
     return ordered;
@@ -2687,14 +2722,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     final resolvedModel = model?.trim() ?? '';
 
     const urlMap = {
-      'chattts': 'chattts_url',
       'capswriter': 'capswriter_url',
       'vosk': 'vosk_url',
       'funasr': 'funasr_url',
       'edge_tts': 'edge_tts_url',
       'cosyvoice': 'cosyvoice_url',
-      'vibevoice': 'vibevoice_url',
-      'fireredtts': 'fireredtts_url',
       'openvoice': 'openvoice_url',
       'openai_whisper': 'openai_whisper_base_url',
       'siliconflow_asr': 'siliconflow_asr_base_url',
@@ -3551,71 +3583,66 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         ],
       );
 
-  Widget _buildTavilySection(AsyncValue<CurrentConfig> currentAsync) =>
+  Widget _buildBosonSection(AsyncValue<BosonSecretStatus> bosonAsync) =>
       _Section(
-        title: '网络搜索（Tavily）',
-        icon: Icons.travel_explore_outlined,
+        title: 'Boson 真人语音与头像',
+        icon: Icons.video_camera_front_outlined,
+        action: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _consoleLink(
+              '官网控制台',
+              kProviderConsoleUrls['boson']!,
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: '刷新状态',
+              onPressed: () => ref.invalidate(bosonSecretStatusProvider),
+              icon: const Icon(Icons.refresh,
+                  size: 16, color: AppColors.amberGold),
+            ),
+          ],
+        ),
         children: [
-          currentAsync.when(
-            data: (c) => Row(children: [
-              Icon(c.webSearchEnabled ? Icons.check_circle : Icons.cancel,
-                  size: 14,
-                  color: c.webSearchEnabled ? Colors.green : Colors.red),
-              const SizedBox(width: 6),
-              Text(c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用',
-                  style: TextStyle(
-                      color: c.webSearchEnabled ? Colors.green : Colors.orange,
-                      fontSize: 12)),
-            ]),
-            loading: () => const SizedBox.shrink(),
-            error: (_, __) => const SizedBox.shrink(),
+          bosonAsync.when(
+            data: (status) {
+              if (!_bosonStatusHydrated) {
+                _bosonStatusHydrated = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  _bosonBaseUrlCtrl.text = status.baseUrl;
+                });
+              }
+              return _BosonStatusBanner(status: status);
+            },
+            loading: () => const _Spin(),
+            error: (e, _) => _ErrorBox('读取 Boson 状态失败: $e'),
           ),
           const SizedBox(height: 8),
-          const Text('为圆桌讨论启用实时网络搜索能力',
+          const Text('密钥只写入后端 .env，浏览器不保存明文；保存后即时生效。',
               style: TextStyle(color: AppColors.warmGray, fontSize: 11)),
-          const SizedBox(height: 8),
-          const _Label('Tavily API Key'),
+          const SizedBox(height: 10),
+          const _Label('Boson API Key'),
           _Field(
-              ctrl: _tavilyKeyCtrl,
-              hint: '输入 Tavily API Key（tvly-...）',
+              ctrl: _bosonApiKeyCtrl,
+              hint: '粘贴你的 Boson API Key',
               obscure: true),
           const SizedBox(height: 8),
-          Row(children: [
-            _OutBtn(_testingTavily ? '测试中…' : '🔌 测试连接',
-                onTap: _testingTavily ? null : _testTavily,
-                loading: _testingTavily),
-            if (_tavilyTestResult != null) ...[
-              const SizedBox(width: 8),
-              Icon(
-                  _tavilyTestResult!['success'] == true
-                      ? Icons.check_circle
-                      : Icons.cancel,
-                  color: _tavilyTestResult!['success'] == true
-                      ? Colors.green
-                      : Colors.red,
-                  size: 14),
-              const SizedBox(width: 4),
-              Flexible(
-                  child: Text(
-                _tavilyTestResult!['success'] == true
-                    ? '✓ 搜索可用'
-                    : _tavilyTestResult!['error']?.toString() ?? '失败',
-                style: TextStyle(
-                    fontSize: 10,
-                    color: _tavilyTestResult!['success'] == true
-                        ? Colors.green
-                        : Colors.red),
-                overflow: TextOverflow.ellipsis,
-              )),
-            ],
-          ]),
+          const _Label('Boson Base URL'),
+          _Field(ctrl: _bosonBaseUrlCtrl, hint: 'https://api.boson.ai/v1'),
+          const SizedBox(height: 8),
+          const _Label('Avatar 私测 URL（可选）'),
+          _Field(ctrl: _bosonAvatarUrlCtrl, hint: '留空则暂不启用 Avatar'),
           const SizedBox(height: 10),
           Row(children: [
-            Expanded(child: _OutBtn('应用（本次有效）', onTap: () => _saveTavily())),
+            Expanded(
+                child: _OutBtn('清空密钥',
+                    onTap:
+                        _savingBoson ? null : () => _bosonApiKeyCtrl.clear())),
             const SizedBox(width: 8),
             Expanded(
-                child: _GoldBtn('💾 写入 .env',
-                    onTap: () => _saveTavily(persist: true))),
+                child: _GoldBtn(_savingBoson ? '保存中…' : '💾 保存并验证',
+                    onTap: _savingBoson ? null : _saveBosonSecret)),
           ]),
         ],
       );
@@ -3634,8 +3661,6 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
                   c.apiKeyMasked.isNotEmpty ? c.apiKeyMasked : '未配置'),
               _SummaryRow('语音识别', s.asrProvider.toUpperCase()),
               _SummaryRow('语音合成', s.ttsProvider.toUpperCase()),
-              _SummaryRow(
-                  '网络搜索', c.webSearchEnabled ? '✅ Tavily 已启用' : '❌ 未启用'),
               _SummaryRow('交互方式', _interactionModeLabel(s)),
             ]),
             loading: () => const _Spin(),
@@ -4267,7 +4292,16 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           ),
           const SizedBox(height: 14),
           if (p.needsApiKey) ...[
-            const _Label('API Key'),
+            Row(
+              children: [
+                const Expanded(child: _Label('API Key')),
+                if (kProviderConsoleUrls.containsKey(p.id))
+                  _consoleLink(
+                    '获取 API Key',
+                    kProviderConsoleUrls[p.id]!,
+                  ),
+              ],
+            ),
             _Field(
               ctrl: _vk(p),
               hint: p.hasApiKey ? '已配置（输入新值覆盖）' : '输入 API Key',
@@ -4433,6 +4467,57 @@ class _Section extends StatelessWidget {
           ],
         ),
       );
+}
+
+class _BosonStatusBanner extends StatelessWidget {
+  final BosonSecretStatus status;
+
+  const _BosonStatusBanner({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final configured = status.hasApiKey;
+    final color = configured ? Colors.green : Colors.orange;
+    final statusText = configured ? '已配置 ${status.apiKeyMasked}' : '未配置';
+    final avatarText = status.avatarEnabled
+        ? 'Avatar 已启用'
+        : status.avatarUrlConfigured
+            ? 'Avatar URL 已配置'
+            : 'Avatar 未配置';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.studyWallLight.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.warmGray.withValues(alpha: 0.2)),
+      ),
+      child: Row(children: [
+        Icon(
+            configured ? Icons.verified_user_outlined : Icons.warning_amber,
+            size: 16,
+            color: color),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(statusText,
+                    style: TextStyle(
+                        color: color,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12)),
+                const SizedBox(height: 2),
+                Text('${status.baseUrl} · $avatarText',
+                    style: const TextStyle(
+                        color: AppColors.warmGray, fontSize: 10),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+              ]),
+        ),
+      ]),
+    );
+  }
 }
 
 class _SpeechRefreshButton extends StatelessWidget {

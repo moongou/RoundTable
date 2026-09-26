@@ -156,7 +156,7 @@ def test_tts_stabilizes_local_wav_volume_when_ffmpeg_is_unavailable(monkeypatch)
             "/api/v1/voice/tts",
             json={
                 "text": "测试响度守卫",
-                "provider": "vibevoice",
+                "provider": "openvoice",
                 "voice": "en-carter_man",
             },
         )

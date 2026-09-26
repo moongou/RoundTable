@@ -317,302 +317,6 @@ final Map<String, VoiceServicePalette> kVoiceServicePalettes =
       thinkerVoiceSpeaker: 'zh-CN-YunzeNeural',
     },
   ),
-  'chattts': VoiceServicePalette(
-    serviceId: 'chattts',
-    title: 'ChatTTS 音色库',
-    summary: '使用稳定 seed 命名，确保本地 WebUI 每次生成同一人格。',
-    targetPresetCount: 25,
-    presets: const <VoicePreset>[
-      VoicePreset(
-        voice: 'chattts-kite-boy',
-        label: '童声男 01 · 风筝',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'chattts-lake-boy',
-        label: '童声男 02 · 湖岸',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'chattts-pine-boy',
-        label: '童声男 03 · 松针',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'chattts-river-boy',
-        label: '童声男 04 · 河畔',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'chattts-ember-boy',
-        label: '童声男 05 · 火苗',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'chattts-orbit-boy',
-        label: '童声男 06 · 轨迹',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'chattts-stone-boy',
-        label: '童声男 07 · 石阶',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'chattts-cloud-girl',
-        label: '童声女 01 · 云朵',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-mint-girl',
-        label: '童声女 02 · 薄荷',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-pearl-girl',
-        label: '童声女 03 · 珍珠',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-spark-girl',
-        label: '童声女 04 · 星火',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-berry-girl',
-        label: '童声女 05 · 莓果',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-moon-girl',
-        label: '童声女 06 · 月白',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-coral-girl',
-        label: '童声女 07 · 珊瑚',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-lotus-girl',
-        label: '童声女 08 · 青莲',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'chattts-teacher-amber',
-        label: '老师 01 · 琥珀',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'chattts-teacher-cedar',
-        label: '老师 02 · 雪松',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'chattts-teacher-iris',
-        label: '老师 03 · 鸢尾',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'chattts-teacher-harbor',
-        label: '老师 04 · 海港',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'chattts-teacher-violet',
-        label: '老师 05 · 紫藤',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'chattts-thinker-ink',
-        label: '思想家 01 · 墨色',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'chattts-thinker-slate',
-        label: '思想家 02 · 岩板',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'chattts-thinker-bronze',
-        label: '思想家 03 · 青铜',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'chattts-thinker-nocturne',
-        label: '思想家 04 · 夜曲',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'chattts-thinker-ridge',
-        label: '思想家 05 · 山脊',
-        role: voiceRoleThinker,
-      ),
-    ],
-    defaultAssignments: const <String, String>{
-      teacherVoiceSpeaker: 'chattts-teacher-amber',
-      '小探': 'chattts-kite-boy',
-      '小疑': 'chattts-cloud-girl',
-      '小和': 'chattts-lake-boy',
-      '小说': 'chattts-mint-girl',
-      '小明': 'chattts-pine-boy',
-      '小思': 'chattts-river-boy',
-      '小理': 'chattts-ember-boy',
-      '小爱': 'chattts-pearl-girl',
-      '小想': 'chattts-spark-girl',
-      '小行': 'chattts-orbit-boy',
-      '可乐': 'chattts-kite-boy',
-      thinkerVoiceSpeaker: 'chattts-thinker-ink',
-    },
-  ),
-  'vibevoice': VoiceServicePalette(
-    serviceId: 'vibevoice',
-    title: 'VibeVoice 音色库',
-    summary: '直接映射本地 `.pt` 预设，当前机器上可用 25 组。',
-    targetPresetCount: 25,
-    presets: const <VoicePreset>[
-      VoicePreset(
-        voice: 'en-carter_man',
-        label: '童声男 01 · Carter',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'en-davis_man',
-        label: '童声男 02 · Davis',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'en-frank_man',
-        label: '童声男 03 · Frank',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'de-spk0_man',
-        label: '童声男 04 · 德语 Spk0',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'in-samuel_man',
-        label: '童声男 05 · Samuel',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'jp-spk0_man',
-        label: '童声男 06 · 日语 Spk0',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'it-spk1_man',
-        label: '童声男 07 · 意语 Spk1',
-        role: voiceRoleStudentMale,
-      ),
-      VoicePreset(
-        voice: 'en-emma_woman',
-        label: '童声女 01 · Emma',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'en-grace_woman',
-        label: '童声女 02 · Grace',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'de-spk1_woman',
-        label: '童声女 03 · 德语 Spk1',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'fr-spk1_woman',
-        label: '童声女 04 · 法语 Spk1',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'kr-spk0_woman',
-        label: '童声女 05 · 韩语 Spk0',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'nl-spk1_woman',
-        label: '童声女 06 · 荷语 Spk1',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'pt-spk0_woman',
-        label: '童声女 07 · 葡语 Spk0',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'jp-spk1_woman',
-        label: '童声女 08 · 日语 Spk1',
-        role: voiceRoleStudentFemale,
-      ),
-      VoicePreset(
-        voice: 'it-spk0_woman',
-        label: '老师 01 · 意语 Spk0',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'pl-spk1_woman',
-        label: '老师 02 · 波兰语 Spk1',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'sp-spk0_woman',
-        label: '老师 03 · 西语 Spk0',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'pt-spk1_man',
-        label: '老师 04 · 葡语 Spk1',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'sp-spk1_man',
-        label: '老师 05 · 西语 Spk1',
-        role: voiceRoleTeacher,
-      ),
-      VoicePreset(
-        voice: 'en-mike_man',
-        label: '思想家 01 · Mike',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'fr-spk0_man',
-        label: '思想家 02 · 法语 Spk0',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'kr-spk1_man',
-        label: '思想家 03 · 韩语 Spk1',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'nl-spk0_man',
-        label: '思想家 04 · 荷语 Spk0',
-        role: voiceRoleThinker,
-      ),
-      VoicePreset(
-        voice: 'pl-spk0_man',
-        label: '思想家 05 · 波兰语 Spk0',
-        role: voiceRoleThinker,
-      ),
-    ],
-    defaultAssignments: const <String, String>{
-      teacherVoiceSpeaker: 'it-spk0_woman',
-      '小探': 'en-carter_man',
-      '小疑': 'en-emma_woman',
-      '小和': 'en-davis_man',
-      '小说': 'en-grace_woman',
-      '小明': 'en-frank_man',
-      '小思': 'de-spk0_man',
-      '小理': 'in-samuel_man',
-      '小爱': 'de-spk1_woman',
-      '小想': 'fr-spk1_woman',
-      '小行': 'jp-spk0_man',
-      '可乐': 'en-carter_man',
-      thinkerVoiceSpeaker: 'en-mike_man',
-    },
-  ),
   'openvoice': VoiceServicePalette(
     serviceId: 'openvoice',
     title: 'OpenVoice 音色库',
@@ -908,8 +612,6 @@ class SpeechProviderInfo {
         return '⌨️';
       case 'vosk':
         return '📡';
-      case 'chattts':
-        return '💬';
       case 'edge_tts':
         return '🗣️';
       case 'openvoice':
@@ -1091,8 +793,6 @@ class CurrentConfig {
   final String asrProvider;
   final String ttsProvider;
   final bool pushToTalk;
-  final bool webSearchEnabled;
-  final bool tavilyConfigured;
 
   const CurrentConfig({
     required this.llmProvider,
@@ -1102,8 +802,6 @@ class CurrentConfig {
     required this.asrProvider,
     required this.ttsProvider,
     required this.pushToTalk,
-    this.webSearchEnabled = false,
-    this.tavilyConfigured = false,
   });
 
   factory CurrentConfig.fromJson(Map<String, dynamic> json) => CurrentConfig(
@@ -1114,8 +812,6 @@ class CurrentConfig {
         asrProvider: json['asr_provider'] as String? ?? 'funasr',
         ttsProvider: json['tts_provider'] as String? ?? 'edge_tts',
         pushToTalk: json['push_to_talk'] as bool? ?? true,
-        webSearchEnabled: json['web_search_enabled'] as bool? ?? false,
-        tavilyConfigured: json['tavily_configured'] as bool? ?? false,
       );
 }
 
@@ -1352,27 +1048,4 @@ class LocalSettings {
         'mic_control_mode': micControlMode,
         'mic_hotkey': micHotkey,
       };
-}
-
-/// 网络搜索配置
-class WebSearchConfig {
-  final bool enabled;
-  final bool hasApiKey;
-  final String apiKeyMasked;
-  final String baseUrl;
-
-  const WebSearchConfig({
-    required this.enabled,
-    required this.hasApiKey,
-    required this.apiKeyMasked,
-    required this.baseUrl,
-  });
-
-  factory WebSearchConfig.fromJson(Map<String, dynamic> json) =>
-      WebSearchConfig(
-        enabled: json['enabled'] as bool? ?? false,
-        hasApiKey: json['has_api_key'] as bool? ?? false,
-        apiKeyMasked: json['api_key_masked'] as String? ?? '',
-        baseUrl: json['base_url'] as String? ?? 'https://api.tavily.com',
-      );
 }

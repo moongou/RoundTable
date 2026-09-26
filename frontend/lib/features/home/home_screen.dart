@@ -110,10 +110,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                     if (_selectedCharacterIds.length > 1) {
                                       _selectedCharacterIds.remove(char.id);
                                     }
-                                  } else if (_selectedCharacterIds.length >= 8) {
+                                  } else if (_selectedCharacterIds.length >= 2) {
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(
-                                          content: Text('虚拟角色最多 8 人，请勿超过')),
+                                          content: Text('同学最多 2 位（另有 1 位老师 + 最多 1 位思想家）')),
                                     );
                                   } else {
                                     _selectedCharacterIds.add(char.id);

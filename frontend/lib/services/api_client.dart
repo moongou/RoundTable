@@ -389,20 +389,6 @@ class ApiClient {
         response.data as Map<String, dynamic>);
   }
 
-  /// 获取网络搜索配置
-  Future<WebSearchConfig> getWebSearchConfig() async {
-    final response = await _dio.get('/api/v1/config/web-search');
-    return WebSearchConfig.fromJson(response.data as Map<String, dynamic>);
-  }
-
-  /// 测试网络搜索 API 连接
-  Future<Map<String, dynamic>> testWebSearch({String? apiKey}) async {
-    final response = await _dio.post('/api/v1/config/test-web-search', data: {
-      if (apiKey != null && apiKey.isNotEmpty) 'api_key': apiKey,
-    });
-    return Map<String, dynamic>.from(response.data);
-  }
-
   /// 获取所有思想家
   Future<List<Map<String, dynamic>>> getThinkers({String? domain}) async {
     final response = await _dio.get(

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from autogen_agentchat.agents import AssistantAgent
 from autogen_core.memory import Memory
 from autogen_core.models import ChatCompletionClient
+
+from app.agents.role_sub_agent import ROLE_MODERATOR, RoleDirectory, RoleSubAgent
 
 MODERATOR_SYSTEM_PROMPT = """你是"李老师"，一场圆桌讨论的**主持人兼流程指挥者**。
 
@@ -196,16 +197,20 @@ def create_moderator(
     thinker_names: list[str] | None = None,
     human_names: list[str] | None = None,
     memory: Sequence[Memory] | None = None,
-) -> AssistantAgent:
-    """创建主持人 Agent。
+    directory: RoleDirectory | None = None,
+    display_name: str = "李老师",
+) -> RoleSubAgent:
+    """创建主持人（李老师）子 Agent。
 
     Args:
-        model_client: AutoGen 模型客户端（建议使用较强的模型）。
+        model_client: 主持人专属模型客户端（建议使用较强的模型）。
         topic: 讨论主题。
         participant_names: 所有参与者名字列表。
         student_names: 虚拟同学角色名字列表（如"小探""小爱"）。
         thinker_names: 思想家名字列表（如"孔子""苏格拉底"）。
         human_names: 真人学生名字列表（如"小明""小雨"）。
+        directory: 共享角色注册表，用于结构化台账的精确归属。
+        display_name: 主持人展示名（默认"李老师"）。
     """
     system_message = MODERATOR_SYSTEM_PROMPT
     system_message += f"\n\n讨论主题：{topic}"
@@ -242,11 +247,15 @@ def create_moderator(
         )
         system_message += "\n- 引用真人学生发言时使用准确名字，不要与其他角色混淆。"
 
-    return AssistantAgent(
+    return RoleSubAgent(
         name="moderator",
         model_client=model_client,
         system_message=system_message,
         description="讨论主持人李老师，负责引导讨论流程、点名和总结观点",
         model_client_stream=True,
         memory=memory,
+    ).bind_role(
+        display_name=display_name,
+        role_type=ROLE_MODERATOR,
+        directory=directory,
     )

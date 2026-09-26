@@ -863,11 +863,9 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       setState(() => _selectedCharacterIds.remove(id));
       return;
     }
-    final virtualCount =
-        _selectedCharacterIds.length + _selectedThinkerIds.length;
-    if (virtualCount >= 8) {
+    if (_selectedCharacterIds.length >= 2) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('虚拟角色最多 8 人（含思想家），请勿超过')),
+        const SnackBar(content: Text('同学最多 2 位（另有 1 位老师 + 最多 1 位思想家）')),
       );
       return;
     }
@@ -879,11 +877,9 @@ class _ImmersiveHomeScreenState extends ConsumerState<ImmersiveHomeScreen>
       setState(() => _selectedThinkerIds.remove(id));
       return;
     }
-    final virtualCount =
-        _selectedCharacterIds.length + _selectedThinkerIds.length;
-    if (virtualCount >= 8) {
+    if (_selectedThinkerIds.length >= 1) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('虚拟角色最多 8 人（含思想家），请勿超过')),
+        const SnackBar(content: Text('思想家最多 1 位，请先取消已选思想家')),
       );
       return;
     }

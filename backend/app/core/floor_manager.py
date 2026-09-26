@@ -315,6 +315,10 @@ class FloorManager:
         self._streaming_emitted_raw_prefix: dict[str, str] = {}
         self._streaming_emitted_segment_keys: dict[str, set[str]] = {}
         self._streaming_tts_emitted: set[str] = set()
+        # 流式 <think> 推理区间剥离状态（AutoGen 会把推理模型的
+        # reasoning_content 包装成 <think>…</think> 混入流式通道）
+        self._streaming_think_open: dict[str, bool] = {}
+        self._streaming_think_pending: dict[str, str] = {}
         self._current_streaming_source: Optional[str] = None
         self._first_human_handoff_streamed = False
         self._moderator_stream_sentence_emitted = 0
@@ -3732,6 +3736,64 @@ class FloorManager:
         self._streaming_buffer[source] = remainder
         return segments
 
+    _THINK_OPEN_TAG = "<think>"
+    _THINK_CLOSE_TAG = "</think>"
+    _THINK_OPEN_RE = re.compile(re.escape(_THINK_OPEN_TAG), re.IGNORECASE)
+    _THINK_CLOSE_RE = re.compile(re.escape(_THINK_CLOSE_TAG), re.IGNORECASE)
+
+    @staticmethod
+    def _partial_tag_suffix(text: str, tag: str) -> str:
+        """返回 text 的最长后缀，使其恰好是 tag 的真前缀（跨 chunk 标签拆分保护）。"""
+        max_check = min(len(text), len(tag) - 1)
+        for size in range(max_check, 0, -1):
+            if text[-size:].lower() == tag[:size].lower():
+                return text[-size:]
+        return ""
+
+    def _strip_think_blocks_from_stream(self, source: str, text: str) -> str:
+        """流式剥离 <think>…</think> 推理区间（跨 chunk 安全）。
+
+        AutoGen 的 OpenAI 兼容客户端会把推理模型（reasoning_content）的
+        思考文本包装成 <think>…</think> 与正文一起 yield 进流式通道。
+        若不剥离，思考句会被切句器当作台词推送给前端 TTS / 字幕，
+        造成"播报内部提示词、正文字幕缺失"的故障（见 session-9）。
+
+        使用每个 source 独立的状态机在句子切分之前整段丢弃思考区间，
+        只放行 `</think>` 之后的正文。
+        """
+        value = text or ""
+        if not value:
+            return ""
+        data = self._streaming_think_pending.get(source, "") + value
+        in_block = self._streaming_think_open.get(source, False)
+        out: list[str] = []
+        pos = 0
+        pending = ""
+        while pos < len(data):
+            if in_block:
+                match = self._THINK_CLOSE_RE.search(data, pos)
+                if match is None:
+                    pending = self._partial_tag_suffix(data[pos:], self._THINK_CLOSE_TAG)
+                    break
+                pos = match.end()
+                in_block = False
+            else:
+                match = self._THINK_OPEN_RE.search(data, pos)
+                if match is None:
+                    rest = data[pos:]
+                    pending = self._partial_tag_suffix(rest, self._THINK_OPEN_TAG)
+                    out.append(rest[: len(rest) - len(pending)])
+                    break
+                out.append(data[pos : match.start()])
+                pos = match.end()
+                in_block = True
+        self._streaming_think_open[source] = in_block
+        if pending:
+            self._streaming_think_pending[source] = pending
+        else:
+            self._streaming_think_pending.pop(source, None)
+        return "".join(out)
+
     def _mark_streaming_segments_emitted(self, source: str, segments: list[str]) -> None:
         if not segments:
             return
@@ -3744,6 +3806,17 @@ class FloorManager:
         if not normalized:
             return False
         return any(pattern.search(normalized) for pattern in self._META_REASONING_PATTERNS)
+
+    _PUNCT_ONLY_SEGMENT_RE = re.compile(
+        r"^[\s。．，,、！!？?；;：:…—\-~～·\"'“”‘’（）()【】\[\]]+$"
+    )
+
+    def _is_punctuation_only_segment(self, segment: str) -> bool:
+        """纯标点/空白的句子没有播报价值（常见于 think 标签剥离边界）。"""
+        value = (segment or "").strip()
+        if not value:
+            return True
+        return self._PUNCT_ONLY_SEGMENT_RE.fullmatch(value) is not None
 
     def _strip_meta_reasoning_blocks(self, text: str) -> str:
         value = text or ""
@@ -3833,6 +3906,10 @@ class FloorManager:
         remainder = self._streaming_buffer.pop(source, "")
         emitted_prefix = self._streaming_emitted_raw_prefix.pop(source, "")
         emitted_segment_keys = self._streaming_emitted_segment_keys.pop(source, set())
+        # 重置 <think> 剥离状态：即使流被中断（未收到 </think>），
+        # 下一轮发言也从干净状态开始
+        self._streaming_think_open.pop(source, None)
+        self._streaming_think_pending.pop(source, None)
         if self._current_streaming_source == source:
             self._current_streaming_source = None
         had_streamed_tts = source in self._streaming_tts_emitted or bool(emitted_prefix)
@@ -5297,9 +5374,12 @@ class FloorManager:
 
             payload = {"source": source, "content": content}
             if source in self.ai_names:
-                payload["content"] = self._strip_meta_reasoning_text(content)
+                # 先结构性剥离 <think>…</think> 推理区间，思考文本
+                # 不得进入句子缓冲、TTS 或前端字幕
+                visible_content = self._strip_think_blocks_from_stream(source, content)
+                payload["content"] = self._strip_meta_reasoning_text(visible_content)
                 self._current_streaming_source = source
-                raw_segments = self._consume_streaming_sentences(source, content)
+                raw_segments = self._consume_streaming_sentences(source, visible_content)
                 emitted_raw_segments: list[str] = []
                 tts_segments: list[str] = []
                 for raw_segment in raw_segments:
@@ -5331,6 +5411,9 @@ class FloorManager:
                             continue
                     segment = await self.safety_filter.filter_or_rewrite(segment)
                     segment = self._strip_meta_reasoning_text(segment).strip()
+                    if self._is_punctuation_only_segment(segment):
+                        # <think> 剥离边界可能残留孤立标点，无播报价值
+                        continue
                     if segment:
                         if self._is_duplicate_streaming_segment(source, segment):
                             logger.info(

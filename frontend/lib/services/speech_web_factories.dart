@@ -14,11 +14,8 @@ TtsService createWebTtsService(
   switch (providerId) {
     case 'browser':
       return BrowserTtsService();
-    case 'chattts':
     case 'edge_tts':
     case 'cosyvoice':
-    case 'vibevoice':
-    case 'fireredtts':
     case 'openvoice':
     case 'openai_tts':
     case 'siliconflow_tts':

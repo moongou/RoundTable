@@ -39,8 +39,6 @@ def _restore_settings():
     tracked['openai_model'] = getattr(settings, 'openai_model')
     tracked['asr_provider'] = getattr(settings, 'asr_provider')
     tracked['push_to_talk'] = getattr(settings, 'push_to_talk')
-    tracked['web_search_enabled'] = getattr(settings, 'web_search_enabled')
-    tracked['tavily_api_key'] = getattr(settings, 'tavily_api_key')
     try:
         yield
     finally:
@@ -235,8 +233,6 @@ async def test_save_and_load_config_profile_round_trip(monkeypatch: pytest.Monke
     _set_setting('asr_provider', 'capswriter')
     _set_setting('tts_provider', 'openvoice')
     _set_setting('push_to_talk', False)
-    _set_setting('web_search_enabled', True)
-    _set_setting('tavily_api_key', 'tv-key')
 
     saved = await config_api.save_config_profile(
         {
@@ -263,7 +259,7 @@ async def test_save_and_load_config_profile_round_trip(monkeypatch: pytest.Monke
     _set_setting('openai_base_url', 'https://changed.example.com/v1')
     _set_setting('openai_model', 'changed-model')
     _set_setting('asr_provider', 'funasr')
-    _set_setting('tts_provider', 'chattts')
+    _set_setting('tts_provider', 'edge_tts')
     _set_setting('push_to_talk', True)
 
     loaded = await config_api.load_config_profile(saved['profile']['profile_id'])

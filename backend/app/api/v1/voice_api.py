@@ -34,10 +34,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/voice", tags=["voice"])
 
 _WAV_VOLUME_GUARD_PROVIDERS = {
-    "chattts",
-    "vibevoice",
     "openvoice",
-    "fireredtts",
     "cosyvoice",
 }
 
