@@ -12,9 +12,12 @@ from app.voice.base import ASRProvider, TTSProvider
 from app.voice.chattts import ChatTTSProvider
 from app.voice.cosyvoice import CosyVoiceProvider
 from app.voice.edge_tts import EdgeTTSProvider
+from app.voice.elevenlabs_tts import ElevenLabsTTSProvider
 from app.voice.gateway import GatewayTTSProvider
+from app.voice.minimax_tts import MiniMaxTTSProvider
 from app.voice.openai_tts import OpenAITTSProvider
 from app.voice.openai_whisper import OpenAIWhisperProvider
+from app.voice.silent_tts import SilentTTSProvider
 from app.voice.standalone_ws_asr import StandaloneWsAsrProvider
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,27 @@ def _local_http_tts_provider(provider_id: str, base_url: str | None = None) -> G
         service_url=resolved_url,
         openvoice_url=resolved_url if provider_id == "openvoice" else None,
         health_path=LOCAL_SERVICE_DEFAULTS.get(provider_id, {}).get("health", "/health"),
+    )
+
+
+def _elevenlabs_provider(base_url: str | None = None) -> ElevenLabsTTSProvider:
+    return ElevenLabsTTSProvider(
+        api_key=settings.get_voice_service_api_key("elevenlabs_tts"),
+        base_url=base_url or settings.get_voice_service_url("elevenlabs_tts"),
+        model=settings.get_voice_service_model("elevenlabs_tts"),
+        default_voice=settings.get_tts_voice_for_provider("elevenlabs_tts"),
+        output_format=settings.elevenlabs_tts_output_format,
+        use_stream_endpoint=settings.elevenlabs_tts_stream,
+    )
+
+
+def _minimax_provider(base_url: str | None = None) -> MiniMaxTTSProvider:
+    return MiniMaxTTSProvider(
+        api_key=settings.get_voice_service_api_key("minimax_tts"),
+        group_id=settings.minimax_tts_group_id,
+        base_url=base_url or settings.get_voice_service_url("minimax_tts"),
+        model=settings.get_voice_service_model("minimax_tts"),
+        default_voice=settings.get_tts_voice_for_provider("minimax_tts"),
     )
 
 
@@ -85,6 +109,13 @@ def create_tts_provider(provider_id: str | None = None) -> TTSProvider:
             model=settings.get_voice_service_model("volcengine_tts"),
             default_voice=settings.get_tts_voice_for_provider("volcengine_tts"),
         )
+    elif pid == "elevenlabs_tts":
+        return _elevenlabs_provider()
+    elif pid == "minimax_tts":
+        return _minimax_provider()
+    elif pid == "disabled":
+        # 明确禁用：返回静音，避免过去静默回退 Edge TTS 仍在发声
+        return SilentTTSProvider()
     elif pid in ("vibevoice", "fireredtts", "openvoice"):
         return _local_http_tts_provider(pid)
     elif pid == "browser":
@@ -128,6 +159,12 @@ def create_tts_provider_with_url(provider_id: str, base_url: str = "") -> TTSPro
             model=settings.get_voice_service_model("volcengine_tts"),
             default_voice=settings.get_tts_voice_for_provider("volcengine_tts"),
         )
+    elif provider_id == "elevenlabs_tts":
+        return _elevenlabs_provider(base_url=url)
+    elif provider_id == "minimax_tts":
+        return _minimax_provider(base_url=url)
+    elif provider_id == "disabled":
+        return SilentTTSProvider()
     elif provider_id in ("vibevoice", "fireredtts", "openvoice"):
         return _local_http_tts_provider(provider_id, base_url=url)
     else:

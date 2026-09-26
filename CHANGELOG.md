@@ -7,6 +7,30 @@
 
 ---
 
+## v1.0.20 - 2026-09-26
+
+### 新功能
+
+- **前端源码恢复（修复一次代码回退事故）**：`config_models.dart` / `server_speech.dart` /
+  `browser_speech.dart` / `speech_service.dart` 曾在 2026-05-20 被整段替换成精简版，导致调用方
+  全部编译失败（`flutter analyze` 报 333 错误）。已从 `8618e52` 恢复这四个文件并补齐 HEAD 独有的
+  Boson 类，同时修好 `session_screen.dart` 缺失的 `disconnected` / `resumed` 分支与 `_Section`
+  内 `SwitchListTile` 触发的 Flutter ink 断言。`flutter analyze` 零问题、`flutter test` 96/96 通过。
+- **设置页 Voice Studio 支持云端音色库**：ElevenLabs / MiniMax 的音色与账号绑定，无法预置静态预设；
+  现新增 `GET /api/v1/voice/voices`，设置页可逐角色拉取账号音色、逐条试听（试听 / 选用）并手动兜底填写
+  音色 ID，实现"配置后实测选型"。
+- **流式播放（真正解决"顺畅"）**：后端 `TTSProvider` 新增 `synthesize_stream()`，ElevenLabs 走
+  `/stream` 端点、MiniMax 解析 SSE hex 分片；新增 `GET /api/v1/voice/tts/stream` 以 chunked
+  分片下发。前端 `ServerTtsService.speak()` 改为「预取缓存 → `<audio src>` 渐进播放 → 整段合成兜底」
+  三级策略，浏览器边下边播，不再等整段合成完才出声。
+
+### 工程
+
+- 版本号统一递增至 1.0.20（`frontend/pubspec.yaml` / `backend/pyproject.toml` / `README` /
+  `backend/static/version.json` 一致）。
+
+---
+
 ## v1.0.19 - 2026-09-26
 
 ### Bug 修复

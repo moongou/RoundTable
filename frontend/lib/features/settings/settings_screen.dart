@@ -783,6 +783,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
       'openvoice',
       'vibevoice',
       'chattts',
+      // 云端顶级服务：音色来自账号音色库，不能预置静态预设
+      'elevenlabs_tts',
+      'minimax_tts',
     ];
     final existing = <String, SpeechProviderInfo>{
       for (final provider
@@ -920,6 +923,224 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
     }
   }
 
+  /// 打开云端音色库选择器：拉取该服务账号下的音色，可逐条试听后选用。
+  Future<void> _openVoiceLibraryPicker({
+    required LocalSettings settings,
+    required SpeechConfig? speechConfig,
+    required String providerId,
+    required String speaker,
+    required String currentVoice,
+  }) async {
+    final client = ref.read(apiClientProvider);
+    final future = client.fetchVoiceLibrary(providerId);
+    final manualCtrl = TextEditingController();
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.studyWall,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.of(sheetContext).size.height * 0.74,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '$speaker · 选择音色',
+                    style: const TextStyle(
+                      color: AppColors.warmWhite,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '来自 $providerId 账号音色库，点「试听」比较，满意再「选用」。',
+                    style: TextStyle(
+                      color: AppColors.warmGray.withValues(alpha: 0.96),
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: FutureBuilder<List<VoiceLibraryVoice>>(
+                      future: future,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState == ConnectionState.waiting) {
+                          return const Center(child: CircularProgressIndicator());
+                        }
+                        if (snapshot.hasError) {
+                          return Text(
+                            '拉取音色失败：${snapshot.error}',
+                            style: const TextStyle(
+                                color: Colors.orangeAccent, fontSize: 12),
+                          );
+                        }
+                        final voices =
+                            snapshot.data ?? const <VoiceLibraryVoice>[];
+                        if (voices.isEmpty) {
+                          return const Text(
+                            '该服务没有返回可用音色。请先在上方填写并保存 API Key，再回来拉取。',
+                            style: TextStyle(
+                                color: Colors.orangeAccent, fontSize: 12),
+                          );
+                        }
+                        return ListView.separated(
+                          itemCount: voices.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 8),
+                          itemBuilder: (context, index) {
+                            final voice = voices[index];
+                            final selected = voice.id == currentVoice;
+                            return Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 10),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(14),
+                                color: AppColors.studyWallLight
+                                    .withValues(alpha: 0.6),
+                                border: Border.all(
+                                  color: selected
+                                      ? AppColors.amberGold.withValues(
+                                          alpha: 0.6)
+                                      : AppColors.warmGray
+                                          .withValues(alpha: 0.18),
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          voice.name,
+                                          style: const TextStyle(
+                                            color: AppColors.warmWhite,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Text(
+                                          voice.subtitle.isNotEmpty
+                                              ? '${voice.subtitle} · ${voice.id}'
+                                              : voice.id,
+                                          style: TextStyle(
+                                            color: AppColors.warmGray
+                                                .withValues(alpha: 0.9),
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _OutBtn(
+                                    '试听',
+                                    padding: 10,
+                                    onTap: _interactiveTtsRunning
+                                        ? null
+                                        : () => unawaited(
+                                              _previewVoiceStudioVoice(
+                                                settings: settings,
+                                                speechConfig: speechConfig,
+                                                providerId: providerId,
+                                                voice: voice.id,
+                                                label: voice.name,
+                                              ),
+                                            ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  _OutBtn(
+                                    selected ? '已选用' : '选用',
+                                    padding: 10,
+                                    onTap: () async {
+                                      await _applyVoiceStudioVoice(
+                                        providerId: providerId,
+                                        speaker: speaker,
+                                        voice: voice.id,
+                                      );
+                                      if (sheetContext.mounted) {
+                                        Navigator.of(sheetContext).pop();
+                                      }
+                                    },
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const Divider(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: manualCtrl,
+                          style: const TextStyle(
+                              color: AppColors.warmWhite, fontSize: 12),
+                          decoration: InputDecoration(
+                            hintText: '手动填写音色 ID（列表拉取失败时用）',
+                            hintStyle: TextStyle(
+                              color: AppColors.warmGray.withValues(alpha: 0.7),
+                              fontSize: 11,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(9),
+                              borderSide: BorderSide(
+                                color:
+                                    AppColors.warmGray.withValues(alpha: 0.3),
+                              ),
+                            ),
+                            filled: true,
+                            fillColor:
+                                AppColors.studyWallLight.withValues(alpha: 0.5),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 8),
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      _OutBtn(
+                        '使用该 ID',
+                        padding: 10,
+                        onTap: () async {
+                          final voiceId = manualCtrl.text.trim();
+                          if (voiceId.isEmpty) {
+                            return;
+                          }
+                          await _applyVoiceStudioVoice(
+                            providerId: providerId,
+                            speaker: speaker,
+                            voice: voiceId,
+                          );
+                          if (sheetContext.mounted) {
+                            Navigator.of(sheetContext).pop();
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    manualCtrl.dispose();
+  }
+
   Widget _buildVoiceStudioTab(
     LocalSettings settings,
     AsyncValue<SpeechConfig> speechAsync,
@@ -961,7 +1182,11 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
         voiceRoleStudentMale => '男童声',
         _ => '女童声',
       };
-      final previewPreset = selectedPreset;
+      // 云端音色库服务没有静态预设，但已选音色仍可直接试听
+      final previewVoiceId = selectedPreset?.voice ??
+          (presets.isEmpty && selectedVoice.isNotEmpty ? selectedVoice : null);
+      final previewVoiceLabel =
+          selectedPreset?.label ?? (previewVoiceId ?? '');
 
       return Container(
         padding: const EdgeInsets.all(14),
@@ -1024,9 +1249,31 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             ),
             const SizedBox(height: 10),
             if (presets.isEmpty)
-              const Text(
-                '当前服务暂无这一角色的预设音色。',
-                style: TextStyle(color: Colors.orange, fontSize: 11),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    selectedVoice.isNotEmpty
+                        ? '当前音色：$selectedVoice'
+                        : '该服务改用云端音色库，请先选择音色。',
+                    style: const TextStyle(color: Colors.orange, fontSize: 11),
+                  ),
+                  if (supportsVoiceLibrary(activeProviderId)) ...[
+                    const SizedBox(height: 8),
+                    _OutBtn(
+                      '从云端音色库选择',
+                      onTap: () => unawaited(
+                        _openVoiceLibraryPicker(
+                          settings: settings,
+                          speechConfig: speechConfig,
+                          providerId: activeProviderId,
+                          speaker: speaker,
+                          currentVoice: selectedVoice,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               )
             else
               DropdownButtonFormField<String>(
@@ -1092,15 +1339,15 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
               children: [
                 _OutBtn(
                   _interactiveTtsRunning ? '试听中…' : '试听当前音色',
-                  onTap: previewPreset == null || _interactiveTtsRunning
+                  onTap: previewVoiceId == null || _interactiveTtsRunning
                       ? null
                       : () => unawaited(
                             _previewVoiceStudioVoice(
                               settings: settings,
                               speechConfig: speechConfig,
                               providerId: activeProviderId,
-                              voice: previewPreset.voice,
-                              label: previewPreset.label,
+                              voice: previewVoiceId,
+                              label: previewVoiceLabel,
                             ),
                           ),
                 ),
@@ -1131,7 +1378,9 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           icon: Icons.graphic_eq_outlined,
           children: [
             Text(
-              '分别为 Edge TTS、OpenVoice、VibeVoice、ChatTTS 维护一套独立音色库。这里改的是“角色到音色”的映射，不会强制切换你当前正在使用的 TTS 服务。',
+              '分别为 Edge TTS、OpenVoice、VibeVoice、ChatTTS 以及 ElevenLabs / MiniMax 等云端服务维护独立音色。'
+                  '本地服务用预置预设挑选；ElevenLabs / MiniMax 的音色与你账号绑定，点「从云端音色库选择」实时拉取并逐条试听。'
+                  '这里改的是“角色到音色”的映射，不会强制切换你当前正在使用的 TTS 服务。',
               style: TextStyle(
                 color: AppColors.warmGray.withValues(alpha: 0.96),
                 fontSize: 12.5,
@@ -3130,22 +3379,25 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
           color: AppColors.warmGray.withValues(alpha: 0.18),
         ),
       ),
-      child: SwitchListTile(
-        title: const Text('启用流式语音识别',
-            style: TextStyle(color: AppColors.warmWhite, fontSize: 13)),
-        subtitle: Text(
-          settings.asrStreamingEnabled
-              ? '当前 ${provider.name} 会优先走实时草稿识别。'
-              : '当前 ${provider.name} 会在录音结束后再上传识别。',
-          style: const TextStyle(color: AppColors.warmGray, fontSize: 11),
+      child: Material(
+        color: Colors.transparent,
+        child: SwitchListTile(
+          title: const Text('启用流式语音识别',
+              style: TextStyle(color: AppColors.warmWhite, fontSize: 13)),
+          subtitle: Text(
+            settings.asrStreamingEnabled
+                ? '当前 ${provider.name} 会优先走实时草稿识别。'
+                : '当前 ${provider.name} 会在录音结束后再上传识别。',
+            style: const TextStyle(color: AppColors.warmGray, fontSize: 11),
+          ),
+          value: settings.asrStreamingEnabled,
+          onChanged: (enabled) => ref
+              .read(localSettingsProvider.notifier)
+              .setAsrStreamingEnabled(enabled),
+          contentPadding: EdgeInsets.zero,
+          activeThumbColor: AppColors.amberGold,
+          dense: true,
         ),
-        value: settings.asrStreamingEnabled,
-        onChanged: (enabled) => ref
-            .read(localSettingsProvider.notifier)
-            .setAsrStreamingEnabled(enabled),
-        contentPadding: EdgeInsets.zero,
-        activeThumbColor: AppColors.amberGold,
-        dense: true,
       ),
     );
   }
@@ -3276,22 +3528,25 @@ class _SettingsContentState extends ConsumerState<_SettingsContent>
             },
           ),
           const SizedBox(height: 6),
-          SwitchListTile(
-            title: const Text('流式显示用户字幕',
-                style: TextStyle(color: AppColors.warmWhite)),
-            subtitle: const Text(
-              '开启后，用户发言会实时滚动显示识别字幕；自由话题页的麦克风草稿也遵循这个设置。',
-              style: TextStyle(color: AppColors.warmGray, fontSize: 11),
+          Material(
+            color: Colors.transparent,
+            child: SwitchListTile(
+              title: const Text('流式显示用户字幕',
+                  style: TextStyle(color: AppColors.warmWhite)),
+              subtitle: const Text(
+                '开启后，用户发言会实时滚动显示识别字幕；自由话题页的麦克风草稿也遵循这个设置。',
+                style: TextStyle(color: AppColors.warmGray, fontSize: 11),
+              ),
+              value: s.streamUserSubtitles,
+              onChanged: (v) {
+                ref
+                    .read(localSettingsProvider.notifier)
+                    .setStreamUserSubtitles(v);
+              },
+              contentPadding: EdgeInsets.zero,
+              activeThumbColor: AppColors.amberGold,
+              dense: true,
             ),
-            value: s.streamUserSubtitles,
-            onChanged: (v) {
-              ref
-                  .read(localSettingsProvider.notifier)
-                  .setStreamUserSubtitles(v);
-            },
-            contentPadding: EdgeInsets.zero,
-            activeThumbColor: AppColors.amberGold,
-            dense: true,
           ),
         ],
       );

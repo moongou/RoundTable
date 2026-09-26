@@ -3,6 +3,16 @@ library;
 
 import 'dart:typed_data';
 
+/// 后端支持流式合成的服务：响应会分片下发，前端可边下边播。
+const Set<String> kStreamingTtsProviders = <String>{
+  'elevenlabs_tts',
+  'minimax_tts',
+};
+
+bool supportsStreaming(String providerId) {
+  return kStreamingTtsProviders.contains(providerId.trim());
+}
+
 /// ASR single transcript segment.
 class AsrResult {
   final String text;

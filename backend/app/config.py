@@ -138,6 +138,8 @@ TTS_PROVIDERS = {
     "siliconflow_tts": "硅基流动 TTS",
     "volcengine_tts": "火山引擎 TTS",
     "boson_tts": "Boson Higgs Audio TTS",
+    "elevenlabs_tts": "ElevenLabs v3（拟真天花板，逐句情绪）",
+    "minimax_tts": "MiniMax Speech（中文最强档，9 种情绪）",
     "disabled": "禁用语音合成（纯文本显示）",
 }
 
@@ -293,6 +295,33 @@ VOICE_SERVICE_META = {
         "default_model": "tts-1",
         "default_voice": "zh_female_qingxin",
     },
+    "elevenlabs_tts": {
+        "name": "ElevenLabs v3（拟真天花板）",
+        "default_url": "https://api.elevenlabs.io/v1",
+        "type": "tts",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/voices",
+        "default_model": "eleven_v3",
+        "default_voice": "",
+        "supports_emotion": True,
+        "latency_hint": "拟真档 300–500ms；切 eleven_flash_v2_5 可更低",
+        "model_options": ["eleven_v3", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"],
+    },
+    "minimax_tts": {
+        "name": "MiniMax Speech（中文最强档）",
+        "default_url": "https://api.minimaxi.com/v1",
+        "type": "tts",
+        "mode": "cloud",
+        "needs_api_key": True,
+        "health_path": "/models",
+        "default_model": "speech-2.8-hd",
+        "default_voice": "",
+        "supports_emotion": True,
+        "latency_hint": "国内直连，HD 音质好 / turbo 更快",
+        "model_options": ["speech-2.8-hd", "speech-2.8-turbo", "speech-02-hd", "speech-02-turbo"],
+        "emotions": ["happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm", "fluent", "whisper"],
+    },
 }
 
 
@@ -422,6 +451,19 @@ class Settings(BaseSettings):
     volcengine_tts_base_url: str = "https://openspeech.bytedance.com/api/v1/tts"
     volcengine_tts_model: str = "tts-1"
     volcengine_tts_voice: str = "zh_female_qingxin"
+    # ElevenLabs v3：拟真天花板，支持 audio tag 逐句情绪
+    elevenlabs_tts_api_key: str = ""
+    elevenlabs_tts_base_url: str = "https://api.elevenlabs.io/v1"
+    elevenlabs_tts_model: str = "eleven_v3"
+    elevenlabs_tts_voice: str = ""
+    elevenlabs_tts_output_format: str = "mp3_44100_128"
+    elevenlabs_tts_stream: bool = True
+    # MiniMax Speech：中文最强档，支持 9 种情绪
+    minimax_tts_api_key: str = ""
+    minimax_tts_group_id: str = ""
+    minimax_tts_base_url: str = "https://api.minimaxi.com/v1"
+    minimax_tts_model: str = "speech-2.8-hd"
+    minimax_tts_voice: str = ""
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     cosyvoice_voice: str = "default"
 
@@ -619,6 +661,17 @@ class Settings(BaseSettings):
             "volcengine_tts_base_url",
             "volcengine_tts_model",
             "volcengine_tts_voice",
+            "elevenlabs_tts_api_key",
+            "elevenlabs_tts_base_url",
+            "elevenlabs_tts_model",
+            "elevenlabs_tts_voice",
+            "elevenlabs_tts_output_format",
+            "elevenlabs_tts_stream",
+            "minimax_tts_api_key",
+            "minimax_tts_group_id",
+            "minimax_tts_base_url",
+            "minimax_tts_model",
+            "minimax_tts_voice",
             "tts_voice",
             "cosyvoice_voice",
             # Web search
@@ -660,6 +713,8 @@ class Settings(BaseSettings):
             "siliconflow_tts": self.siliconflow_tts_base_url,
             "volcengine_asr": self.volcengine_asr_base_url,
             "volcengine_tts": self.volcengine_tts_base_url,
+            "elevenlabs_tts": self.elevenlabs_tts_base_url,
+            "minimax_tts": self.minimax_tts_base_url,
         }
         url = url_map.get(sid, "")
         if url:
@@ -679,6 +734,8 @@ class Settings(BaseSettings):
             "siliconflow_tts": self.siliconflow_tts_api_key or self.siliconflow_api_key,
             "volcengine_asr": self.volcengine_asr_access_key,
             "volcengine_tts": self.volcengine_tts_access_key,
+            "elevenlabs_tts": self.elevenlabs_tts_api_key,
+            "minimax_tts": self.minimax_tts_api_key,
         }
         return api_key_map.get(sid, "")
 
@@ -693,6 +750,8 @@ class Settings(BaseSettings):
             "siliconflow_tts": self.siliconflow_tts_model,
             "volcengine_asr": self.volcengine_asr_model,
             "volcengine_tts": self.volcengine_tts_model,
+            "elevenlabs_tts": self.elevenlabs_tts_model,
+            "minimax_tts": self.minimax_tts_model,
         }
         return model_map.get(sid, VOICE_SERVICE_META.get(sid, {}).get("default_model", ""))
 
@@ -705,6 +764,8 @@ class Settings(BaseSettings):
             "cosyvoice": self.cosyvoice_voice,
             "edge_tts": self.tts_voice,
             "volcengine_tts": self.volcengine_tts_voice,
+            "elevenlabs_tts": self.elevenlabs_tts_voice,
+            "minimax_tts": self.minimax_tts_voice,
         }
         return voice_map.get(
             sid, VOICE_SERVICE_META.get(sid, {}).get("default_voice", self.tts_voice)

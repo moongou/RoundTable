@@ -17,13 +17,15 @@ import tempfile
 import time
 import wave
 from io import BytesIO
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.voice.emotion import detect_emotion
 from app.voice.factory import create_asr_provider, create_tts_provider
 from app.voice.openvoice_profiles import openvoice_profile_for_character_id
 
@@ -51,6 +53,9 @@ class TTSRequest(BaseModel):
     voice: str | None = None
     character_id: str | None = None
     speed: float = Field(default=1.0, ge=0.8, le=1.1)
+    role: str | None = None
+    emotion: str | None = None
+    style: str | None = None
 
 
 class TTSResponse(BaseModel):
@@ -397,23 +402,71 @@ def _normalize_siliconflow_voice(voice: str, character_id: str | None = None) ->
 # 后端 TTS 音频缓存：避免相同文本+音色+provider 的重复合成，减少本机 CPU 压力。
 # 键: (provider_id, voice, text)  值: (audio_bytes, media_type, suffix, elapsed_ms, attempts)
 _TTS_AUDIO_CACHE: dict[
-    tuple[str, str, str],
+    tuple[str, str, str, str, str],
     tuple[bytes, str, str, float, int],
 ] = {}
 _TTS_AUDIO_CACHE_MAX = 40  # 最多缓存条目数（40 句 × ~150KB ≈ 6MB）
 # 正在进行中的合成任务：相同 key 的并发请求共享同一个 Future，避免重复合成。
-_TTS_INFLIGHT: dict[tuple[str, str, str], asyncio.Future[tuple[bytes, str, str, float, int]]] = {}
+_TTS_INFLIGHT: dict[
+    tuple[str, str, str, str, str], asyncio.Future[tuple[bytes, str, str, float, int]]
+] = {}
 
 
-def _tts_cache_key(provider_id: str, voice: str, text: str) -> tuple[str, str, str]:
-    return (provider_id, voice, text.strip())
+async def _synthesize_audio(
+    provider: Any,
+    text: str,
+    voice: str,
+    speed: float,
+    emotion: str | None = None,
+    style: str | None = None,
+) -> bytes:
+    """调用 provider 合成音频。
+
+    优先走 `synthesize_safe`（内部按 provider 声明的能力自动降级 emotion/style），
+    同时兼容只实现了 `synthesize` 的鸭子类型 provider。
+    """
+    safe_callable = getattr(provider, "synthesize_safe", None)
+    if callable(safe_callable):
+        return await safe_callable(text, voice=voice, speed=speed, emotion=emotion, style=style)
+    return await provider.synthesize(text, voice=voice, speed=speed)
 
 
-def _tts_cache_get(key: tuple[str, str, str]):
+def _infer_role(character_id: str | None) -> str:
+    """从角色 ID 推断身份，用于情绪推导的基调兜底。"""
+    cid = (character_id or "").strip().lower()
+    if not cid:
+        return ""
+    if cid in {"moderator", "teacher", "li_teacher", "host"}:
+        return "moderator"
+    try:
+        from app.core.thinkers import get_thinker
+
+        if get_thinker(cid):
+            return "thinker"
+    except Exception:  # noqa: BLE001 - 思想家加载失败不影响合成
+        pass
+    return "student"
+
+
+def _tts_cache_key(
+    provider_id: str,
+    voice: str,
+    text: str,
+    emotion: str = "",
+    style: str = "",
+) -> tuple[str, str, str, str, str]:
+    """缓存键包含语气维度，避免同一句不同情绪的音频互相错误命中。"""
+    return (provider_id, voice, text.strip(), emotion or "", style or "")
+
+
+def _tts_cache_get(key: tuple[str, str, str, str, str]):
     return _TTS_AUDIO_CACHE.get(key)
 
 
-def _tts_cache_put(key: tuple[str, str, str], value: tuple[bytes, str, str, float, int]) -> None:
+def _tts_cache_put(
+    key: tuple[str, str, str, str, str],
+    value: tuple[bytes, str, str, float, int],
+) -> None:
     if len(_TTS_AUDIO_CACHE) >= _TTS_AUDIO_CACHE_MAX:
         # 淘汰最早插入的条目（简单 FIFO，足够本场景使用）
         oldest = next(iter(_TTS_AUDIO_CACHE))
@@ -445,21 +498,36 @@ async def text_to_speech(request: TTSRequest) -> Response:
     if provider_id == "siliconflow_tts":
         voice = _normalize_siliconflow_voice(voice, request.character_id)
 
+    # 语气/情绪：请求显式指定优先，否则按台词内容 + 角色身份本地推导（零额外延迟）。
+    role = (request.role or "").strip() or _infer_role(request.character_id)
+    emotion = (request.emotion or "").strip() or detect_emotion(request.text, role)
+    style = (request.style or "").strip() or None
+    if emotion:
+        emotion = emotion.strip()
+
     logger.info(
-        "TTS request: provider=%s character_id=%s voice=%s text_len=%d",
+        "TTS request: provider=%s character_id=%s role=%s voice=%s emotion=%s text_len=%d",
         provider_id,
         request.character_id or "-",
+        role or "-",
         voice,
+        emotion or "-",
         len(request.text),
     )
 
-    cache_key = _tts_cache_key(provider_id, voice, request.text)
+    cache_key = _tts_cache_key(provider_id, voice, request.text, emotion, style or "")
 
     # 命中缓存：直接返回，无需重新合成。
     cached = _tts_cache_get(cache_key)
     if cached is not None:
         cached_audio, cached_media_type, cached_suffix, cached_elapsed_ms, cached_attempts = cached
-        logger.debug("TTS cache hit: provider=%s voice=%s text_len=%d", provider_id, voice, len(request.text))
+        logger.debug(
+            "TTS cache hit: provider=%s voice=%s emotion=%s text_len=%d",
+            provider_id,
+            voice,
+            emotion or "-",
+            len(request.text),
+        )
         return Response(
             content=cached_audio,
             media_type=cached_media_type,
@@ -509,10 +577,13 @@ async def text_to_speech(request: TTSRequest) -> Response:
         for attempt in range(2):
             attempts = attempt + 1
             try:
-                audio_data = await provider.synthesize(
+                audio_data = await _synthesize_audio(
+                    provider,
                     request.text,
                     voice=voice,
                     speed=request.speed,
+                    emotion=emotion or None,
+                    style=style,
                 )
                 break
             except Exception as e:
@@ -568,6 +639,103 @@ async def text_to_speech(request: TTSRequest) -> Response:
         raise HTTPException(status_code=500, detail=f"语音合成失败: {str(e)}")
     finally:
         _TTS_INFLIGHT.pop(cache_key, None)
+
+
+def _stream_media_type(provider_id: str) -> str:
+    """流式端点声明的音频类型：本地 wav 服务与云端 mp3 服务分开处理。"""
+    if provider_id == "disabled" or provider_id in _WAV_VOLUME_GUARD_PROVIDERS:
+        return "audio/wav"
+    return "audio/mpeg"
+
+
+@router.get("/tts/stream")
+async def stream_text_to_speech(
+    text: str = "",
+    provider: str | None = None,
+    voice: str | None = None,
+    character_id: str | None = None,
+    role: str | None = None,
+    emotion: str | None = None,
+    style: str | None = None,
+    speed: float = 1.0,
+) -> StreamingResponse:
+    """流式合成语音，浏览器可边下边播（用于 `<audio src=...>` 渐进播放）。
+
+    与 `POST /tts` 的差异：不做后端缓存、不等待整段合成完成，
+    上游支持流式时首个音频分片会立刻下发，显著降低首包等待。
+    """
+    provider_id = (provider or settings.tts_provider or "").strip()
+    requested_voice = (voice or "").strip()
+
+    if character_id:
+        resolved_voice = _get_voice_for_character(character_id, provider_id)
+    elif requested_voice:
+        resolved_voice = requested_voice
+    else:
+        resolved_voice = settings.get_tts_voice_for_provider(provider_id) or "alloy"
+    if provider_id == "siliconflow_tts":
+        resolved_voice = _normalize_siliconflow_voice(resolved_voice, character_id)
+
+    inferred_role = (role or "").strip() or _infer_role(character_id)
+    resolved_emotion = (emotion or "").strip() or detect_emotion(text, inferred_role)
+    resolved_style = (style or "").strip() or None
+
+    instance = create_tts_provider(provider_id)
+    media_type = _stream_media_type(provider_id)
+
+    async def chunk_iter():
+        try:
+            async for chunk in instance.synthesize_stream(
+                text,
+                voice=resolved_voice,
+                speed=speed,
+                emotion=resolved_emotion or None,
+                style=resolved_style,
+            ):
+                if chunk:
+                    yield chunk
+        except Exception as exc:  # noqa: BLE001 - 流式响应无法改状态码，只能记录后结束
+            logger.error(
+                "流式合成失败: provider=%s voice=%s error=%s",
+                provider_id,
+                resolved_voice,
+                exc,
+            )
+
+    return StreamingResponse(
+        chunk_iter(),
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-TTS-Provider": provider_id,
+            "X-Voice-Used": resolved_voice,
+            "X-Emotion-Used": resolved_emotion or "",
+            "X-Streaming": "1" if getattr(instance, "supports_streaming", False) else "0",
+        },
+    )
+
+
+@router.get("/voices")
+async def list_provider_voices(provider: str = "") -> dict:
+    """列出指定 TTS provider 的可用音色，供设置页「音色工坊」挑选。
+
+    Args:
+        provider: 提供商 ID；为空时使用当前激活的 provider。
+
+    Returns:
+        {"provider": str, "supported": bool, "voices": [{"id","name",...}]}
+    """
+    pid = (provider or settings.tts_provider or "").strip()
+    instance = create_tts_provider(pid)
+    lister = getattr(instance, "list_voices", None)
+    if lister is None:
+        return {"provider": pid, "supported": False, "voices": []}
+    try:
+        voices = await lister()
+    except Exception as e:  # noqa: BLE001 - 统一转换为 502 供前端提示
+        logger.warning("列举音色失败: provider=%s error=%s", pid, e)
+        raise HTTPException(status_code=502, detail=f"获取音色列表失败: {str(e)}")
+    return {"provider": pid, "supported": True, "voices": voices}
 
 
 # ── ASR 端点 ─────────────────────────────────────────────────────────────────

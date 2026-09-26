@@ -336,6 +336,23 @@ class ApiClient {
     return Map<String, dynamic>.from(response.data as Map);
   }
 
+  /// 拉取指定 TTS 服务的云端音色库（服务端 `/voice/voices`）
+  ///
+  /// 用于 ElevenLabs / MiniMax 这类音色与账号绑定的服务，
+  /// 让用户直接从自己的音色列表里挑选并试听。
+  Future<List<VoiceLibraryVoice>> fetchVoiceLibrary(String providerId) async {
+    final response = await _dio.get(
+      '/api/v1/voice/voices',
+      queryParameters: <String, dynamic>{'provider': providerId},
+    );
+    final data = Map<String, dynamic>.from(response.data as Map);
+    return List<Map<String, dynamic>>.from(
+            data['voices'] ?? const <Map<String, dynamic>>[])
+        .map(VoiceLibraryVoice.fromJson)
+        .where((voice) => voice.id.isNotEmpty)
+        .toList();
+  }
+
   /// 测试 LLM 提供商连接，返回可用模型列表
   Future<ProviderTestResult> testProvider({
     required String providerId,

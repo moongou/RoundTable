@@ -317,6 +317,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             setState(() => _statusText = '状态: $newState');
           }
         }
+      case WsEventType.disconnected:
+        setState(() => _statusText = '连接已断开');
+        break;
+      case WsEventType.resumed:
+        setState(() => _statusText = '已重新连接');
+        break;
       case WsEventType.system:
         final data = event.data;
         if (data != null) {
